@@ -25,6 +25,8 @@ import re
 import shutil
 import subprocess  # nosec B404 - runs a local browser binary on a file we wrote
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1874,30 +1876,92 @@ def test_the_config_tab_draws_when_reached_from_another_tab(tmp_path):
 # jobs ask `tests/jev_fakes.FakeJevClient` — never TypeSafe. Each wait in the probe is a fetch
 # to the server, so real time passes for the job thread while Chrome's virtual clock waits.
 
-_SERVE_PROBE = (
-    "<script>"
-    + _SEEN
+#: The served probes' helpers, all prefixed `s` (the probe shares the page's scope). Every wait
+#: fetches a path the server does not have (a quick 404, never a call the page makes), so real
+#: time passes for the job thread while Chrome's clock waits, and gives up after 30 real
+#: seconds by the server's `Date` (the virtual budget is large: the waits bound the probe).
+#: `refresh` is wrapped to count the page's reloads; `fetch` to count estimate replies and keep
+#: the last one (the server's own numbers, to compare the panel with).
+_SERVE_JS = (
+    _SEEN
     + r"""
 const sOut = {};
+const sId = id => document.getElementById(id);
+// Bounded by REAL time — the server's `Date` header — since the page's clock is virtual.
 const sWait = async (cond, what) => {
-  for (let i = 0; i < 400; i++) {
+  let start = null;
+  for (;;) {
     if (cond()) return;
-    await fetch('/api/job');
+    const r = await sFetch0.call(window, '/probe-wait');
+    const now = Date.parse(r.headers.get('Date'));
+    if (start === null) start = now;
+    if (now - start > 30000) throw new Error('nunca: ' + what + ' · ' + JSON.stringify(sPanel()));
   }
-  throw new Error('nunca: ' + what);
 };
 const sStep = async (name, fn) => { try { sOut[name] = await fn(); } catch (e) { sOut[name] = 'ERROR ' + e.message; } };
-const sCard = id => document.getElementById('post-' + id);
+const sCard = id => sId('post-' + id);
 const sButtons = (root) => (root ? [...root.querySelectorAll('button.evalb')].filter(seen).map(b => b.textContent) : []);
 const sPress = (root, text) => [...root.querySelectorAll('button.evalb')].find(b => seen(b) && b.textContent === text).click();
 const sPanel = () => ({
-  title: txt(document.getElementById('ask-title')),
-  est: txt(document.getElementById('ask-est')),
-  error: txt(document.getElementById('ask-error')),
-  force: seen(document.getElementById('ask-force')) ? document.getElementById('ask-force').checked : null,
-  go: seen(document.getElementById('ask-go')) ? !document.getElementById('ask-go').disabled : null,
-  progress: txt(document.getElementById('ask-progress')),
+  shown: seen(sId('ask')),
+  title: txt(sId('ask-title')),
+  est: txt(sId('ask-est')),
+  error: txt(sId('ask-error')),
+  force: seen(sId('ask-force')) ? sId('ask-force').checked : null,
+  force_label: seen(sId('ask-force')) ? txt(sId('ask-force').parentNode) : null,
+  go: seen(sId('ask-go')) ? !sId('ask-go').disabled : null,
+  go_text: txt(sId('ask-go')),
+  stop: txt(sId('ask-stop')),
+  reload: txt(sId('ask-reload')),
+  close: txt(sId('ask-cancel')),
+  progress: txt(sId('ask-progress')),
 });
+const sBar = () => {
+  const t = document.querySelector('#ask [role=progressbar]');
+  const f = t && t.firstElementChild;
+  return {now: t && t.getAttribute('aria-valuenow'), width: f && f.style.width,
+    fill: seen(f) ? f.getBoundingClientRect().width : null, track: seen(t) ? t.getBoundingClientRect().width : null};
+};
+const sHeader = () => {
+  sId('hist').open = true;
+  return {kpis: txt(sId('kpis')), numbers: txt(sId('numbers-sub')), runs: txt(sId('hist')),
+    runs_rows: [...document.querySelectorAll('#hist tbody tr')].filter(seen).length,
+    before_log: txt(sId('before-log')), count: txt(sId('count'))};
+};
+let sRefreshed = 0;
+const sRefresh0 = refresh;
+refresh = function (blob) { sRefresh0(blob); sRefreshed++; };
+let sEstimates = 0, sLastEstimate = null;
+const sFetch0 = window.fetch;
+window.fetch = function (u, init) {
+  const p = sFetch0.call(window, u, init);
+  if (String(u).includes('/estimate')) {
+    p.then(r => r.clone().json()).then(j => { sLastEstimate = j; sEstimates++; }, () => { sEstimates++; });
+  }
+  return p;
+};
+const sNext = async (n) => {
+  await sWait(() => seen(sId('evalnext')), 'el control de los siguientes');
+  const box = sId('evalnext');
+  const input = box.querySelector('input');
+  input.value = String(n);
+  input.dispatchEvent(new Event('input'));
+  sPress(box, 'Evaluar los ' + n + ' siguientes sin evaluar');
+  await sWait(() => sPanel().go, 'la estimación');
+};
+const sDone = () => {
+  const pre = document.createElement('pre');
+  pre.id = 'probe';
+  pre.textContent = JSON.stringify(sOut);
+  document.body.appendChild(pre);
+};
+"""
+)
+
+_SERVE_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
 (async () => {
   await sStep('before', async () => {
     await sWait(() => seen(sCard('3')), 'la tarjeta 3');
@@ -1905,84 +1969,153 @@ const sPanel = () => ({
       card3: sButtons(sCard('3')),
       card1: sButtons(sCard('1')),
       copy: [...document.querySelectorAll('.ask code')].filter(seen).length,
-      next: sButtons(document.getElementById('evalnext')),
-      order: seenCards(document.getElementById('cards')),
+      next: sButtons(sId('evalnext')),
+      order: seenCards(sId('cards')),
     };
   });
   await sStep('estimate', async () => {
     sPress(sCard('3'), 'Evaluar este post');
-    await sWait(() => (txt(document.getElementById('ask-est')) || '').includes('por evaluar'), 'la estimación');
-    return sPanel();
+    await sWait(() => sPanel().go, 'la estimación');
+    return Object.assign(sPanel(), {focused: document.activeElement && document.activeElement.id});
   });
   await sStep('done', async () => {
-    document.getElementById('ask-go').click();
-    await sWait(() => (txt(document.getElementById('ask-progress')) || '').includes('guardada'), 'el final del trabajo');
-    await sWait(() => !sButtons(sCard('3')).includes('Evaluar este post'), 'la tarjeta 3 nueva');
+    sId('ask-go').click();
+    await sWait(() => sRefreshed > 0, 'el final del trabajo');
     return Object.assign(sPanel(), {
       card3: sButtons(sCard('3')),
       card3text: txt(sCard('3')),
-      order: seenCards(document.getElementById('cards')),
+      order: seenCards(sId('cards')),
     });
   });
   await sStep('force', async () => {
     sPress(sCard('3'), 'Re-evaluar');
-    await sWait(() => (txt(document.getElementById('ask-est')) || '').includes('re-evalúa'), 'la estimación forzada');
-    const forced = sPanel();
-    document.getElementById('ask-force').click();
-    await sWait(() => (txt(document.getElementById('ask-error')) || '').includes('nada que evaluar'), 'la negativa');
+    await sWait(() => (sPanel().error || '').includes('nada que evaluar'), 'la negativa sin forzar');
     const unforced = sPanel();
-    document.getElementById('ask-cancel').click();
-    return {forced: forced, unforced: unforced, closed: !seen(document.getElementById('ask'))};
+    sId('ask-force').click();
+    await sWait(() => (sPanel().est || '').includes('re-evalúa') && sPanel().go, 'la estimación forzada');
+    const forced = sPanel();
+    // The box changed after the estimate with no new one (no change event): Confirmar refuses.
+    sId('ask-force').checked = false;
+    sId('ask-go').click();
+    await sWait(() => (sPanel().error || '').includes('casilla'), 'la negativa de la casilla');
+    const mismatch = sPanel();
+    // Two estimates in flight, the forced one slower (the server delays it): the last counts.
+    const n0 = sEstimates;
+    sId('ask-force').checked = true;
+    estimate();
+    sId('ask-force').checked = false;
+    estimate();
+    const held = sId('ask-force').disabled;
+    await sWait(() => sEstimates >= n0 + 2, 'las dos estimaciones');
+    for (let i = 0; i < 5; i++) await sFetch0.call(window, '/probe-wait');
+    const raced = Object.assign(sPanel(), {held: held, released: !sId('ask-force').disabled});
+    // Ticked by hand: a forced estimate, then the forced job with what was estimated.
+    sId('ask-force').click();
+    await sWait(() => (sPanel().est || '').includes('re-evalúa') && sPanel().go, 'la estimación forzada otra vez');
+    const r0 = sRefreshed;
+    sId('ask-go').click();
+    await sWait(() => sRefreshed > r0, 'el trabajo forzado');
+    const ran = sPanel();
+    sId('ask-cancel').click();
+    return {unforced, forced, mismatch, raced, ran, closed: !seen(sId('ask'))};
+  });
+  await sStep('escape', async () => {
+    sPress(sCard('4'), 'Evaluar este post');
+    await sWait(() => sPanel().go, 'la estimación del 4');
+    const open = sPanel().shown;
+    const onTitle = document.activeElement === sId('ask-title');
+    const opener = [...sCard('4').querySelectorAll('button.evalb')].find(b => b.textContent === 'Evaluar este post');
+    sId('ask').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    await sFetch0.call(window, '/probe-wait');
+    return {open, closed: !seen(sId('ask')), on_title: onTitle,
+      focus_back: document.activeElement === opener, roles: {
+      dialog: sId('ask').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
+      live: sId('ask-progress').getAttribute('aria-live'),
+      bar: !!document.querySelector('#ask [role=progressbar][aria-valuemin="0"][aria-valuemax="100"]')}};
   });
   await sStep('places', async () => {
     const go = async (hash, root) => {
       location.hash = hash;
-      await sWait(() => sButtons(document.getElementById(root)).length > 0, hash);
-      return sButtons(document.getElementById(root));
+      await sWait(() => sButtons(sId(root)).length > 0, hash);
+      return sButtons(sId(root));
     };
     const band = Object.keys(DATA.post_sets.bands).find(k => DATA.post_sets.bands[k].length);
     const cx = Object.keys(DATA.post_sets.cx)[0];
     const places = {
       posts_topic: await go('#posts?f=all&t=startups', 'active'),
       topic: await go('#topics?t=startups', 'topic-detail'),
-      topic_pair: await go('#topics?t=startups&cx=' + encodeURIComponent(cx), 'topic-pair'),
+      topic_pair: await go('#topics?t=ai-coding&cx=' + encodeURIComponent(cx), 'topic-pair'),
       band: await go('#compare?b=' + encodeURIComponent(band), 'compare-list'),
     };
-    sPress(document.getElementById('compare-list'), 'Evaluar estos posts');
-    await sWait(() => (txt(document.getElementById('ask-est')) || '').includes('por evaluar'), 'la estimación de la banda');
+    sPress(sId('compare-list'), 'Evaluar estos posts');
+    await sWait(() => (sPanel().error || '').includes('nada que evaluar'), 'la estimación de la banda');
     places.band_panel = sPanel();
-    document.getElementById('ask-cancel').click();
+    sId('ask-cancel').click();
     return places;
   });
-  const pre = document.createElement('pre');
-  pre.id = 'probe';
-  pre.textContent = JSON.stringify(sOut);
-  document.body.appendChild(pre);
+  sDone();
 })();
 </script>"""
 )
 
 
-@pytest.fixture(scope="module")
-def serve_probed(tmp_path_factory) -> dict[str, Any]:
+def _page_saw(done: int = 0) -> tuple[Any, Any]:
+    """A `JevService` subclass that notes when the PAGE has been told a job is running with at
+    least `done` posts done, and the event it sets: a fake answer waits on it, so what the
+    page must see mid-job is there however slowly Chrome runs (never a guessed sleep)."""
     import threading
 
-    from tests.test_jev_serve import _Recorder, _repo
+    from xbrain.jev.service import JevService
+
+    saw = threading.Event()
+
+    class _Watched(JevService):
+        def job_view(self) -> dict[str, Any]:
+            view = super().job_view()
+            if view["state"] == "running" and view["done"] >= done:
+                saw.set()
+            return view
+
+    return _Watched, saw
+
+
+def _served_dump(
+    root: Path,
+    probe: str,
+    *,
+    client: Any = None,
+    make_client: Any = None,
+    jev: str = "",
+    seed_tokens: int = 100,
+    prepare: Any = None,
+    base: Any = None,
+    patch: Any = None,
+    before_dump: Any = None,
+) -> dict[str, Any]:
+    """`probe` run in Chrome against a real `JevService` (or `base`, a subclass) over `_repo`,
+    every job asking `client` — a fake, never TypeSafe. `prepare(cfg)` edits the repo first,
+    `patch(monkeypatch)` swaps what a scenario needs, `before_dump(service, port)` runs with
+    the server up. Returns the probe's output with the last job's view as `job`."""
+    import threading
+
+    from tests.test_jev_serve import _repo
     from xbrain.jev.serve import make_server
     from xbrain.jev.service import JevService
 
     _need_chrome()
-    root = tmp_path_factory.mktemp("served")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        cfg = _repo(root, monkeypatch)
-        client = _Recorder()
+        cfg = _repo(root, monkeypatch, jev=jev, seed_tokens=seed_tokens)
+        if prepare is not None:
+            prepare(cfg)
+        if patch is not None:
+            patch(monkeypatch)
 
-        class _Probed(JevService):
+        class _Probed(base or JevService):
             def page_html(self) -> str:
-                return super().page_html().replace("</body>", _SERVE_PROBE + "</body>")
+                return super().page_html().replace("</body>", probe + "</body>")
 
-        service = _Probed(cfg, lambda: client)
+        service = _Probed(cfg, make_client or (lambda: client))
         server = make_server(service, 0)
         thread = threading.Thread(
             target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
@@ -1990,15 +2123,61 @@ def serve_probed(tmp_path_factory) -> dict[str, Any]:
         thread.start()
         try:
             port = server.server_address[1]
-            seen = _dump(f"http://127.0.0.1:{port}/#posts?f=all", budget_ms=60000)
+            if before_dump is not None:
+                before_dump(service, port)
+            seen = _dump(f"http://127.0.0.1:{port}/#posts?f=all", budget_ms=900000)
+            service.wait(15)
+            seen["job"] = JevService.job_view(service)
         finally:
             server.shutdown()
             server.server_close()
             service.stop()
-        seen["asked"] = client.asked
         return seen
     finally:
         monkeypatch.undo()
+
+
+def _stale_post_2(cfg: Any) -> None:
+    """Post 2 («startups», answered by the seed pass) edited since: its answer is stale."""
+    from xbrain.store import load_store, save_store
+
+    items = load_store(cfg.items_path)
+    items["2"].text = "Seed round tips, revisado"
+    save_store(items, cfg.items_path)
+
+
+@pytest.fixture(scope="module")
+def serve_probed(tmp_path_factory) -> dict[str, Any]:
+    import time
+
+    from tests.test_jev_serve import _Recorder
+    from xbrain.jev.service import JevService
+
+    class _SlowForce(JevService):
+        """A forced estimate answers late, so two estimates in flight come back reversed."""
+
+        def estimate(self, kind: str, body: Any) -> dict[str, Any]:
+            if isinstance(body, dict) and body.get("force"):
+                time.sleep(0.5)
+            return super().estimate(kind, body)
+
+    client = _Recorder()
+    seen = _served_dump(
+        tmp_path_factory.mktemp("served"),
+        _SERVE_PROBE,
+        client=client,
+        prepare=_stale_post_2,
+        base=_SlowForce,
+    )
+    seen["asked"] = client.asked
+    return seen
+
+
+#: What the force checkbox says, word for word: what it costs and what it replaces.
+_FORCE_LABEL = (
+    "Volver a evaluar también los posts que ya tienen evaluación vigente: se pagan otra vez y "
+    "se sustituye su evaluación (antes se guarda una copia)"
+)
 
 
 @_requires_chrome
@@ -2012,14 +2191,19 @@ def test_served_cards_offer_to_evaluate_instead_of_a_command(serve_probed):
 
 
 @_requires_chrome
-def test_served_estimate_shows_the_servers_count_and_cost_before_anything_is_spent(serve_probed):
+def test_served_estimate_says_what_it_will_pay_before_anything_is_spent(serve_probed):
     estimate = serve_probed["estimate"]
 
     assert estimate["title"] == "Evaluar este post"
-    assert estimate["est"].startswith("1 post por evaluar · ~0,00000 $")
-    assert "Es una estimación: la media de 2 de 2 respuestas ya pagadas" in estimate["est"]
-    assert "Tope por trabajo: 1,00 $." in estimate["est"]
+    # Post 2 is stale: the mean is the one current priced answer's.
+    assert estimate["est"] == (
+        "1 post por evaluar. Coste estimado: ~0,00000 $ (coste medio por post de la "
+        "evaluación ya pagada × 1 post). Nunca se gastará más de 1,00 $ en esta tanda."
+    )
+    assert estimate["go_text"] == "Evaluar y pagar ~0,00000 $"
     assert (estimate["force"], estimate["go"], estimate["error"]) == (False, True, None)
+    assert estimate["force_label"] == _FORCE_LABEL
+    assert estimate["focused"] == "ask-title"
 
 
 @_requires_chrome
@@ -2035,42 +2219,616 @@ def test_served_confirm_runs_one_job_and_the_card_updates_in_place(serve_probed)
 
 
 @_requires_chrome
-def test_served_force_is_explicit_and_a_refusal_is_shown_inline(serve_probed):
+def test_served_force_is_unticked_until_the_reader_ticks_it(serve_probed):
     force = serve_probed["force"]
 
-    assert force["forced"]["force"] is True
-    assert "1 vigente que se re-evalúa" in force["forced"]["est"]
-    assert force["forced"]["go"] is True
-    assert force["unforced"]["force"] is False
-    assert force["unforced"]["go"] is False
+    assert force["unforced"]["force"] is False and force["unforced"]["go"] is False
     assert force["unforced"]["error"].startswith("No se puede evaluar: nada que evaluar")
+    assert force["forced"]["force"] is True and force["forced"]["go"] is True
+    assert "1 vigente que se re-evalúa" in force["forced"]["est"]
+    # The forced job ran with what was estimated, and names the copy made before it.
+    assert force["ran"]["progress"].startswith("1 evaluación guardada")
+    assert "copia previa de las evaluaciones: " in force["ran"]["progress"]
+    assert "/data/jev/topics." in force["ran"]["progress"] and force["ran"]["progress"].endswith(
+        ".bak"
+    )
+    assert serve_probed["asked"] == ["3", "3"]
     assert force["closed"] is True
-    # Only the one confirmed job reached the client.
-    assert serve_probed["asked"] == ["3"]
 
 
 @_requires_chrome
-def test_the_static_page_has_no_evaluate_control(probed):
-    """The file `jev dashboard` writes is not served: «copiar comando», never a button that
-    would POST to a server that is not there."""
-    data, _ = probed
-    page = render_jev_dashboard_html(data)
+def test_served_confirm_refuses_when_the_checkbox_changed_since_the_estimate(serve_probed):
+    mismatch = serve_probed["force"]["mismatch"]
 
-    assert data["serve"] is None
-    assert '"serve": null' in page
+    assert mismatch["force"] is False and mismatch["go"] is False
+    assert "casilla" in mismatch["error"] and "vuelve a estimar" in mismatch["error"]
+
+
+@_requires_chrome
+def test_served_a_late_estimate_reply_never_overwrites_the_last_one(serve_probed):
+    """The forced estimate was sent first and answered last: the panel keeps the unforced
+    answer, as the checkbox shows."""
+    raced = serve_probed["force"]["raced"]
+
+    assert raced["force"] is False and raced["go"] is False
+    # The box is held while an estimate is out, and given back with the answer.
+    assert raced["held"] is True and raced["released"] is True
+    assert "re-evalúa" not in (raced["est"] or "")
+    assert raced["error"].startswith("No se puede evaluar: nada que evaluar")
+
+
+@_requires_chrome
+def test_served_panel_is_a_labelled_dialog_that_escape_closes(serve_probed):
+    escape = serve_probed["escape"]
+
+    assert escape["open"] is True and escape["closed"] is True
+    # Focus is on the panel while it is open, and back on the very button that opened it.
+    assert escape["on_title"] is True and escape["focus_back"] is True
+    assert escape["roles"] == {"dialog": "dialog", "error": "alert", "live": "polite", "bar": True}
 
 
 @_requires_chrome
 def test_served_topic_pair_and_band_views_offer_to_evaluate_their_posts(serve_probed):
     places = serve_probed["places"]
 
-    # After the job only post 4 is still unevaluated under «startups».
-    assert places["posts_topic"] == ["Evaluar este topic (1 sin evaluar)"]
-    assert "Evaluar este topic (1 sin evaluar)" in places["topic"]
+    # Under «startups»: post 2 (its answer is stale) and post 4 (never asked).
+    assert places["posts_topic"] == ["Evaluar este topic (2 sin evaluar)"]
+    assert "Evaluar este topic (2 sin evaluar)" in places["topic"]
     assert places["topic_pair"][0] == "Evaluar estos posts"
     assert places["band"][0] == "Evaluar estos posts"
-    # Posts on a pair or band are current: the panel opens forced, and says what it re-asks.
-    assert places["band_panel"]["force"] is True
-    assert "vigente que se re-evalúa" in places["band_panel"]["est"] or (
-        "vigentes que se re-evalúan" in places["band_panel"]["est"]
+    # Posts on a band are current: unticked, the panel says there is nothing to ask.
+    assert places["band_panel"]["force"] is False
+    assert places["band_panel"]["error"].startswith("No se puede evaluar: nada que evaluar")
+    assert "la casilla «Volver a evaluar también…»" in places["band_panel"]["error"]
+    # Nothing to ask costs nothing: no «Coste estimado» of zero posts.
+    assert "Coste estimado" not in places["band_panel"]["est"]
+
+
+# --------------------------------------------------------------------------- one job, followed
+
+
+_PROGRESS_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('before', async () => { await sWait(() => seen(sCard('3')), 'la tarjeta 3'); return sHeader(); });
+  await sStep('estimate', async () => {
+    await sNext(3);
+    return Object.assign(sPanel(), {server: sLastEstimate});
+  });
+  await sStep('mid', async () => {
+    sId('ask-go').click();
+    await sWait(() => /^[12] de 3 posts/.test(sPanel().progress || ''), 'la mitad del trabajo');
+    return Object.assign(sPanel(), sBar());
+  });
+  await sStep('end', async () => {
+    await sWait(() => sRefreshed > 0, 'la recarga');
+    return Object.assign(sPanel(), sHeader(), {bar: sBar(),
+      cards: ['3', '4', '5'].map(i => sButtons(sCard(i)))});
+  });
+  await sStep('elsewhere', async () => {
+    const d = await (await fetch('/api/data')).json();
+    location.hash = '#topics?t=ai-coding';
+    await sWait(() => sButtons(sId('topic-detail')).length > 0, 'el topic');
+    const topic = sButtons(sId('topic-detail')).filter(b => b.startsWith('Evaluar este topic'));
+    location.hash = '#config';
+    const kinds = () => [...document.querySelectorAll('#config-body .kind')].filter(seen);
+    await sWait(() => kinds().length > 0, 'la configuración');
+    const pending = kinds().find(k => txt(k.querySelector('.lab')) === 'Lo que falta');
+    return {topic, pending_big: txt(pending.querySelector('.cnum')), pending_why: txt(pending.querySelector('p')),
+      data_pending: d.config.estimate.pending,
+      data_uneval: d.posts.filter(p => p.slugs.includes('ai-coding') && p.in.includes('uneval') && !p.no_evidence).length};
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def progress_probed(tmp_path_factory) -> dict[str, Any]:
+    """Víctor's machine: priced answers and NO runs.jsonl yet. A non-default cap, and a mean
+    that shows at five decimals. The second answer waits until the page has been told one
+    post is done, so the half-way state is on screen."""
+    from tests.test_jev_serve import _Recorder
+
+    watched, saw = _page_saw(done=1)
+
+    class _HalfWay(_Recorder):
+        def ask(self, state, questions):
+            if len(self.asked) == 1:
+                saw.wait(60)
+                time.sleep(0.3)
+            return super().ask(state, questions)
+
+    def _no_run_log(cfg: Any) -> None:
+        cfg.jev_runs_path.unlink()
+
+    return _served_dump(
+        tmp_path_factory.mktemp("progress"),
+        _PROGRESS_PROBE,
+        client=_HalfWay(input_tokens=1000),
+        base=watched,
+        jev="serve_max_usd = 0.25\n",
+        seed_tokens=1000,
+        prepare=_no_run_log,
     )
+
+
+@_requires_chrome
+def test_served_money_in_the_panel_is_the_servers_estimate_and_cap(progress_probed):
+    estimate = progress_probed["estimate"]
+    server = estimate["server"]
+
+    # 1000 tokens per answer at 0.042 $/MTok = 4.2e-5 $ a post; three posts.
+    assert server["usd"] == pytest.approx(3 * 4.2e-5) and server["max_usd"] == 0.25
+    assert estimate["go_text"] == "Evaluar y pagar ~0,00013 $"
+    assert (
+        "Coste estimado: ~0,00013 $ (coste medio por post de las 2 evaluaciones ya pagadas × "
+        "3 posts). Nunca se gastará más de 0,25 $ en esta tanda."
+    ) in estimate["est"]
+    assert estimate["est"].startswith("3 posts por evaluar")
+
+
+@_requires_chrome
+def test_served_progress_mid_job_shows_the_share_done(progress_probed):
+    mid = progress_probed["mid"]
+    done = int(mid["progress"][0])
+
+    assert mid["progress"].startswith(f"{done} de 3 posts · ")
+    assert mid["now"] == str(round(100 * done / 3)) and mid["width"] == mid["now"] + "%"
+    # The fill is drawn short of its track (no rule from the cost strip stretches it).
+    assert 0 <= mid["fill"] < 0.9 * mid["track"]
+    assert mid["stop"] == "Parar (se guarda lo ya pagado)" and mid["close"] == "Ocultar"
+
+
+@_requires_chrome
+def test_served_a_job_without_a_run_log_redraws_the_header_and_the_history(progress_probed):
+    before, end = progress_probed["before"], progress_probed["end"]
+
+    assert "sin pasadas registradas" in before["kpis"]
+    assert "Aún no hay pasadas registradas" in before["runs"]
+    assert before["before_log"].startswith("2 evaluaciones fuera del registro de pasadas")
+    assert end["error"] is None
+    assert end["progress"].startswith("3 evaluaciones guardadas · ~0,00013 $ gastado")
+    assert end["bar"]["now"] == "100"
+    assert "3 peticiones" in end["kpis"] and "1 pasada" in end["kpis"]
+    assert "sin pasadas registradas" not in end["kpis"]
+    assert end["runs_rows"] == 1 and "Aún no hay pasadas registradas" not in end["runs"]
+    assert "2 posts comparados" in before["numbers"] and "5 posts comparados" in end["numbers"]
+    assert end["count"] == before["count"]
+    assert end["cards"] == [["Re-evaluar"]] * 3
+
+
+@_requires_chrome
+def test_served_other_tabs_show_the_data_after_the_job(progress_probed):
+    elsewhere = progress_probed["elsewhere"]
+
+    assert elsewhere["data_uneval"] == 0
+    assert elsewhere["topic"] == ["Evaluar este topic (0 sin evaluar)"]
+    posts = elsewhere["data_pending"]["posts"]
+    assert posts == 0
+    assert elsewhere["pending_why"].startswith(f"{posts} posts")
+
+
+# --------------------------------------------------------------------------- a job not started here
+
+_RESUME_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('resumed', async () => {
+    await sWait(() => sPanel().shown && /de 3 posts/.test(sPanel().progress || ''), 'el panel del trabajo en curso');
+    return sPanel();
+  });
+  await sStep('end', async () => {
+    await sWait(() => sRefreshed > 0, 'la recarga');
+    return Object.assign(sPanel(), {cards: ['3', '4', '5'].map(i => sButtons(sCard(i)))});
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+def _start_job(service: Any, port: int, body: dict[str, Any]) -> None:
+    """Start a job over HTTP, as another tab would."""
+    import http.client
+
+    from xbrain.jev.serve import TOKEN_HEADER
+
+    headers = {
+        "Content-Type": "application/json",
+        TOKEN_HEADER: service.token,
+        "Origin": f"http://127.0.0.1:{port}",
+    }
+    replies = []
+    for path, sent in (("/api/topics/estimate", body), ("/api/topics/evaluate", None)):
+        if sent is None:
+            sent = {**body, "confirm_token": replies[-1]["confirm_token"]}
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("POST", path, body=json.dumps(sent), headers=headers)
+        replies.append(json.loads(conn.getresponse().read()))
+        conn.close()
+    assert replies[-1]["state"] == "running", replies
+
+
+@pytest.fixture(scope="module")
+def resume_probed(tmp_path_factory) -> dict[str, Any]:
+    """The page opened (or reloaded) while a job runs: its first answer waits until the page
+    has been told the job is running, however long Chrome takes to start."""
+    from tests.test_jev_serve import _Recorder
+
+    watched, saw = _page_saw()
+
+    class _SlowFirst(_Recorder):
+        def ask(self, state, questions):
+            if not self.asked:
+                saw.wait(60)
+            return super().ask(state, questions)
+
+    return _served_dump(
+        tmp_path_factory.mktemp("resume"),
+        _RESUME_PROBE,
+        client=_SlowFirst(),
+        base=watched,
+        before_dump=lambda service, port: _start_job(service, port, {"unevaluated": 3}),
+    )
+
+
+@_requires_chrome
+def test_served_a_page_opened_mid_job_follows_it(resume_probed):
+    resumed, end = resume_probed["resumed"], resume_probed["end"]
+
+    assert resumed["title"] == "Evaluación de topics en curso"
+    assert re.match(r"^[0-2] de 3 posts · ", resumed["progress"])
+    assert resumed["stop"] == "Parar (se guarda lo ya pagado)" and resumed["go"] is None
+    assert end["progress"].startswith("3 evaluaciones guardadas")
+    assert end["cards"] == [["Re-evaluar"]] * 3
+
+
+_WATCH_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+const sAsk = async (body) => {
+  const h = {'Content-Type': 'application/json', 'X-Xbrain-Token': DATA.serve.token};
+  const e = await (await sFetch0('/api/topics/estimate', {method: 'POST', headers: h, body: JSON.stringify(body)})).json();
+  const r = await sFetch0('/api/topics/evaluate', {method: 'POST', headers: h,
+    body: JSON.stringify(Object.assign({}, body, {confirm_token: e.confirm_token}))});
+  return r.status;
+};
+(async () => {
+  await sStep('finished_elsewhere', async () => {
+    await sWait(() => seen(sCard('3')), 'la tarjeta 3');
+    const idle = sPanel().shown;
+    const status = await sAsk({ids: ['3']});
+    await sWait(() => sButtons(sCard('3')).includes('Re-evaluar'), 'la tarjeta 3 recargada');
+    return {idle, status, card3: sButtons(sCard('3'))};
+  });
+  await sStep('running_elsewhere', async () => {
+    const status = await sAsk({ids: ['4']});
+    await sWait(() => sPanel().shown && (sPanel().progress || '').includes('de 1 post '), 'el panel del trabajo de otra pestaña');
+    const during = sPanel();
+    await sWait(() => sButtons(sCard('4')).includes('Re-evaluar'), 'la tarjeta 4 recargada');
+    return {status, during, after: sPanel(), card4: sButtons(sCard('4'))};
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def watch_probed(tmp_path_factory) -> dict[str, Any]:
+    """An idle page while another tab runs jobs: one quick, and one (post 4) whose answer
+    waits until the page has been told it is running."""
+    from tests.test_jev_serve import _Recorder
+
+    watched, saw = _page_saw()
+
+    class _Slow4(_Recorder):
+        def ask(self, state, questions):
+            if state["post"].startswith("Series A"):
+                saw.wait(60)
+            return super().ask(state, questions)
+
+    return _served_dump(
+        tmp_path_factory.mktemp("watch"), _WATCH_PROBE, client=_Slow4(), base=watched
+    )
+
+
+@_requires_chrome
+def test_served_an_idle_page_reloads_when_another_tab_s_job_ends(watch_probed):
+    done = watch_probed["finished_elsewhere"]
+
+    assert done["idle"] is False and done["status"] == 202
+    assert done["card3"] == ["Re-evaluar"]
+
+
+@_requires_chrome
+def test_served_an_idle_page_follows_a_job_another_tab_started(watch_probed):
+    running = watch_probed["running_elsewhere"]
+
+    assert running["status"] == 202
+    assert running["during"]["title"] == "Evaluación de topics en curso"
+    assert re.match(r"^0 de 1 post · ", running["during"]["progress"])
+    assert running["card4"] == ["Re-evaluar"]
+    assert running["after"]["progress"].startswith("1 evaluación guardada")
+
+
+# --------------------------------------------------------------------------- how a job can end
+
+_END_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+const sScenario = /*SCENARIO*/;
+(async () => {
+  await sStep('estimate', async () => { await sNext(sScenario.n); return sPanel(); });
+  await sStep('run', async () => {
+    sId('ask-go').click();
+    await sWait(() => sPanel().stop !== null || sPanel().close === 'Cerrar', 'el trabajo');
+    let hidden = null;
+    if (sScenario.hide) { sId('ask-cancel').click(); hidden = !sPanel().shown; }
+    if (sScenario.stop) {
+      await sWait(() => /[1-9]\d* respuesta/.test(sPanel().progress || ''), 'la primera respuesta');
+      sPress(sId('ask'), 'Parar (se guarda lo ya pagado)');
+    }
+    return {hidden};
+  });
+  await sStep('end', async () => {
+    await sWait(() => sRefreshed > 0 || sPanel().reload !== null, 'el final');
+    return sPanel();
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+def _end_probe(n: int, *, hide: bool = False, stop: bool = False) -> str:
+    return _END_PROBE.replace("/*SCENARIO*/", json.dumps({"n": n, "hide": hide, "stop": stop}))
+
+
+def _ended(tmp_path: Path, scenario: str) -> dict[str, Any]:
+    """One job that ends in `scenario`, the panel hidden by the reader right after Confirmar
+    (except `stop`, which presses «Parar»)."""
+    import threading
+    from dataclasses import replace
+
+    from tests.test_jev_serve import _Recorder
+    from xbrain.jev import service as service_module
+    from xbrain.jev.client import JevError
+    from xbrain.jev.service import JevService
+
+    def _outcome(change: Any) -> Any:
+        real = service_module.run_topics
+
+        def run(*args: Any, **kwargs: Any) -> Any:
+            return change(real(*args, **kwargs))
+
+        return lambda monkeypatch: monkeypatch.setattr(service_module, "run_topics", run)
+
+    if scenario == "tope":
+        # Answers cost 3× the mean: after the first, the next one's reservation passes the cap.
+        return _served_dump(
+            tmp_path,
+            _end_probe(2, hide=True),
+            client=_Recorder(input_tokens=3000),
+            seed_tokens=1000,
+            jev="serve_max_usd = 0.0001\n",
+        )
+    if scenario == "error":
+
+        def _no_key() -> Any:
+            raise JevError("TYPESAFE_API_KEY no encontrada")
+
+        return _served_dump(tmp_path, _end_probe(1, hide=True), make_client=_no_key)
+    if scenario == "failures":
+
+        class _Mixed(_Recorder):
+            def ask(self, state, questions):
+                if state["post"].startswith("Series A"):
+                    raise JevError("respuesta ilegible")
+                result = super().ask(state, questions)
+                if state["post"].startswith("Agents"):
+                    return replace(result, provider="fake", input_tokens=None)
+                return result
+
+        return _served_dump(
+            tmp_path,
+            _end_probe(3, hide=True),
+            client=_Mixed(),
+            patch=_outcome(lambda o: replace(o, logged=o.logged.model_copy(update={"unsaved": 2}))),
+        )
+    if scenario == "not-logged":
+        return _served_dump(
+            tmp_path,
+            _end_probe(1, hide=True),
+            client=_Recorder(),
+            patch=_outcome(lambda o: replace(o, logged=None)),
+        )
+    if scenario == "stop":
+        stopped = threading.Event()
+
+        class _Stoppable(JevService):
+            def cancel_job(self) -> dict[str, Any]:
+                view = super().cancel_job()
+                stopped.set()
+                return view
+
+        class _UntilStopped(_Recorder):
+            """The second answer waits for «Parar»: the third post is never sent."""
+
+            def ask(self, state, questions):
+                if len(self.asked) == 1:
+                    stopped.wait(60)
+                return super().ask(state, questions)
+
+        return _served_dump(
+            tmp_path, _end_probe(3, stop=True), client=_UntilStopped(), base=_Stoppable
+        )
+    if scenario == "flaky":
+
+        class _Flaky(JevService):
+            """`/api/job` fails twice once a job exists, then answers again."""
+
+            failures = 0
+
+            def job_view(self) -> dict[str, Any]:
+                view = super().job_view()
+                if view["state"] != "idle" and _Flaky.failures < 2:
+                    _Flaky.failures += 1
+                    raise RuntimeError("un momento")
+                return view
+
+        return _served_dump(tmp_path, _end_probe(1), client=_Recorder(delay=0.3), base=_Flaky)
+    assert scenario == "lost"
+
+    class _Lost(JevService):
+        """`/api/job` breaks once a job exists: the page's polling loses the server."""
+
+        def job_view(self) -> dict[str, Any]:
+            view = super().job_view()
+            if view["state"] != "idle":
+                raise RuntimeError("se cayó")
+            return view
+
+    return _served_dump(tmp_path, _end_probe(1, hide=True), client=_Recorder(delay=0.3), base=_Lost)
+
+
+@pytest.fixture(scope="module")
+def ended(tmp_path_factory) -> Callable[[str], dict[str, Any]]:
+    cache: dict[str, dict[str, Any]] = {}
+
+    def get(scenario: str) -> dict[str, Any]:
+        if scenario not in cache:
+            cache[scenario] = _ended(tmp_path_factory.mktemp(scenario), scenario)
+        return cache[scenario]
+
+    return get
+
+
+@_requires_chrome
+@pytest.mark.parametrize("scenario", ["tope", "error", "failures", "not-logged", "lost"])
+def test_served_a_job_that_did_not_end_cleanly_is_shown_even_if_hidden(ended, scenario):
+    seen = ended(scenario)
+
+    assert seen["run"]["hidden"] is True
+    assert seen["end"]["shown"] is True and seen["end"]["close"] == "Cerrar"
+
+
+@_requires_chrome
+def test_served_a_job_cut_by_the_cap_says_so(ended):
+    seen = ended("tope")
+
+    assert seen["job"]["reason"] == "tope"
+    assert seen["end"]["progress"].startswith(
+        "Interrumpido (se alcanzó el tope por trabajo): 1 evaluación guardada · "
+    )
+
+
+@_requires_chrome
+def test_served_a_job_that_failed_says_why(ended):
+    seen = ended("error")
+
+    assert seen["job"]["state"] == "error"
+    assert seen["end"]["error"] == "El trabajo falló: TYPESAFE_API_KEY no encontrada"
+
+
+@_requires_chrome
+def test_served_failures_unsaved_and_unpriced_answers_are_named(ended):
+    end = ended("failures")["end"]
+
+    assert end["progress"].startswith("2 evaluaciones guardadas · ")
+    assert "1 respuesta cobrada a la media estimada" in end["progress"]
+    assert "1 respuesta sin recuento de tokens" in end["progress"]
+    assert "sin tarifa: fake" in end["progress"]
+    assert "1 fallida: 4 (" in end["progress"] and "respuesta ilegible" in end["progress"]
+    assert "2 respuestas pagadas sin guardar" in end["progress"]
+
+
+@_requires_chrome
+def test_served_a_pass_that_did_not_reach_the_run_log_says_so(ended):
+    end = ended("not-logged")["end"]
+
+    assert end["progress"].startswith("1 evaluación guardada")
+    assert "la pasada no quedó en runs.jsonl" in end["progress"]
+
+
+@_requires_chrome
+def test_served_the_page_can_stop_a_job_and_what_was_paid_is_kept(ended):
+    seen = ended("stop")
+
+    assert seen["job"]["state"] == "interrupted" and seen["job"]["reason"] == "cancelado"
+    assert seen["end"]["progress"].startswith("Interrumpido (lo paraste desde la página): ")
+    kept = seen["job"]["outcome"]["ok"]
+    assert 1 <= kept < 3
+    assert f"{kept} evaluaci" in seen["end"]["progress"]
+
+
+@_requires_chrome
+def test_served_a_moment_without_the_server_is_retried_not_given_up(ended):
+    end = ended("flaky")["end"]
+
+    assert end["error"] is None and end["reload"] is None
+    assert end["progress"].startswith("1 evaluación guardada · ")
+
+
+@_requires_chrome
+def test_served_a_lost_server_is_said_and_offers_to_reload(ended):
+    end = ended("lost")["end"]
+
+    assert end["error"].startswith("Se perdió el contacto con el servidor")
+    assert end["reload"] == "Recargar la página"
+
+
+# --------------------------------------------------------------------------- the static page
+
+_STATIC_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const slug = DATA.posts.find(p => p.slugs.length).slugs[0];
+  const band = Object.keys(DATA.post_sets.bands).find(k => DATA.post_sets.bands[k].length);
+  const cx = Object.keys(DATA.post_sets.cx)[0];
+  const views = ['#posts?f=all', '#posts?f=all&t=' + slug, '#posts?f=uneval', '#topics', '#topics?t=' + slug,
+    '#topics?t=' + slug + '&cx=' + encodeURIComponent(cx), '#compare', '#compare?b=' + encodeURIComponent(band), '#config'];
+  const out = {};
+  for (const hash of views) {
+    location.hash = hash;
+    await sleep(60);
+    out[hash.split('?')[0].slice(1) + (hash.includes('?') ? '?' + hash.split('?')[1] : '')] = {
+      evaluate: [...document.querySelectorAll('button')].filter(b => seen(b) && /^(Evaluar|Re-evaluar)/.test(b.textContent)).map(b => b.textContent),
+      next: seen(document.getElementById('evalnext')),
+      copy: [...document.querySelectorAll('#cards .ask button')].filter(b => seen(b) && b.textContent === 'copiar comando').length,
+    };
+  }
+  const pre = document.createElement('pre');
+  pre.id = 'probe';
+  pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_the_static_page_has_no_evaluate_control_on_any_tab(tmp_path):
+    """The file `jev dashboard` writes is not served: «copiar comando», never a button that
+    would POST to a server that is not there."""
+    _need_chrome()
+    data = _fixture()
+    seen = _open(_page(tmp_path, data, _STATIC_PROBE))
+
+    assert data["serve"] is None
+    assert len(seen) == 9
+    for view, found in seen.items():
+        assert found["evaluate"] == [], view
+        assert found["next"] is False, view
+    assert seen["posts?f=uneval"]["copy"] > 0

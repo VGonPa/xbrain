@@ -218,6 +218,7 @@ details.saw[open]>summary{color:var(--ink)}
 .evalb.go{background:var(--accent);color:var(--bg);border-color:var(--accent)}
 .evalrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 .evalnext{display:inline-flex;gap:6px;align-items:center}
+.evalnext[hidden]{display:none}
 .evalnext input{width:64px;background:var(--surface-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:3px 6px;font-size:12px}
 .askp{position:fixed;right:16px;bottom:16px;z-index:20;width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;
   background:var(--surface);border:1px solid var(--accent-line);border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
@@ -229,8 +230,8 @@ details.saw[open]>summary{color:var(--ink)}
 .askp .err{color:var(--failed);font-size:13px;margin:6px 0;overflow-wrap:anywhere}
 .askp .err[hidden]{display:none}
 .askp .prog[hidden]{display:none}
-.askp .bar{height:6px;background:var(--hairline);border-radius:3px;overflow:hidden;margin:8px 0 4px}
-.askp .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.askp .pbar{display:block;height:6px;background:var(--hairline);border-radius:3px;overflow:hidden;margin:8px 0 4px}
+.askp .pbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
 .askp .askb{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
 .askp .askb button[hidden]{display:none}
 .echips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
@@ -413,7 +414,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div class="kpis" id="kpis"></div>
     <p class="note" id="before-log" hidden></p>
     <details class="hist" id="hist"><summary>Histórico por pasada</summary>
-      <div class="twrap"><table class="t" id="runs"></table></div>
+      <div id="runs-box"></div>
     </details>
   </section>
 
@@ -558,7 +559,8 @@ function renderCost() {
   if (c.error) {
     // The run log could not be read: say so where the total would be, keep everything else.
     $('kpis').innerHTML = kpi('Total', '—', 'no se pudo leer el registro de pasadas: ' + esc(c.error)) + perPost + stored;
-    $('runs').outerHTML = '<div class="empty">Sin histórico: corrige la línea indicada arriba en runs.jsonl ' +
+    $('before-log').hidden = true;
+    $('runs-box').innerHTML = '<div class="empty">Sin histórico: corrige la línea indicada arriba en runs.jsonl ' +
       '(si contiene un registro válido pegado tras un fragmento, sepáralo; no la borres).</div>';
     return;
   }
@@ -572,8 +574,9 @@ function renderCost() {
         : 'sin pasadas registradas')) +
     perPost + stored;
   const out = c.out_of_log;
+  // Drawn again after a served job: a note that no longer applies goes away.
+  $('before-log').hidden = !out.assessments;
   if (out.assessments) {
-    $('before-log').hidden = false;
     $('before-log').textContent =
       pl(out.assessments, 'evaluación', 'evaluaciones') +
       ' fuera del registro de pasadas (' + usd(out.cost_usd) + ' según sus propios tokens): se hicieron ' +
@@ -583,13 +586,17 @@ function renderCost() {
   renderRuns(c.runs);
 }
 
+/** The history table, or the sentence saying there is none, inside `#runs-box` — the box
+    stays, so a page served live can draw it again after a job. */
 function renderRuns(runs) {
-  const t = $('runs');
+  const box = $('runs-box');
   if (!runs.length) {
-    t.outerHTML = '<div class="empty">Aún no hay pasadas registradas. La próxima `xbrain jev topics` ' +
+    box.innerHTML = '<div class="empty">Aún no hay pasadas registradas. La próxima `xbrain jev topics` ' +
       'que envíe peticiones añadirá una fila aquí.</div>';
     return;
   }
+  box.innerHTML = '<div class="twrap"><table class="t" id="runs"></table></div>';
+  const t = $('runs');
   const heads = ['Fecha', 'Peticiones', 'OK', 'Fallidas', 'Tokens', 'Coste', 'Modelo', 'Interrumpida'];
   const row = (r) => [
     esc(when(r.started_at)),
@@ -1054,7 +1061,7 @@ function jevBlock(p) {
     if (j.topics.length) box.appendChild(topicTable(j.topics));
     box.appendChild(primaries(j));
     box.appendChild(whatJevSaw(j));
-    if (SERVED()) box.appendChild(evalButton(EVAL_AGAIN, {ids: [p.id], force: true}));
+    if (SERVED()) box.appendChild(evalButton(EVAL_AGAIN, {ids: [p.id]}));
     return box;
   }
   h.appendChild(el('span', 'badge', STATUS[p.status] || 'sin evaluar por Jev'));
@@ -1167,12 +1174,16 @@ function drawMore() {
   $('more').textContent = 'Mostrar ' + nf(Math.min(PAGE, shown.length - drawn)) + ' más (quedan ' + nf(shown.length - drawn) + ')';
 }
 
+function renderCount() {
+  $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + pl(DATA.posts.length, 'post', 'posts');
+}
+
 function renderList() {
   shown = sorted(DATA.posts.filter(matches));
   drawn = 0;
   cursor = -1;
   $('cards').replaceChildren();
-  $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + nf(DATA.posts.length) + ' posts';
+  renderCount();
   if (!shown.length) {
     const why = !DATA.posts.length ? 'No hay posts.'
       : view.q ? 'Ningún post coincide con la búsqueda.'
@@ -1577,7 +1588,7 @@ function renderPair(box, slug, pair) {
   sec.appendChild(el('h3', 'tsec', title + ' · ' + pl(row.posts, 'post', 'posts')));
   const clear = hashHref('topics', {t: slug});
   sec.appendChild(link(clear, 'lk', 'quitar este cruce ✕'));
-  if (SERVED()) sec.appendChild(evalRow(evalButton(EVAL_THESE, {pair: {kind: kind, key: pair.key}, force: true})));
+  if (SERVED()) sec.appendChild(evalRow(evalButton(EVAL_THESE, {pair: {kind: kind, key: pair.key}})));
   if (posts.length < pair.ids.length) {
     sec.appendChild(el('p', 'note', nf(pair.ids.length - posts.length) + ' de ' + nf(pair.ids.length) + ' posts no están en esta página.'));
   }
@@ -1731,20 +1742,20 @@ function resolveCompareList() {
     const row = S.confidence_bands.find(r => r.key === compareView.b);
     const ids = own(sets.bands, compareView.b);
     if (!row || !ids) return {sec: 'bands', stale: true};
-    return {sec: 'bands', ids: ids, count: row.posts, title: row.label + ' (' + bandRange(row) + ')', ask: {band: compareView.b, force: true}};
+    return {sec: 'bands', ids: ids, count: row.posts, title: row.label + ' (' + bandRange(row) + ')', ask: {band: compareView.b}};
   }
   if (compareView.px) {
     const row = S.primary_confusion.find(r => pairKey(r) === compareView.px);
     const ids = own(sets.px, compareView.px);
     if (!row || !ids) return {sec: 'cross', stale: true};
     const title = 'Principal · enrich: ' + otherName(row.enrich, 'px', 'enrich') + ' · Jev: ' + otherName(row.jev, 'px', 'jev');
-    return {sec: row.jev === DATA.fallback ? 'otro' : 'cross', ids: ids, count: row.posts, title: title, ask: {pair: {kind: 'px', key: compareView.px}, force: true}};
+    return {sec: row.jev === DATA.fallback ? 'otro' : 'cross', ids: ids, count: row.posts, title: title, ask: {pair: {kind: 'px', key: compareView.px}}};
   }
   if (compareView.pd) {
     const row = own(topicRows(), compareView.pd);
     const ids = own(sets.pd, compareView.pd);
     if (!row || !ids) return {sec: 'cross', stale: true};
-    return {sec: 'cross', ids: ids, count: row.primary_both, title: 'Principal · los dos eligen ' + label(compareView.pd), ask: {pair: {kind: 'pd', key: compareView.pd}, force: true}};
+    return {sec: 'cross', ids: ids, count: row.primary_both, title: 'Principal · los dos eligen ' + label(compareView.pd), ask: {pair: {kind: 'pd', key: compareView.pd}}};
   }
   return null;
 }
@@ -2300,20 +2311,47 @@ function renderConfig() {
    `xbrain jev dashboard` writes has DATA.serve null and none of this: it keeps «copiar
    comando». Only relative paths are fetched — the API is this page's own server. */
 const SERVED = () => !!(DATA && DATA.serve);
-/** Every path this page calls, in one place: relative, so only its own server answers. */
-const API = {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate', job: '/api/job', data: '/api/data'};
+/** Every path this page calls, in one place: relative, so only its own server answers. Each
+    kind of pass has its estimate and evaluate; the job slot is one for every kind. */
+const API = {
+  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},
+  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',
+};
+/** What the panel calls a job of each kind when it did not start it (a reload, another tab). */
+const KIND_RUNNING = {topics: 'Evaluación de topics en curso'};
 const EVAL_POST = 'Evaluar este post';
 const EVAL_AGAIN = 'Re-evaluar';
 const EVAL_THESE = 'Evaluar estos posts';
+const STOP_TEXT = 'Parar (se guarda lo ya pagado)';
+const FORCE_TEXT = 'Volver a evaluar también los posts que ya tienen evaluación vigente: se pagan ' +
+  'otra vez y se sustituye su evaluación (antes se guarda una copia)';
+/** Why an interrupted job stopped, as `/api/job`'s `reason` says it. */
+const STOP_REASONS = {
+  tope: 'se alcanzó el tope por trabajo',
+  'servidor parado': 'se paró el servidor',
+  cancelado: 'lo paraste desde la página',
+};
 const NEXT_DEFAULT = 20;
-/** The selection the panel is about: what was asked, what was sent, what the server said. */
+/** A running job is asked about every POLL_MS; a failed ask is retried after each of
+    RETRY_MS before the page says it lost the server. An idle page asks every WATCH_MS whether
+    a job started or ended elsewhere (another tab, a reload). */
+const POLL_MS = 400;
+const RETRY_MS = [500, 1000, 2000, 4000];
+const WATCH_MS = 3000;
+/** The selection the panel is about: its kind, what was asked, what was sent, what the server
+    said, and the number of its latest estimate (only that one's answer counts). */
 let asking = null;
 /** True while a job is being followed: another button re-opens its panel instead. */
 let following = false;
 let PANEL = null;
+let ESTIMATES = 0;
+/** The button that opened the panel: focus goes back to it when the panel closes. */
+let opener = null;
+/** The last finished job whose files this page's data includes (`/api/job`'s `finished_at`). */
+let seenFinish = null;
 
 /** A call to this page's server: GET without a body, POST (JSON, with the page's token) with
-    one. The server's Spanish error, when it gives one, is the message. */
+    one. The server's Spanish error, when it gives one, is the message; `status` is kept. */
 function api(path, body) {
   const init = body === undefined ? {} : {
     method: 'POST',
@@ -2323,7 +2361,11 @@ function api(path, body) {
   return fetch(path, init).then(async (r) => {
     let data = null;
     try { data = await r.json(); } catch (e) { data = null; }
-    if (!r.ok) throw new Error(data && data.error ? data.error : 'el servidor respondió ' + r.status);
+    if (!r.ok) {
+      const err = new Error(data && data.error ? data.error : 'el servidor respondió ' + r.status);
+      err.status = r.status;
+      throw err;
+    }
     if (data === null) throw new Error('respuesta ilegible del servidor');
     return data;
   });
@@ -2332,7 +2374,7 @@ function api(path, body) {
 function evalButton(text, ask) {
   const b = el('button', 'evalb', text);
   b.type = 'button';
-  b.addEventListener('click', () => openAsk(ask, text));
+  b.addEventListener('click', () => openAsk('topics', ask, text, b));
   return b;
 }
 
@@ -2342,11 +2384,11 @@ function evalRow(button) {
   return row;
 }
 
-/** «N sin evaluar» on a topic's button: the posts the page lists under it with no current
-    answer and something to ask about. A label — the estimate is the server's count. */
+/** «N sin evaluar» on a topic's button: the posts the page lists under it in «Sin evaluar por
+    Jev» (never asked, or asked before the post or the vocabulary changed) with something to
+    ask about. A label — the estimate is the server's count. */
 function topicEvalButton(slug) {
-  const pending = DATA.posts.filter(p => p.slugs.includes(slug) && !p.no_evidence &&
-    (p.status === 'stale' || p.status === 'unevaluated')).length;
+  const pending = DATA.posts.filter(p => p.slugs.includes(slug) && p.in.includes('uneval') && !p.no_evidence).length;
   return evalButton('Evaluar este topic (' + nf(pending) + ' sin evaluar)', {topic: slug});
 }
 
@@ -2364,10 +2406,18 @@ function renderNextControl() {
   n.addEventListener('input', () => { b.textContent = words(); });
   b.addEventListener('click', () => {
     const k = Math.floor(Number(n.value));
-    if (k >= 1) openAsk({unevaluated: k}, words());
+    if (k >= 1) openAsk('topics', {unevaluated: k}, words(), b);
   });
   box.replaceChildren(n, b);
   box.hidden = false;
+}
+
+function panelButton(id, cls, text, onClick) {
+  const b = el('button', cls, text);
+  b.type = 'button';
+  b.id = id;
+  b.addEventListener('click', onClick);
+  return b;
 }
 
 function panel() {
@@ -2377,8 +2427,10 @@ function panel() {
   box.hidden = true;
   box.setAttribute('role', 'dialog');
   box.setAttribute('aria-labelledby', 'ask-title');
+  box.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
   const title = el('h3', 'tsec');
   title.id = 'ask-title';
+  title.tabIndex = -1;
   const est = el('p', 'est');
   est.id = 'ask-est';
   const forceRow = el('label', 'askf');
@@ -2386,35 +2438,45 @@ function panel() {
   force.type = 'checkbox';
   force.id = 'ask-force';
   forceRow.appendChild(force);
-  forceRow.appendChild(document.createTextNode('re-evaluar también las evaluaciones vigentes (se hace copia de topics.json antes)'));
+  forceRow.appendChild(document.createTextNode(FORCE_TEXT));
   force.addEventListener('change', estimate);
   const error = el('p', 'err');
   error.id = 'ask-error';
   error.hidden = true;
+  error.setAttribute('role', 'alert');
   const prog = el('div', 'prog');
   prog.hidden = true;
-  const track = el('div', 'bar');
-  const bar = el('i');
-  track.appendChild(bar);
+  const track = el('div', 'pbar');
+  track.setAttribute('role', 'progressbar');
+  track.setAttribute('aria-valuemin', '0');
+  track.setAttribute('aria-valuemax', '100');
+  track.setAttribute('aria-label', 'Progreso del trabajo');
+  const fill = el('i');
+  track.appendChild(fill);
   const progText = el('p', 'muted');
   progText.id = 'ask-progress';
+  progText.setAttribute('aria-live', 'polite');
   prog.appendChild(track);
   prog.appendChild(progText);
-  const go = el('button', 'evalb go', 'Confirmar');
-  go.type = 'button';
-  go.id = 'ask-go';
-  go.addEventListener('click', confirmAsk);
-  const cancel = el('button', 'evalb', 'Cancelar');
-  cancel.type = 'button';
-  cancel.id = 'ask-cancel';
-  cancel.addEventListener('click', () => { box.hidden = true; if (!following) asking = null; });
+  const go = panelButton('ask-go', 'evalb go', 'Evaluar y pagar', confirmAsk);
+  const stop = panelButton('ask-stop', 'evalb', STOP_TEXT, stopJob);
+  const reload = panelButton('ask-reload', 'evalb', 'Recargar la página', () => location.reload());
+  const cancel = panelButton('ask-cancel', 'evalb', 'Cancelar', closePanel);
   const buttons = el('div', 'askb');
-  buttons.appendChild(go);
-  buttons.appendChild(cancel);
+  [go, stop, reload, cancel].forEach(b => buttons.appendChild(b));
   [title, est, forceRow, error, prog, buttons].forEach(n => box.appendChild(n));
   document.body.appendChild(box);
-  PANEL = {box, title, est, forceRow, force, error, prog, bar, progText, go, cancel};
+  PANEL = {box, title, est, forceRow, force, error, prog, track, fill, progText, go, stop, reload, cancel};
   return PANEL;
+}
+
+/** Cancelar / Ocultar / Cerrar and Escape: the panel goes away; a job keeps running, and the
+    panel comes back by itself if it does not end cleanly. */
+function closePanel() {
+  const P = panel();
+  P.box.hidden = true;
+  if (!following) asking = null;
+  if (opener && document.body.contains(opener)) opener.focus();
 }
 
 function showError(text) {
@@ -2423,18 +2485,32 @@ function showError(text) {
   P.error.hidden = false;
 }
 
-function openAsk(ask, title) {
+/** The panel's buttons for one moment of its life: asking, following a job, or done. */
+function panelMode(mode) {
   const P = panel();
+  P.go.hidden = mode !== 'ask';
+  P.stop.hidden = mode !== 'follow';
+  P.stop.disabled = false;
+  P.stop.textContent = STOP_TEXT;
+  P.reload.hidden = true;
+  P.cancel.textContent = {ask: 'Cancelar', follow: 'Ocultar', done: 'Cerrar'}[mode];
+}
+
+function openAsk(kind, ask, title, from) {
+  const P = panel();
+  opener = from || null;
   P.box.hidden = false;
+  P.title.focus();
   if (following) return;  // the running job's panel, as it is
-  asking = {ask: ask, title: title, sent: null, estimate: null};
+  asking = {kind: kind, ask: ask, title: title, sent: null, estimate: null, seq: 0};
   P.title.textContent = title;
-  P.force.checked = !!ask.force;
+  // Never ticked for the reader: re-asking what is current is paid again, so it is a choice.
+  P.force.checked = false;
   // «Los N siguientes sin evaluar» is never forced (the server refuses it).
   P.forceRow.hidden = 'unevaluated' in ask;
   P.prog.hidden = true;
-  P.go.hidden = false;
-  P.cancel.textContent = 'Cancelar';
+  P.error.hidden = true;
+  panelMode('ask');
   estimate();
 }
 
@@ -2445,51 +2521,84 @@ function selection() {
   return sent;
 }
 
+/** Whether an estimate's answer still belongs on screen: the same selection, the latest
+    estimate of it, and no job being followed meanwhile. */
+const latest = (mine, seq) => asking === mine && mine.seq === seq && !following;
+
 async function estimate() {
   if (!asking || following) return;
   const P = panel();
   const mine = asking;
+  const seq = ++ESTIMATES;
+  mine.seq = seq;
+  mine.sent = null;
+  mine.estimate = null;
   P.error.hidden = true;
   P.go.disabled = true;
+  P.go.textContent = 'Evaluar y pagar';
+  // Held while this estimate is out: the answer must be for the box as it is.
+  P.force.disabled = true;
   P.est.textContent = 'Estimando…';
   const sent = selection();
   try {
-    const e = await api(API.estimate, sent);
-    if (asking !== mine) return;  // another button was pressed meanwhile
+    const e = await api(API[mine.kind].estimate, sent);
+    if (!latest(mine, seq)) return;
     mine.sent = sent;
     mine.estimate = e;
     P.est.textContent = pickText(e);
-    if (e.allowed) P.go.disabled = false;
-    else showError('No se puede evaluar: ' + e.refusal);
+    if (e.allowed) {
+      P.go.disabled = false;
+      P.go.textContent = 'Evaluar y pagar ' + usd(e.usd, 5);
+    } else {
+      showError('No se puede evaluar: ' + e.refusal);
+    }
   } catch (err) {
-    if (asking !== mine) return;
+    if (!latest(mine, seq)) return;
     P.est.textContent = '';
     showError('No se puede evaluar: ' + err.message);
+  } finally {
+    if (latest(mine, seq)) P.force.disabled = false;
   }
 }
 
 function pickText(e) {
-  const parts = [pl(e.posts, 'post por evaluar', 'posts por evaluar') + ' · ' + usd(e.usd, 5)];
+  const parts = [pl(e.posts, 'post por evaluar', 'posts por evaluar')];
   if (e.forced) parts.push(pl(e.forced, 'vigente que se re-evalúa', 'vigentes que se re-evalúan'));
   if (e.skipped_current) parts.push(pl(e.skipped_current, 'vigente que no se repite', 'vigentes que no se repiten'));
   if (e.skipped_no_evidence) parts.push(nf(e.skipped_no_evidence) + ' sin evidencia');
   if (e.remaining) parts.push(nf(e.remaining) + ' quedan para otra vez');
-  return parts.join(' · ') + '. Es una estimación: la media de ' + nf(e.per_post.n) + ' de ' +
-    nf(e.per_post.of) + ' respuestas ya pagadas, por el número de posts. Tope por trabajo: ' +
-    dec(e.max_usd, 2) + ' $.';
+  let t = parts.join(' · ') + '.';
+  if (e.usd != null && e.posts) {
+    const paid = e.per_post.n === 1 ? 'la evaluación ya pagada' : 'las ' + nf(e.per_post.n) + ' evaluaciones ya pagadas';
+    t += ' Coste estimado: ' + usd(e.usd, 5) + ' (coste medio por post de ' + paid + ' × ' +
+      pl(e.posts, 'post', 'posts') + ').';
+  }
+  return t + ' Nunca se gastará más de ' + dec(e.max_usd, 2) + ' $ en esta tanda.';
 }
 
 async function confirmAsk() {
-  const e = asking && asking.estimate;
+  const mine = asking;
+  const e = mine && mine.estimate;
   if (!e || !e.allowed || following) return;
   const P = panel();
+  if ('force' in mine.sent && mine.sent.force !== P.force.checked) {
+    P.go.disabled = true;
+    showError('La casilla cambió desde la estimación: vuelve a estimar (marca o desmarca la casilla otra vez).');
+    return;
+  }
   P.go.disabled = true;
   P.error.hidden = true;
   try {
-    const job = await api(API.evaluate, Object.assign({}, asking.sent, {confirm_token: e.confirm_token}));
+    const job = await api(API[mine.kind].evaluate, Object.assign({}, mine.sent, {confirm_token: e.confirm_token}));
     follow(job);
   } catch (err) {
+    if (asking !== mine || following) return;
     showError('No se puede evaluar: ' + err.message);
+    // A job already running (409) is followed. A refusal before the confirmation was spent
+    // (bad body, the server stopping or failing to start) leaves it valid: Confirmar again.
+    const job = await api(API.job).catch(() => null);
+    if (job && job.state === 'running') resume(job);
+    else if (err.status === 400 || err.status === 503) P.go.disabled = false;
   }
 }
 
@@ -2498,69 +2607,137 @@ function follow(job) {
   const P = panel();
   following = true;
   P.box.hidden = false;
-  P.go.hidden = true;
   P.forceRow.hidden = true;
   P.prog.hidden = false;
-  P.cancel.textContent = 'Ocultar';
+  panelMode('follow');
   progress(job);
-  poll();
+  setTimeout(() => poll(0), POLL_MS);
 }
 
-async function poll() {
+/** A job this page did not start (a reload mid-job, another tab): followed from where it is. */
+function resume(job) {
+  const P = panel();
+  asking = null;
+  P.title.textContent = KIND_RUNNING[job.kind] || 'Trabajo en curso';
+  P.est.textContent = 'Empezó ' + when(job.started_at) + ' · ' + pl(job.total, 'post', 'posts') +
+    '. Nunca se gastará más de ' + dec(job.max_usd, 2) + ' $ en esta tanda.';
+  P.error.hidden = true;
+  follow(job);
+}
+
+async function poll(failures) {
   let job;
   try {
     job = await api(API.job);
   } catch (err) {
-    following = false;
-    showError('Se perdió el contacto con el servidor: ' + err.message);
+    if (failures < RETRY_MS.length) {
+      setTimeout(() => poll(failures + 1), RETRY_MS[failures]);
+      return;
+    }
+    lost(err);
     return;
   }
   progress(job);
-  if (job.state === 'running' || job.state === 'starting') {
-    setTimeout(poll, 400);
+  if (job.state === 'running') {
+    setTimeout(() => poll(0), POLL_MS);
     return;
   }
   await finished(job);
+}
+
+/** The server stopped answering: said, and never hidden — the job may still be spending. */
+function lost(err) {
+  const P = panel();
+  following = false;
+  P.box.hidden = false;
+  panelMode('done');
+  P.reload.hidden = false;
+  showError('Se perdió el contacto con el servidor (' + err.message + '). El trabajo puede seguir ' +
+    'en marcha: recarga la página para ver cómo va.');
+}
+
+async function stopJob() {
+  const P = panel();
+  P.stop.disabled = true;
+  P.stop.textContent = 'Parando…';
+  try {
+    progress(await api(API.cancel, {}));
+  } catch (err) {
+    if (err.status === 409) return;  // it had already ended: the next poll says how
+    P.stop.disabled = false;
+    P.stop.textContent = STOP_TEXT;
+    showError('No se pudo parar: ' + err.message);
+  }
+}
+
+/** «gastado» and what is in it: answers charged at the estimate's mean (no token count or no
+    price), answers with no token count, providers with no price. */
+function spentText(job) {
+  const parts = [usd(job.usd, 5) + ' gastado'];
+  if (job.charged_at_estimate) {
+    parts.push(pl(job.charged_at_estimate, 'respuesta cobrada', 'respuestas cobradas') + ' a la media estimada');
+  }
+  if (job.tokens_unknown) parts.push(pl(job.tokens_unknown, 'respuesta', 'respuestas') + ' sin recuento de tokens');
+  if (job.unpriced_providers && job.unpriced_providers.length) parts.push('sin tarifa: ' + job.unpriced_providers.join(', '));
+  return parts.join(' · ');
 }
 
 function progress(job) {
   const P = panel();
   const total = job.total || 0;
   const done = job.done || 0;
-  P.bar.style.width = (total ? Math.round(100 * done / total) : 0) + '%';
-  P.progText.textContent = nf(done) + ' de ' + nf(total) + ' posts · ' +
-    pl(job.answered || 0, 'respuesta', 'respuestas') + ' · ' + usd(job.usd, 5) + ' gastado' +
+  const share = total ? Math.round(100 * done / total) : 0;
+  P.fill.style.width = share + '%';
+  P.track.setAttribute('aria-valuenow', String(share));
+  P.progText.textContent = nf(done) + ' de ' + pl(total, 'post', 'posts') + ' · ' +
+    pl(job.answered || 0, 'respuesta', 'respuestas') + ' · ' + spentText(job) +
     (job.failed_calls ? ' · ' + pl(job.failed_calls, 'llamada fallida', 'llamadas fallidas') : '');
 }
 
 function outcomeText(job) {
   const o = job.outcome;
   if (!o) return 'No se guardó nada.';
-  let t = pl(o.ok, 'evaluación guardada', 'evaluaciones guardadas') + ' · ' + usd(job.usd, 5) + ' gastado';
+  let t = pl(o.ok, 'evaluación guardada', 'evaluaciones guardadas') + ' · ' + spentText(job);
   if (o.failed) t += ' · ' + pl(o.failed, 'fallida', 'fallidas') + ': ' + o.failures.map(f => f[0] + ' (' + f[1] + ')').join('; ');
   if (o.unsaved) t += ' · ' + pl(o.unsaved, 'respuesta pagada sin guardar', 'respuestas pagadas sin guardar');
+  if (job.backup) t += ' · copia previa de las evaluaciones: ' + job.backup;
   if (job.state === 'interrupted') {
-    t = 'Interrumpido (' + (job.reason === 'tope' ? 'se alcanzó el tope por trabajo' : 'se paró el servidor') + '): ' + t;
+    t = 'Interrumpido (' + (STOP_REASONS[job.reason] || job.reason || 'sin motivo') + '): ' + t;
   }
   if (!o.logged) t += ' · la pasada no quedó en runs.jsonl' + (job.log_error ? ' (' + job.log_error + ')' : '');
   return t;
+}
+
+/** A job that ended with nothing to look at: everything saved and logged. Any other end brings
+    the panel back even if the reader hid it. */
+function endedCleanly(job) {
+  const o = job.outcome;
+  return job.state === 'done' && !!o && !o.failed && !o.unsaved && o.logged && !job.log_error && !job.failed_calls;
 }
 
 async function finished(job) {
   const P = panel();
   following = false;
   asking = null;
-  P.cancel.textContent = 'Cerrar';
+  seenFinish = job.finished_at;
+  panelMode('done');
+  if (!endedCleanly(job)) P.box.hidden = false;
   if (job.state === 'error') {
-    P.progText.textContent = '';
+    P.progText.textContent = spentText(job);
     showError('El trabajo falló: ' + job.error);
   } else {
-    P.bar.style.width = '100%';
     P.progText.textContent = outcomeText(job);
   }
+  await reloadData();
+}
+
+async function reloadData() {
   try {
     refresh(await api(API.data));
   } catch (err) {
+    const P = panel();
+    P.box.hidden = false;
+    P.reload.hidden = false;
     showError('No se pudieron recargar los datos: ' + err.message + ' (recarga la página)');
   }
 }
@@ -2578,6 +2755,7 @@ function refresh(blob) {
     shown = shown.map(p => byId[p.id]).filter(Boolean);
     renderRail();
     renderActive();
+    renderCount();
     document.querySelectorAll('#cards > .card').forEach(node => {
       const p = byId[node.dataset.id];
       if (p) node.replaceWith(safeCard(p));
@@ -2588,16 +2766,33 @@ function refresh(blob) {
   if (view.tab === 'config') renderConfig();
 }
 
-/** Serve mode at load: the toolbar's control, and a job already running (the page was
-    reloaded mid-job) picked up where it is. */
-function bootServe() {
-  renderNextControl();
-  api(API.job).then(job => {
-    if (job.state === 'running' || job.state === 'starting') {
-      panel().title.textContent = 'Trabajo en curso';
-      follow(job);
+/** Whether a job this page is not following is running or has ended, asked at load and then
+    every WATCH_MS: a running one (a reload mid-job, another tab) is followed here too, and one
+    that ended since this page's data was built brings the new data. */
+function watch(delay) {
+  setTimeout(async () => {
+    if (!following) {
+      try {
+        const job = await api(API.job);
+        if (job.state === 'running') resume(job);
+        else if (job.finished_at && job.finished_at !== seenFinish) {
+          seenFinish = job.finished_at;
+          await reloadData();
+        }
+      } catch (err) {
+        console.warn('jev serve: no se pudo leer /api/job', err);
+      }
     }
-  }, err => console.warn('jev serve: no se pudo leer /api/job', err));
+    watch(WATCH_MS);
+  }, delay);
+}
+
+/** Serve mode at load: the toolbar's control, and the watch — whose first look, right away,
+    picks up a job already running. */
+function bootServe() {
+  seenFinish = DATA.serve.finished_at || null;
+  renderNextControl();
+  watch(0);
 }
 /* end serve */
 

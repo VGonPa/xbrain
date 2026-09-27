@@ -24,7 +24,8 @@ passes over one side-car at once.
   its real cost; an answer with no token count or from a provider with no price is charged
   the reservation, never $0. So the bill passes the cap only by what the posts in flight
   cost above their reservation.
-* Every stop from here is SOFT (`run_topics(cancel=…)`): nothing queued is sent, every call
+* Every stop from here is SOFT (`run_topics(cancel=…)`) — the cap, the server stopping, and
+  the page's «Parar» (`cancel_job`, reason `cancelado`): nothing queued is sent, every call
   in flight is waited for, banked, saved and logged. Counters freeze when the job ends.
 """
 
@@ -149,29 +150,33 @@ class _Job:
 
     def view(self) -> dict[str, Any]:
         with self.lock:
-            view: dict[str, Any] = {
-                "kind": self.kind,
-                "state": self.state,
-                "pick": self.pick.as_json(),
-                "ids": list(self.ids),
-                "total": self.total,
-                "done": self.done,
-                "answered": self.answered,
-                "failed_calls": self.failed_calls,
-                "tokens": self.tokens,
-                "tokens_unknown": self.tokens_unknown,
-                "usd": self.usd,
-                "charged_at_estimate": self.charged_at_estimate,
-                "unpriced_providers": sorted(self.unpriced_providers),
-                "max_usd": self.max_usd,
-                "started_at": self.started_at,
-                "finished_at": self.finished_at,
-            }
-            for key in ("reason", "error", "backup", "log_error", "outcome"):
-                value = getattr(self, key)
-                if value is not None:
-                    view[key] = value
-            return view
+            return self.view_unlocked()
+
+    def view_unlocked(self) -> dict[str, Any]:
+        """`view` for a caller that already holds `lock`."""
+        view: dict[str, Any] = {
+            "kind": self.kind,
+            "state": self.state,
+            "pick": self.pick.as_json(),
+            "ids": list(self.ids),
+            "total": self.total,
+            "done": self.done,
+            "answered": self.answered,
+            "failed_calls": self.failed_calls,
+            "tokens": self.tokens,
+            "tokens_unknown": self.tokens_unknown,
+            "usd": self.usd,
+            "charged_at_estimate": self.charged_at_estimate,
+            "unpriced_providers": sorted(self.unpriced_providers),
+            "max_usd": self.max_usd,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+        for key in ("reason", "error", "backup", "log_error", "outcome"):
+            value = getattr(self, key)
+            if value is not None:
+                view[key] = value
+        return view
 
 
 class _Metered:
@@ -374,6 +379,8 @@ class JevService:
             signature = _signature(self._inputs())
             if self._cache is not None and self._cache[0] == signature:
                 return self._cache
+            # Read BEFORE the files: a job that had finished by now wrote them before this.
+            finished_at = self._last_finished_at()
             jev = load_jev_pairs(self.cfg)
             _refuse_nothing_to_ask(jev, self.cfg)
             if self._media is None:
@@ -383,9 +390,23 @@ class JevService:
             blob = build_page_data(
                 self.cfg, now=datetime.now(timezone.utc), jev=jev, served=True, media=self._media
             )
-            blob["serve"] = {"token": self.token, "max_usd": self.cfg.jev_serve_max_usd}
+            blob["serve"] = {
+                "token": self.token,
+                "max_usd": self.cfg.jev_serve_max_usd,
+                # The last job whose files this data already includes: an idle tab whose
+                # `/api/job` reports another `finished_at` has older data and reloads it.
+                "finished_at": finished_at,
+            }
             self._cache = (signature, blob, jev)
             return self._cache
+
+    def _last_finished_at(self) -> str | None:
+        with self._state:
+            job = self._job
+        if job is None:
+            return None
+        with job.lock:
+            return job.finished_at
 
     def blob(self) -> dict[str, Any]:
         """The page's data, as `/api/data` sends it and the page embeds it."""
@@ -485,7 +506,8 @@ class JevService:
         if not posts:
             return (
                 f"nada que evaluar: {selection.skipped_current} vigentes, "
-                f"{selection.skipped_no_evidence} sin evidencia (re-evaluar pide «forzar»)"
+                f"{selection.skipped_no_evidence} sin evidencia (volver a evaluar las vigentes pide "
+                "`force`: la casilla «Volver a evaluar también…» de la página)"
             )
         if usd is None:
             return (
@@ -607,6 +629,19 @@ class JevService:
                 _fail(job, message)
         finally:
             job.ready.set()
+
+    def cancel_job(self) -> dict[str, Any]:
+        """The page's «Parar»: the running job stops SOFTLY — nothing queued is sent, the calls
+        in flight are waited for, saved and logged — and ends as «cancelado». Returns its view
+        (still running: the page follows it to the end); 409 when no job is running."""
+        with self._state:
+            job = self._job
+        if job is not None:
+            with job.lock:
+                if not job.terminal:
+                    job.cancel.set()
+                    return job.view_unlocked()
+        raise ServeError(409, "no hay ningún trabajo en curso")
 
     def job_view(self) -> dict[str, Any]:
         """The current (or last) job, as `/api/job` sends it; `{"state": "idle"}` before any."""

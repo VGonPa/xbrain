@@ -80,7 +80,7 @@ def _locked(path: Path) -> bool:
         return True
 
 
-def _repo(tmp_path: Path, monkeypatch, jev: str = "") -> Config:
+def _repo(tmp_path: Path, monkeypatch, jev: str = "", seed_tokens: int = 100) -> Config:
     vault = tmp_path / "vault"
     (vault / "x" / "_media").mkdir(parents=True)
     (tmp_path / "config.toml").write_text(
@@ -93,12 +93,13 @@ def _repo(tmp_path: Path, monkeypatch, jev: str = "") -> Config:
     save_vocab(VOCAB, tmp_path / "data" / "vocab.yaml")
     monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
     cfg = load_config(tmp_path)
-    _seed_pass(cfg, ["1", "2"])
+    _seed_pass(cfg, ["1", "2"], tokens=seed_tokens)
     return cfg
 
 
-def _seed_pass(cfg: Config, ids: list[str]) -> None:
-    """A priced pass over `ids`, so the page has a mean cost per post to estimate from."""
+def _seed_pass(cfg: Config, ids: list[str], tokens: int = 100) -> None:
+    """A priced pass over `ids` (`tokens` per answer), so the page has a mean cost per post to
+    estimate from."""
     with pass_lock(cfg.jev_lock_path, "seed") as lock:
         assessments = load_assessments(cfg.jev_topics_path)
         selection = select_items(
@@ -116,7 +117,9 @@ def _seed_pass(cfg: Config, ids: list[str]) -> None:
             selection,
             assessments,
             VOCAB,
-            lambda: FakeJevClient(provider="typesafe", nouls={"ai-coding": 0.95}),
+            lambda: FakeJevClient(
+                provider="typesafe", nouls={"ai-coding": 0.95}, input_tokens=tokens
+            ),
             lock=lock,
         )
 
@@ -245,7 +248,7 @@ def test_the_page_is_the_live_page_with_its_token_and_the_served_flag(served: _S
 
     assert status == 200
     assert response.getheader("Content-Type") == "text/html; charset=utf-8"
-    assert blob["serve"] == {"token": served.service.token, "max_usd": 1.0}
+    assert blob["serve"] == {"token": served.service.token, "max_usd": 1.0, "finished_at": None}
     page_row = next(row for row in blob["config"]["files"] if row["key"] == "page")
     assert page_row["served"] is True
     assert sorted(p["id"] for p in blob["posts"] if p["status"] == "compared") == ["1", "2"]
@@ -779,9 +782,11 @@ def test_ctrl_c_stops_accepting_lets_the_job_checkpoint_and_log_and_exits_130(
 MEAN_USD = PER_POST_USD  # the seed pass: 100 tokens per answer, priced
 
 
-def _big_repo(tmp_path: Path, monkeypatch, *, posts: int, jev: str) -> Config:
+def _big_repo(
+    tmp_path: Path, monkeypatch, *, posts: int, jev: str, seed_tokens: int = 100
+) -> Config:
     """`_repo` with `posts` more unevaluated posts (`p00`, `p01`, …) and `jev` settings."""
-    cfg = _repo(tmp_path, monkeypatch, jev=jev)
+    cfg = _repo(tmp_path, monkeypatch, jev=jev, seed_tokens=seed_tokens)
     extra = {
         f"p{n:02d}": _item(f"p{n:02d}", f"Post número {n:02d} sobre agentes") for n in range(posts)
     }
@@ -1329,3 +1334,91 @@ def test_a_stopped_server_mints_no_confirmation(served: _Served):
     status, error, _ = served.request("POST", "/api/topics/estimate", {"ids": ["3"]})
 
     assert status == 503 and error["error"] == "el servidor se está parando"
+
+
+# --------------------------------------------------------------------------- the page's stop
+
+
+def test_the_page_can_stop_a_job_softly_and_what_was_paid_is_kept(tmp_path: Path, monkeypatch):
+    """`POST /api/job/cancel`: nothing queued is sent, every call in flight is waited for,
+    saved and logged, and the job ends as «cancelado» — not as a stopped server."""
+    cfg = _big_repo(tmp_path, monkeypatch, posts=12, jev="concurrency = 3\n")
+    client = _Priced(delay=0.1)
+    s = _Served(cfg, client)
+    try:
+        estimate = s.estimate({"unevaluated": 12})
+        s.evaluate({"unevaluated": 12, "confirm_token": estimate["confirm_token"]})
+        s.wait_job(lambda job: job.get("answered", 0) >= 1)
+        status, view, _ = s.request("POST", "/api/job/cancel", {})
+        job = s.wait_job()
+    finally:
+        s.close()
+
+    run = load_runs(cfg.jev_runs_path)[-1]
+    stored = set(load_assessments(cfg.jev_topics_path)) - {"1", "2"}
+    assert status == 200 and view["state"] == "running" and view["kind"] == "topics"
+    assert job["state"] == "interrupted" and job["reason"] == "cancelado"
+    assert client.sent < 12
+    assert len(stored) == client.sent == job["answered"] == run.ok == run.requests
+    assert run.unsaved == 0 and run.interrupted is True
+    assert run.input_tokens == 100 * client.sent == job["tokens"]
+
+
+def test_a_cancel_with_no_job_running_is_refused(served: _Served):
+    status, error, _ = served.request("POST", "/api/job/cancel", {})
+    _run_job(served, {"ids": ["3"]})
+    after, error_after, _ = served.request("POST", "/api/job/cancel", {})
+
+    assert status == 409 and error["error"] == "no hay ningún trabajo en curso"
+    assert after == 409 and error_after == error
+    # The finished job is not touched by the refused cancel.
+    assert served.service.job_view()["state"] == "done"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"token": False}, {"origin": None}, {"origin": "http://evil.example"}],
+    ids=["no-token", "no-origin", "foreign-origin"],
+)
+def test_a_cancel_needs_the_token_and_this_servers_origin(
+    tmp_path: Path, monkeypatch, kwargs: dict[str, Any]
+):
+    s = _Served(_repo(tmp_path, monkeypatch), _Recorder(delay=0.3))
+    try:
+        estimate = s.estimate({"ids": ["3", "4"]})
+        s.evaluate({"ids": ["3", "4"], "confirm_token": estimate["confirm_token"]})
+        status, _, _ = s.request("POST", "/api/job/cancel", {}, **kwargs)
+        job = s.wait_job()
+    finally:
+        s.close()
+
+    assert status == 403
+    assert job["state"] == "done" and job["outcome"]["ok"] == 2
+
+
+@pytest.mark.parametrize("body", [[1], "x", 3], ids=["list", "string", "number"])
+def test_a_cancel_body_other_than_an_object_is_refused(served: _Served, body: Any):
+    status, error, _ = served.request("POST", "/api/job/cancel", body)
+
+    assert status == 400 and "objeto" in error["error"]
+
+
+def test_a_cancel_needs_json(served: _Served):
+    status, _, _ = served.request(
+        "POST", "/api/job/cancel", raw=b"{}", headers={"Content-Type": "text/plain"}
+    )
+
+    assert status == 415
+
+
+def test_the_blob_names_the_last_finished_job_its_data_already_includes(served: _Served):
+    """An idle tab compares this with `/api/job`'s `finished_at` to know that a job another
+    tab ran has ended since its data was built."""
+    _, before, _ = served.request("GET", "/api/data")
+    job = _run_job(served, {"ids": ["3"]})
+    _, after, _ = served.request("GET", "/api/data")
+
+    assert before["serve"]["finished_at"] is None
+    assert job["finished_at"] is not None
+    assert after["serve"]["finished_at"] == job["finished_at"]
+    assert next(p for p in after["posts"] if p["id"] == "3")["status"] == "compared"

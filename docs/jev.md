@@ -242,7 +242,7 @@ returns it, whatever xbrain does with it next:
 | `input_tokens_by_provider` · `input_tokens` | tokens of **every** answer that came back — refused and unsaved ones included, because each was billed — per provider, and their sum. Empty and 0 when nothing answered |
 | `input_tokens_unknown` | answers that reported no usage |
 | `models` | the distinct models that answered, sorted |
-| `interrupted` | Ctrl-C, or a `jev serve` job stopped by its cap or by the server. After Ctrl-C `requests - ok - failed - unsaved` is the number of calls still in flight; after a server stop it is 0 |
+| `interrupted` | Ctrl-C, or a `jev serve` job stopped by its cap, by the server or by «Parar» on the page. After Ctrl-C `requests - ok - failed - unsaved` is the number of calls still in flight; after any other stop it is 0 |
 
 It stores **tokens, never dollars**: every report prices the history at read time with the
 same formula the side-car uses, so a price correction reprices every past pass.
@@ -829,21 +829,41 @@ it starts, so photos mirrored later show after a restart.
   one;
 - **Evaluar los N siguientes sin evaluar** in the Posts toolbar (N is yours to type, 20 by
   default);
-- **Evaluar este topic (N sin evaluar)** next to an open topic, in Posts and in Topics;
+- **Evaluar este topic (N sin evaluar)** next to an open topic, in Posts and in Topics. N is
+  the posts the page lists under the topic in «Sin evaluar por Jev» (never asked, or asked
+  before the post or the vocabulary changed) that have something to ask about;
 - **Evaluar estos posts** on a pair in Topics and on each list the Comparar tab opens (a band,
-  a primary pair). Those posts already have answers, so this one starts with re-evaluating
-  checked.
+  a primary pair).
 
-A button opens a panel in the corner. The panel shows the server's estimate first: the posts,
-the dollars, what it skips, the mean the estimate uses and the cap. **Confirmar** only works
-when the server allows the job. The checkbox *re-evaluar también las evaluaciones vigentes*
-is `force`; ticking or clearing it re-estimates. A refusal from the server shows in the panel,
-in its own words. After you confirm, the panel shows a progress bar with posts done,
-answers and dollars spent. When the job ends, the page loads the new data and redraws in
-place: the cards on screen are swapped where they are, and the header, the numbers and the
-open tab are redrawn. If you reload the page while a job runs, the panel picks it up. The
-static `jev.html` never shows these buttons (its data says it is not served) and keeps
-«copiar comando».
+A button opens a panel in the corner (Escape closes it; focus goes back to the button). The
+panel shows the server's estimate first: *«Coste estimado: ~X $ (coste medio por post de las
+N evaluaciones ya pagadas × M posts). Nunca se gastará más de <cap> $ en esta tanda.»*, with
+what it skips. The button that spends says so and how much: **Evaluar y pagar ~X $**. It only
+works when the server allows the job. The checkbox *Volver a evaluar también los posts que ya
+tienen evaluación vigente: se pagan otra vez y se sustituye su evaluación (antes se guarda una
+copia)* is `force`. It is **never ticked for you**, not even on **Re-evaluar** or on a Comparar
+list, whose posts all have answers: unticked, those say there is nothing to ask. Ticking or
+clearing it re-estimates, and the box is held while that estimate is out, so the panel never
+confirms a `force` the box does not show. A refusal from the server shows in the panel, in
+its own words.
+
+After you confirm, the panel shows a progress bar and *k de N posts · respuestas · ~X $
+gastado*. «Gastado» includes what was **charged at the estimate's mean** (answers with no token
+count or from a provider with no price, named there) — see the cap below. **Parar (se guarda
+lo ya pagado)** stops the job softly (`POST /api/job/cancel`): nothing more is sent, the calls
+in flight are waited for, saved and logged, and the job ends *Interrumpido (lo paraste desde
+la página)*. **Ocultar** only hides the panel; the job goes on. The panel comes back by itself
+when a job does not end cleanly: stopped by the cap or the server, failed, with failed calls,
+paid answers not saved, a pass not logged, or a server that stopped answering (the page
+retries a few times, then offers **Recargar la página**). The outcome names the backup made
+before a `force` (`topics.<fecha>.bak`).
+
+When the job ends, the page loads the new data and redraws in place: the cards on screen are
+swapped where they are, and the header, the run history, the numbers and the open tab are
+redrawn. A page opened or reloaded while a job runs, or left open in another tab, follows that
+job too, and an idle page loads the new data when a job it did not follow ends (it asks
+`/api/job` every few seconds). The static `jev.html` never shows these buttons (its data says
+it is not served) and keeps «copiar comando».
 
 Those buttons call a small JSON API to run a topics pass over chosen posts; anything else on
 this machine that has the page's token can call it too (`curl` with the token copied from
@@ -873,13 +893,20 @@ this machine that has the page's token can call it too (`curl` with the token co
    `tokens_unknown`, `unpriced_providers` and `charged_at_estimate` (answers charged the
    mean because they could not be priced), then the `outcome` — `ok` saved (and their
    `ids`), `failed` with the first `failures`, `unsaved`, whether the pass was `logged` —
-   and, for an interrupted job, the `reason` (`tope`, `servidor parado`). A job that
-   finished every post is `done` with no reason, even if it ended at the cap. The view stops
-   changing when the job ends.
+   and, for an interrupted job, the `reason` (`tope`, `servidor parado`, `cancelado`). A job
+   that finished every post is `done` with no reason, even if it ended at the cap. The view
+   stops changing when the job ends. `usd` includes the reservations charged for answers that
+   could not be priced (`charged_at_estimate`).
+4. **Stop** (`POST /api/job/cancel`, body `{}`, the same token and `Origin` as any POST): the
+   running job stops softly — nothing queued is sent, the calls in flight are waited for,
+   saved and logged — and ends `interrupted` with reason `cancelado`. It answers 200 with the
+   job's view (still `running` until those calls come back) and 409 *no hay ningún trabajo en
+   curso* when none runs.
 
 Every estimate and job view carries `"kind": "topics"`: the server has ONE job slot, and a
 future kind of pass will share it (and the pass lock). The page's data is `GET /api/data`
-(the same blob the page embeds). `GET /api/cards?ids=a,b` returns those posts' cards, in
+(the same blob the page embeds); its `serve.finished_at` is the last job whose files that data
+already includes, which is how an idle tab knows a job ended since. `GET /api/cards?ids=a,b` returns those posts' cards, in
 that order, and 404 names any id the corpus lacks; it is the by-id refresh for result lists.
 
 **What stops a job from spending more than you meant:**
@@ -911,8 +938,8 @@ that order, and 404 names any id the corpus lacks; it is the by-id refresh for r
 - **Re-asking current answers is explicit** (`force`), as `--force` is in the terminal, and
   it makes the same backup first.
 
-**Stopping never throws away what was paid for.** Ctrl-C (or a stop of any kind from the
-server) stops accepting requests, answers 503 *el servidor se está parando* to a new job,
+**Stopping never throws away what was paid for.** «Parar» on the page stops the job the same
+soft way and leaves the server running. Ctrl-C (or a stop of any kind from the server) stops accepting requests, answers 503 *el servidor se está parando* to a new job,
 sends no queued post, **waits for the calls already in flight**, saves every answer that came
 back and logs the pass as interrupted — then exits **130**. The job's thread is not a daemon:
 even a second Ctrl-C leaves Python waiting for that save. The terminal then says what the

@@ -2211,17 +2211,21 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
 
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
         assert sink not in serve, sink
-    # Relative URLs only, all in ONE table: the API is this page's own server.
+    # Relative URLs only, all in ONE table: the API is this page's own server. Each kind of
+    # pass has its routes (PR 12 adds one); the job slot is one for every kind.
     assert (
-        "const API = {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate', "
-        "job: '/api/job', data: '/api/data'};" in serve
+        "const API = {\n"
+        "  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},\n"
+        "  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',\n"
+        "};" in serve
     )
     assert re.findall(r"\bapi\('", serve) == []
-    assert sorted(set(re.findall(r"\bapi\(API\.(\w+)", serve))) == [
-        "data",
-        "estimate",
-        "evaluate",
-        "job",
+    assert sorted(set(re.findall(r"\bapi\((API[^,)]*)", serve))) == [
+        "API.cancel",
+        "API.data",
+        "API.job",
+        "API[mine.kind].estimate",
+        "API[mine.kind].evaluate",
     ]
     assert "'X-Xbrain-Token': DATA.serve.token" in serve
     assert "http" not in re.sub(r"//.*|/\*.*?\*/", "", serve, flags=re.S)
@@ -2238,10 +2242,18 @@ def test_the_serve_words_that_carry_meaning_are_pinned():
         "' sin evaluar)'",
         "'Evaluar los '",
         "' siguientes sin evaluar'",
-        "'Confirmar'",
+        "'Evaluar y pagar'",
+        "'Evaluar y pagar ' + usd(e.usd, 5)",
         "'Cancelar'",
-        "estimación: la media de ",
-        "re-evaluar también las evaluaciones vigentes (se hace copia de topics.json antes)",
+        "' Coste estimado: '",
+        "' (coste medio por post de '",
+        "' Nunca se gastará más de '",
+        "' $ en esta tanda.'",
+        "'Volver a evaluar también los posts que ya tienen evaluación vigente: se pagan '",
+        "'otra vez y se sustituye su evaluación (antes se guarda una copia)'",
+        "'Parar (se guarda lo ya pagado)'",
+        "'lo paraste desde la página'",
+        "'Recargar la página'",
         "'No se puede evaluar: '",
     ):
         assert words in serve, words
