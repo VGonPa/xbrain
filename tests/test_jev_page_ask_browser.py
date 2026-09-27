@@ -1161,11 +1161,14 @@ const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 &&
     return {topics: sTopics(), counts: sCounts - c0};
   });
   await sStep('one', async () => {
-    const n0 = sEstimates;
+    const n0 = sEstimates, c0 = sCounts;
     sQForm({'ask-q': 'posts que explican cómo trabajar con agentes', 'ask-since': '', 'ask-topic-agentic-engineering': true});
     const e = await sNextEstimate(n0, 'la estimación con un topic');
     const panel = sPanel();
     sId('ask-cancel').click();
+    // Clearing «Desde» asks the counts again, 250 ms after the keystroke (`askRecount`): wait
+    // for that request here, or it lands inside a later step's window and is counted there.
+    await sWait(() => sCounts > c0, 'el recuento de «Desde» vacío');
     return {estimate: e, panel: panel};
   });
   await sStep('two', async () => {
