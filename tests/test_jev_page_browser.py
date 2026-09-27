@@ -1491,7 +1491,7 @@ def test_the_edges_print_at_the_thresholds_own_precision(tmp_path):
 
     seen = _open(_page(tmp_path, data, _READ_COMPARE), "#compare")
 
-    assert "UMBRAL 0,875" in seen["stamp"]
+    assert "Umbral 0,875" in seen["stamp"]
     assert "probabilidad 0,500 – 0,875" in seen["ranges"]
 
 
@@ -1851,7 +1851,7 @@ def test_the_files_say_where_each_lives_whether_it_exists_and_whether_snapshots_
     [runs] = [row for row in seen["files"] if row[0] == "jev/runs.jsonl"]
     assert runs[1] == (
         "/repo/data/jev/runs.jsonl"
-        "(aún no existe: lo crea la primera `xbrain jev topics` que envíe peticiones)"
+        "(aún no existe: lo crea la primera xbrain jev topics que envíe peticiones)"
     )
     assert [(row[0], row[3]) for row in seen["files"]] == [
         (f["label"], "sí" if f["snapshotted"] else "no") for f in data["config"]["files"]
@@ -1860,11 +1860,11 @@ def test_the_files_say_where_each_lives_whether_it_exists_and_whether_snapshots_
         f["path"] for f in data["config"]["files"] if f["key"] != "runs"
     ]
     assert seen["files"][-1][1] == "/vault/x-knowledge/jev.html"
-    assert seen["files"][-1][2] == "esta página; la escribe `xbrain jev dashboard`"
+    assert seen["files"][-1][2] == "esta página; la escribe xbrain jev dashboard"
     assert seen["files_notes"] == [
         "data/ no está en git. Las evaluaciones de Jev (jev/topics.json) y su registro "
         "(jev/runs.jsonl) no entran en los snapshots; el topics.json de enrich y vocab.yaml sí.",
-        "Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo "
+        "Cuidado: rehacer jev/topics.json cuesta dinero, y xbrain snapshot restore no lo "
         "devuelve; runs.jsonl es el histórico de costes.",
     ]
 

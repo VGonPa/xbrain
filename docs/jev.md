@@ -609,8 +609,10 @@ list starts folded.
 
 **Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
 card shows **the post through X's own embed** — the post as X shows it, loaded from X when the
-card comes near the screen — under a head of ours (author, `@handle`, date, `X ↗`, `nota ↗` and
-the toggle). The embed is a plain frame to X's embed page: X's script never runs in this page,
+card comes near the screen — under a head of ours with `X ↗`, `nota ↗` and the toggle (X's
+embed already shows the author and date, so the head adds them only on the saved copy). On a
+wide screen Jev's block sits beside the post instead of under it, and stays in view while a
+long post scrolls; on a narrow one it goes under. The embed is a plain frame to X's embed page: X's script never runs in this page,
 where the served page keeps the token that can spend money. X receives the post id and your
 IP (and its own cookies in your browser). It gets no referrer: at most the page's origin
 (`file://` or the local port), never its path or data. See ARCHITECTURE.md (jev · *The X
@@ -619,7 +621,7 @@ embed*).
 **The saved copy is always one click away.** *ver copia guardada* on a card swaps X's view for
 the copy XBrain saved (below), and *ver en X* swaps it back. The choice is per post: when the
 same post is on screen twice (Posts and a Preguntar result), both cards follow. The switch
-**Vista: X | copia guardada** beside the tabs (on a phone, on its own row above them) sets
+**Vista: X | copia guardada** beside the sub-tabs, and at the head of Preguntar's results (on a phone, on its own row) sets
 every card at once; this browser remembers it. Opening the page with `?embed=0`
 (`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every card on the
 saved copy. A card shows the saved copy by itself, with one line saying why (*… · se muestra
