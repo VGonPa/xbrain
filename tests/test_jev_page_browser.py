@@ -211,6 +211,38 @@ setTimeout(() => {
 )
 
 
+#: The page's tabs as a reader sees them: which top tab and which Revisar sub-tab are current,
+#: the URL it settled on, and WHERE the cost strip and Preguntar's cost line are (their top tab),
+#: each only when seen. `history.length` says a rewritten old route added no entry. Then, from
+#: a topic's page, Preguntar and back through «Revisar topics»: the sub-tab's view is kept.
+_ROUTE_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const cur = (id) => { const a = document.querySelector('#' + id + ' a[aria-current="page"]'); return seen(a) ? a.dataset.tab : null; };
+const topOfEl = (e) => (seen(e) ? e.closest('.toptab').id : null);
+const read = () => ({hash: location.hash, top: cur('toptabs'), sub: cur('subtabs'),
+  cost: topOfEl(document.getElementById('cost')), numbers: topOfEl(document.getElementById('numbers')),
+  ask_cost: topOfEl(document.getElementById('ask-cost')), ask_cost_text: txt(document.getElementById('ask-cost')),
+  shown: [...document.querySelectorAll('.toptab')].filter(seen).map(e => e.id),
+  history: history.length});
+(async () => {
+  await sleep(150);
+  const out = {opened: read()};
+  location.hash = '#revisar/posts?f=all&t=startups'; await sleep(60);
+  document.querySelector('#toptabs a[data-tab="ask"]').click(); await sleep(60);
+  out.on_ask = read();
+  document.querySelector('#toptabs a[data-tab="revisar"]').click(); await sleep(60);
+  out.back = read();
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>
+"""
+)
+
+
 def _fixture() -> dict[str, Any]:
     """`_corpus`'s cases, plus 110 never-asked posts (so Todos needs a third page) and one
     post with no evidence at all."""
@@ -284,6 +316,62 @@ _KEYS = {
 }
 
 
+@pytest.fixture(scope="module")
+def route_page(tmp_path_factory) -> Path:
+    _need_chrome()
+    return _page(tmp_path_factory.mktemp("routes"), _fixture(), _ROUTE_PROBE)
+
+
+@pytest.fixture(scope="module")
+def route_history(route_page) -> int:
+    """`history.length` of a page opened at a current route: headless Chrome's own start."""
+    return _open(route_page, "#revisar/compare")["opened"]["history"]
+
+
+_ROUTES = {
+    # opened at (a reload there) → the URL it settles on, the top tab, the sub-tab
+    "": ("#revisar/posts", "revisar", "posts"),
+    "#revisar/posts?f=all": ("#revisar/posts?f=all", "revisar", "posts"),
+    "#revisar/topics?t=startups": ("#revisar/topics?t=startups", "revisar", "topics"),
+    "#revisar/compare": ("#revisar/compare", "revisar", "compare"),
+    "#ask": ("#ask", "ask", None),
+    "#config": ("#config", "config", None),
+    # Old bookmarks: the same view, the URL rewritten in place.
+    "#posts?f=all": ("#revisar/posts?f=all", "revisar", "posts"),
+    "#topics?t=startups": ("#revisar/topics?t=startups", "revisar", "topics"),
+    "#compare": ("#revisar/compare", "revisar", "compare"),
+    "#revisar": ("#revisar/posts", "revisar", "posts"),
+}
+
+
+@_requires_chrome
+@pytest.mark.parametrize("opened", list(_ROUTES))
+def test_three_top_tabs_and_their_sub_tabs_route_and_survive_a_reload(
+    route_page, route_history, opened
+):
+    seen = _open(route_page, opened)["opened"]
+    hash_, top, sub = _ROUTES[opened]
+
+    assert (seen["hash"], seen["top"], seen["sub"]) == (hash_, top, sub)
+    assert seen["shown"] == [f"top-{top}"]
+    # An old route is rewritten in place: no history entry more than a current route opens with.
+    assert seen["history"] == route_history
+    # The cost strip and the three numbers live in Revisar only; Preguntar has its own line.
+    in_revisar = "top-revisar" if top == "revisar" else None
+    assert (seen["cost"], seen["numbers"]) == (in_revisar, in_revisar)
+    assert seen["ask_cost"] == ("top-ask" if top == "ask" else None)
+
+
+@_requires_chrome
+def test_leaving_revisar_and_coming_back_through_its_tab_keeps_the_sub_tabs_view(route_page):
+    seen = _open(route_page, "#config")
+
+    assert (seen["on_ask"]["top"], seen["on_ask"]["hash"]) == ("ask", "#ask")
+    assert seen["on_ask"]["ask_cost_text"] == "Aún no se ha pagado ninguna pregunta."
+    assert (seen["back"]["top"], seen["back"]["sub"]) == ("revisar", "posts")
+    assert seen["back"]["hash"] == "#revisar/posts?f=all&t=startups"
+
+
 @_requires_chrome
 def test_the_page_opens_on_the_disagreements(probed):
     data, seen = probed
@@ -300,7 +388,9 @@ def test_each_view_lists_exactly_the_posts_its_number_counts(probed):
         view = seen["filters"][name]
         assert view["rail"] == view["list"], name
         assert set(view["ids"]) == _ids(data, key), name
-        assert view["hash"] == ("#posts" if key == "disc" else f"#posts?f={key}"), name
+        assert view["hash"] == ("#revisar/posts" if key == "disc" else f"#revisar/posts?f={key}"), (
+            name
+        )
 
 
 @_requires_chrome
@@ -527,7 +617,7 @@ async function travel(go) {
   });
   await step('open topic', async () => {
     location.hash = '#topics'; await sleep(20);
-    document.querySelector('#topics-index a.tl[href="#topics?t=alpha"]').click(); await sleep(30);
+    document.querySelector('#topics-index a.tl[href="#revisar/topics?t=alpha"]').click(); await sleep(30);
     out.detail = tabState();
     const coinciden = document.querySelector('#topic-detail section[data-group="coinciden"]');
     out.coinciden_first = seenCards(coinciden).length;
@@ -698,7 +788,7 @@ def test_sorting_replaces_the_url_instead_of_adding_history(topics_probed):
     _data_, seen = topics_probed
 
     assert seen["history_grew"] == 0
-    assert seen["sort_hash"] == "#topics?o=label&d=asc"
+    assert seen["sort_hash"] == "#revisar/topics?o=label&d=asc"
     assert seen["label_arrow"].endswith("↑")
 
 
@@ -714,7 +804,7 @@ def test_a_group_past_one_page_reaches_its_number_with_mostrar_mas(topics_probed
     data, seen = topics_probed
 
     assert seen["detail"] == {
-        "hash": "#topics?t=alpha",
+        "hash": "#revisar/topics?t=alpha",
         "index": False,
         "detail": True,
         "pair": False,
@@ -743,7 +833,7 @@ def test_a_pair_opens_in_view_and_lists_exactly_its_posts_past_one_page(topics_p
 def test_a_real_two_topic_pair_lists_exactly_its_posts(topics_probed):
     data, seen = topics_probed
 
-    assert seen["ab_hash"] == "#topics?t=gamma&cx=gamma%7Eomega"
+    assert seen["ab_hash"] == "#revisar/topics?t=gamma&cx=gamma%7Eomega"
     assert seen["ab_pair"] == data["post_sets"]["cx"]["gamma~omega"] == ["g05", "g06", "g07"]
 
 
@@ -761,16 +851,16 @@ def test_an_empty_confusion_side_says_what_the_row_says(topics_probed):
 def test_back_and_forward_walk_between_the_topic_and_the_pair(topics_probed):
     _data_, seen = topics_probed
 
-    assert seen["back1"]["hash"] == "#topics?t=gamma" and not seen["back1"]["pair"]
-    assert seen["back2"]["hash"].startswith("#topics?t=omega")
-    assert seen["forward"]["hash"] == "#topics?t=gamma" and seen["forward"]["detail"]
+    assert seen["back1"]["hash"] == "#revisar/topics?t=gamma" and not seen["back1"]["pair"]
+    assert seen["back2"]["hash"].startswith("#revisar/topics?t=omega")
+    assert seen["forward"]["hash"] == "#revisar/topics?t=gamma" and seen["forward"]["detail"]
 
 
 @_requires_chrome
 def test_ver_en_posts_opens_every_post_with_the_topic(topics_probed):
     data, seen = topics_probed
 
-    assert seen["posts_hash"] == "#posts?f=all&t=alpha"
+    assert seen["posts_hash"] == "#revisar/posts?f=all&t=alpha"
     assert set(seen["posts_ids"]) == {p["id"] for p in data["posts"] if "alpha" in p["slugs"]}
 
 
@@ -778,7 +868,7 @@ def test_ver_en_posts_opens_every_post_with_the_topic(topics_probed):
 def test_a_topic_row_on_a_post_card_opens_that_topics_page(topics_probed):
     _data_, seen = topics_probed
 
-    assert seen["row_topic"].startswith("#topics?t=")
+    assert seen["row_topic"].startswith("#revisar/topics?t=")
     assert seen["from_card"]["hash"] == seen["row_topic"] and seen["from_card"]["detail"]
 
 
@@ -806,8 +896,8 @@ def test_returning_keeps_the_scroll_and_only_entering_a_topic_jumps_to_the_tab(t
 def test_the_sort_travels_with_the_back_link_and_the_tab_link(topics_probed):
     _data_, seen = topics_probed
 
-    assert seen["back_href"] == "#topics?o=disagreeing&d=desc"
-    assert seen["tab_href"] == "#topics?o=disagreeing&d=desc"
+    assert seen["back_href"] == "#revisar/topics?o=disagreeing&d=desc"
+    assert seen["tab_href"] == "#revisar/topics?o=disagreeing&d=desc"
 
 
 @_requires_chrome
@@ -1101,7 +1191,7 @@ def test_each_disagreement_kind_says_its_numbers_and_opens_exactly_its_posts(com
         assert kind["shown"] == str(s[posts]), key
         assert set(kind["ids"]) == _ids(data, key) and len(kind["ids"]) == s[posts], key
         assert kind["count"].startswith(f"mostrando {s[posts]} de"), key
-        assert kind["hash"] == f"#posts?f={key}" and kind["link"] == "ver los posts →", key
+        assert kind["hash"] == f"#revisar/posts?f={key}" and kind["link"] == "ver los posts →", key
         if pairs:
             assert kind["why"].endswith(f": {s[pairs]} topics en total."), key
 
@@ -1130,9 +1220,9 @@ def test_the_three_sentences_quote_the_header_numbers_and_open_their_posts(compa
     )
     assert prim["link"] == f"ver los {s['posts_primary_differs']} posts donde no coincide →"
     assert {k: v["href"] for k, v in seen["sentences"].items()} == {
-        "enrich_only": "#posts?f=enrich_only",
-        "adds": "#posts?f=adds",
-        "prim": "#posts?f=prim",
+        "enrich_only": "#revisar/posts?f=enrich_only",
+        "adds": "#revisar/posts?f=adds",
+        "prim": "#revisar/posts?f=prim",
     }
 
 
@@ -1158,7 +1248,7 @@ def test_the_topic_table_is_the_ten_worst_in_the_topics_tabs_order(compare_probe
     # Never assigned: no agreement to be 0 % of.
     assert seen["f01_cells"] == ["F01pocos datos", "0", "0", "—", "0"]
     assert gamma["disagreeing"] == 10 == len(seen["gamma_disc"]["ids"])
-    assert seen["gamma_disc"]["hash"] == "#posts?t=gamma"
+    assert seen["gamma_disc"]["hash"] == "#revisar/posts?t=gamma"
 
 
 @_requires_chrome
@@ -1183,7 +1273,7 @@ def test_each_band_says_its_numbers_and_opens_exactly_its_posts(compare_probed):
             and len(band["ids"]) == rows[key]["posts"]
         ), key
         assert band["head"].startswith(row["link"] + " · " + rows[key]["label"]), key
-        assert band["hash"] == f"#compare?b={key}" and band["under"] == "bands", key
+        assert band["hash"] == f"#revisar/compare?b={key}" and band["under"] == "bands", key
         assert band["in_view"] is True, key
     assert seen["bands"]["j-near"]["first"] == 20 and len(seen["bands"]["j-near"]["ids"]) == 22
 
@@ -1218,7 +1308,7 @@ def test_each_primary_cross_pair_is_ranked_named_and_opens_exactly_its_posts(com
         assert pair["ids"] == data["post_sets"]["px"][key], key
         assert pair["count"] == f"{n} post" + ("s" if n != 1 else ""), key
         assert pair["head"].startswith(pair["count"] + " · Principal · enrich: "), key
-        assert pair["hash"] == "#compare?px=" + key.replace("~", "%7E"), key
+        assert pair["hash"] == "#revisar/compare?px=" + key.replace("~", "%7E"), key
     assert seen["px"]["delta~otro"]["under"] == "otro"
     assert seen["px"]["gamma~omega"]["under"] == "cross"
 
@@ -1251,7 +1341,7 @@ def test_the_other_fallback_is_counted_with_its_posts_and_what_enrich_had(compar
     assert seen["otro_rows"] == [["delta~otro", "Delta", "5 posts"]]
     assert seen["otro_open"]["under"] == "otro"
     assert seen["otro_open"]["ids"] == data["post_sets"]["px"]["delta~otro"]
-    assert seen["otro_posts"]["hash"] == "#posts?f=fallback"
+    assert seen["otro_posts"]["hash"] == "#revisar/posts?f=fallback"
     assert (
         set(seen["otro_posts"]["ids"]) == _ids(data, "fallback")
         and len(seen["otro_posts"]["ids"]) == 5
@@ -1274,14 +1364,14 @@ def test_leaving_and_returning_keeps_each_tabs_view(compare_probed):
 
     assert seen["round"] == {
         "#compare?px=gamma~omega": {
-            "hash": "#compare?px=gamma%7Eomega",
+            "hash": "#revisar/compare?px=gamma%7Eomega",
             "ids": sets["px"]["gamma~omega"],
         },
-        "#compare?pd=delta": {"hash": "#compare?pd=delta", "ids": sets["pd"]["delta"]},
-        "#compare?b=e-lo": {"hash": "#compare?b=e-lo", "ids": sets["bands"]["e-lo"]},
+        "#compare?pd=delta": {"hash": "#revisar/compare?pd=delta", "ids": sets["pd"]["delta"]},
+        "#compare?b=e-lo": {"hash": "#revisar/compare?b=e-lo", "ids": sets["bands"]["e-lo"]},
     }
-    assert seen["posts_tab_href"] == "#posts?f=adds" and seen["posts_f_kept"] == "adds"
-    assert seen["cleared"] == {"hash": "#compare", "list": False}
+    assert seen["posts_tab_href"] == "#revisar/posts?f=adds" and seen["posts_f_kept"] == "adds"
+    assert seen["cleared"] == {"hash": "#revisar/compare", "list": False}
 
 
 @_requires_chrome
@@ -1289,7 +1379,7 @@ def test_one_list_at_a_time_band_first_and_the_tab_link_says_which(compare_probe
     data, seen = compare_probed
 
     assert seen["order_ids"] == data["post_sets"]["bands"]["e-near"]
-    assert seen["order_tab_href"] == "#compare?b=e-near"
+    assert seen["order_tab_href"] == "#revisar/compare?b=e-near"
 
 
 @_requires_chrome
@@ -1725,14 +1815,14 @@ def test_the_vocabulary_lists_every_topic_and_links_its_topics_page(config_probe
     assert seen["vocab"] == [
         {
             "label": t["label"],
-            "href": f"#topics?t={t['slug']}",
+            "href": f"#revisar/topics?t={t['slug']}",
             "slug": t["slug"],
             "desc": t["description"],
         }
         for t in data["topics"]
     ]
     first = data["topics"][0]
-    assert seen["after_link"]["hash"] == f"#topics?t={first['slug']}"
+    assert seen["after_link"]["hash"] == f"#revisar/topics?t={first['slug']}"
     assert seen["after_link"]["topics_seen"] is True
     assert seen["after_link"]["config_seen"] is False
     assert seen["after_link"]["heading"].startswith(first["label"])
@@ -1943,6 +2033,10 @@ const sPanel = () => ({
   close: txt(sId('ask-cancel')),
   progress: txt(sId('ask-progress')),
 });
+// The top tabs whose job block is out of sight, and what their badge says («tab:words»).
+const sBadges = () => [...document.querySelectorAll('#toptabs .tbadge')].filter(seen).map(b => b.parentNode.dataset.tab + ':' + b.textContent);
+// Which top tab the job block is in (`top-revisar`, `top-ask`, `top-config`).
+const sPanelTop = () => { const t = sId('jobp') && sId('jobp').closest('.toptab'); return t ? t.id : null; };
 const sBar = () => {
   const t = document.querySelector('#jobp [role=progressbar]');
   const f = t && t.firstElementChild;
@@ -2072,11 +2166,16 @@ _SERVE_PROBE = (
     const open = sPanel().shown;
     const onTitle = document.activeElement === sId('ask-title');
     const opener = [...sCard('4').querySelectorAll('button.evalb')].find(b => b.textContent === 'Evaluar este post');
+    // In the page, right under the card whose button opened it — not floating over it.
+    const box = sId('jobp'), r = box.getBoundingClientRect(), card = sCard('4').getBoundingClientRect();
+    const placed = {position: getComputedStyle(box).position, top: sPanelTop(), tab: box.closest('.tab').id,
+      after: box.previousElementSibling && box.previousElementSibling.id, below_card: r.top >= card.bottom - 1,
+      in_flow: box.offsetParent !== null && getComputedStyle(box).position === 'static'};
     sId('jobp').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     await sFetch0.call(window, '/probe-wait');
-    return {open, closed: !seen(sId('jobp')), on_title: onTitle,
+    return {open, placed, closed: !seen(sId('jobp')), on_title: onTitle,
       focus_back: document.activeElement === opener, roles: {
-      dialog: sId('jobp').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
+      region: sId('jobp').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
       live: sId('ask-progress').getAttribute('aria-live'),
       bar: !!document.querySelector('#jobp [role=progressbar][aria-valuemin="0"][aria-valuemax="100"]')}};
   });
@@ -2424,13 +2523,25 @@ def test_served_a_late_estimate_reply_never_overwrites_the_last_one(serve_probed
 
 
 @_requires_chrome
-def test_served_panel_is_a_labelled_dialog_that_escape_closes(serve_probed):
+def test_served_panel_is_a_labelled_region_that_escape_closes(serve_probed):
     escape = serve_probed["escape"]
 
     assert escape["open"] is True and escape["closed"] is True
     # Focus is on the panel while it is open, and back on the very button that opened it.
     assert escape["on_title"] is True and escape["focus_back"] is True
-    assert escape["roles"] == {"dialog": "dialog", "error": "alert", "live": "polite", "bar": True}
+    assert escape["roles"] == {"region": "region", "error": "alert", "live": "polite", "bar": True}
+
+
+@_requires_chrome
+def test_served_the_estimate_block_is_in_the_page_right_under_the_card_that_opened_it(
+    serve_probed,
+):
+    placed = serve_probed["escape"]["placed"]
+
+    # Víctor, 2026-09-27: «que esté integrado en la página» — never the floating corner panel.
+    assert placed["position"] == "static" and placed["in_flow"] is True
+    assert (placed["top"], placed["tab"], placed["after"]) == ("top-revisar", "tab-posts", "post-4")
+    assert placed["below_card"] is True
 
 
 @_requires_chrome
@@ -2466,7 +2577,13 @@ _PROGRESS_PROBE = (
   await sStep('mid', async () => {
     sId('ask-go').click();
     await sWait(() => /^[12] de 3 posts/.test(sPanel().progress || ''), 'la mitad del trabajo');
-    return Object.assign(sPanel(), sBar());
+    // Escape does not close a running job's block; and the block sits under the Posts toolbar
+    // whose button started it.
+    sId('jobp').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    const kept = sPanel().shown;
+    const after = sId('jobp').previousElementSibling;
+    return Object.assign(sPanel(), sBar(), {escape_kept: kept, top: sPanelTop(),
+      under_toolbar: !!after && after.classList.contains('controls')});
   });
   await sStep('end', async () => {
     await sWait(() => sRefreshed > 0, 'la recarga');
@@ -2548,6 +2665,16 @@ def test_served_progress_mid_job_shows_the_share_done(progress_probed):
     # The fill is drawn short of its track (no rule from the cost strip stretches it).
     assert 0 <= mid["fill"] < 0.9 * mid["track"]
     assert mid["stop"] == "Parar (se guarda lo ya pagado)" and mid["close"] == "Ocultar"
+
+
+@_requires_chrome
+def test_served_a_running_job_stays_under_the_toolbar_that_started_it_and_escape_keeps_it(
+    progress_probed,
+):
+    mid = progress_probed["mid"]
+
+    assert mid["escape_kept"] is True and mid["shown"] is True
+    assert mid["top"] == "top-revisar" and mid["under_toolbar"] is True
 
 
 @_requires_chrome

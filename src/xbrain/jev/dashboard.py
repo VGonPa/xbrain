@@ -80,6 +80,7 @@ from xbrain.jev.report import (
     ItemComparison,
     ask_cost,
     ask_cost_by_query,
+    ask_cost_total,
     assessment_cost_usd,
     bill,
     build_report,
@@ -880,6 +881,7 @@ NO_ASKS: dict[str, Any] = {
     "surfaces": {},
     "keys": {},
     "topic_counts": {},
+    "cost": ask_cost_total([]),
     "error": None,
 }
 #: The cost of a query no logged pass paid for (every answer came from the cache, or the
@@ -1075,6 +1077,12 @@ def asks_view(
         "surfaces": page.surfaces,
         "keys": page.keys,
         "topic_counts": counts,
+        # Every query together, for the tab's cost line: the report's total, or why not.
+        "cost": (
+            ask_cost_total(runs)
+            if runs is not None
+            else {"error": runs_error or "no se pudo leer runs.jsonl"}
+        ),
         "error": error,
     }
 

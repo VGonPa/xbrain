@@ -174,9 +174,16 @@ _ELSEWHERE_PROBE = (
     + r"""
 (async () => {
   await sStep('opened', async () => {
-    await sWait(() => sPanel().shown, 'el panel del trabajo que acabó mal en otra pestaña');
+    // The page opens on Revisar: a topics job's block shows here; an ask's is in Preguntar,
+    // with a badge on that tab saying there is something to read.
+    await sWait(() => sPanel().shown || sBadges().length > 0, 'el panel del trabajo que acabó mal en otra pestaña');
+    const badges = sBadges(), top = sPanelTop(), shown_here = sPanel().shown;
+    if (!shown_here) {
+      document.querySelector('#toptabs a[data-tab="ask"]').click();
+      await sWait(() => sPanel().shown, 'el panel en Preguntar');
+    }
     await sWait(() => sRefreshed > 0, 'la recarga');
-    return sPanel();
+    return Object.assign(sPanel(), {badges, top, shown_here, badges_after: sBadges()});
   });
   sDone();
 })();
@@ -256,6 +263,13 @@ def test_a_job_that_failed_in_another_tab_opens_the_panel_here(elsewhere):
     )
     assert panel["error"] == "El trabajo falló: TYPESAFE_API_KEY no encontrada"
     assert panel["close"] == "Cerrar" and panel["stop"] is None and panel["go"] is None
+    # In the job's own top tab: a topics pass in Revisar (where the page opened), an ask in
+    # Preguntar — announced by a badge on that tab until the reader goes there.
+    if elsewhere["kind"] == "topics":
+        assert (panel["top"], panel["shown_here"], panel["badges"]) == ("top-revisar", True, [])
+    else:
+        assert (panel["top"], panel["shown_here"]) == ("top-ask", False)
+        assert panel["badges"] == ["ask:aviso"] and panel["badges_after"] == []
 
 
 # --------------------------------------------------------------------------- 375 px

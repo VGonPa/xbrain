@@ -329,7 +329,11 @@ const sQForm = (fields) => {
   await sStep('estimate', async () => {
     sQForm({'ask-q': '  ¿Cómo configuro   hooks en Claude Code? ', 'ask-evaluated': true});
     await sWait(() => sPanel().go, 'la estimación');
-    return Object.assign(sPanel(), {estimate: sLastEstimate});
+    const box = sId('jobp'), form = sId('ask-form').getBoundingClientRect();
+    const placed = {position: getComputedStyle(box).position, top: sPanelTop(),
+      after: box.previousElementSibling && box.previousElementSibling.id,
+      below_form: box.getBoundingClientRect().top >= form.bottom - 1};
+    return Object.assign(sPanel(), {estimate: sLastEstimate, placed});
   });
   await sStep('done', async () => {
     sId('ask-go').click();
@@ -415,6 +419,13 @@ def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_ser
     money = f"~{e['usd']:.5f}".replace(".", ",") + " $"
 
     assert estimate["title"] == "Preguntar: «¿Cómo configuro hooks en Claude Code?»"
+    # In Preguntar, right under the form that asked for it — never the floating corner panel.
+    assert estimate["placed"] == {
+        "position": "static",
+        "top": "top-ask",
+        "after": "ask-form",
+        "below_form": True,
+    }
     assert e["kind"] == "ask" and e["ids"] == ["1", "2"]
     assert e["pick"] == {"query": AskQuery.of(QUERY).text, "only_evaluated": True}
     assert estimate["force"] is None
@@ -657,8 +668,12 @@ _ASK_RESUME_PROBE = (
     + r"""
 (async () => {
   await sStep('resumed', async () => {
+    // Opened on Revisar: the running ask is announced on Preguntar's tab, and its block is there.
+    await sWait(() => sBadges().includes('ask:en curso'), 'el aviso en la pestaña Preguntar');
+    const badges = sBadges(), top = sPanelTop();
+    location.hash = '#ask';
     await sWait(() => sPanel().shown && /de 5 posts/.test(sPanel().progress || ''), 'el panel de la pregunta en curso');
-    return sPanel();
+    return Object.assign(sPanel(), {badges, top});
   });
   await sStep('end', async () => {
     await sWait(() => sRefreshed > 0, 'la recarga');
@@ -696,6 +711,7 @@ def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed)
     resumed, end = _step(ask_resumed, "resumed"), _step(ask_resumed, "end")
 
     assert resumed["title"] == "Pregunta en curso"
+    assert resumed["badges"] == ["ask:en curso"] and resumed["top"] == "top-ask"
     assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
     assert end["panel"]["progress"].startswith("5 respuestas guardadas · 5 resultados")
     assert [h["text"].split(" · ")[0] for h in end["history"]] == [QUERY]

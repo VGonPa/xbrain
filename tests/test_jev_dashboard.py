@@ -1572,14 +1572,25 @@ def _script_section(template: str, start: str, end: str) -> str:
     return template[template.index(start) : template.index(end)]
 
 
-def test_the_page_has_four_hash_routed_tabs_and_none_is_a_placeholder():
-    """#posts (default), #topics, #compare, #config — all four built; nothing on the page
-    promises a later PR any more."""
+def test_the_page_has_three_top_tabs_and_revisar_has_three_sub_tabs_all_hash_routed():
+    """Top: «Revisar topics» (`#revisar/…`, the default), «Preguntar» (`#ask`) and
+    «Configuración» (`#config`); inside Revisar, Posts, Topics and Comparar — all built; nothing
+    on the page promises a later PR any more. The old `#posts`, `#topics`, `#compare` are read
+    as the same views (`routeOf`), so bookmarks keep working."""
     template = _resource("jev.template.html")
 
-    for tab in ("posts", "topics", "compare", "config"):
-        assert f'href="#{tab}"' in template, tab
+    for tab, route in (
+        ("posts", "revisar/posts"),
+        ("topics", "revisar/topics"),
+        ("compare", "revisar/compare"),
+        ("config", "config"),
+    ):
+        assert f'href="#{route}" data-tab="{tab}"' in template, tab
         assert f'id="tab-{tab}"' in template, tab
+    for top in ("revisar", "ask", "config"):
+        assert f'id="top-{top}"' in template, top
+        assert f'data-tab="{top}"' in template, top
+    assert "if (REVISAR.includes(path)) return {tab: path, old: true};" in template
     assert 'class="soon"' not in template and ".soon" not in template
     for promise in ("siguiente PR", "PR posterior", "llega en", "llegan en"):
         assert promise not in template, promise
@@ -1745,7 +1756,7 @@ def test_the_topics_code_builds_text_nodes_and_only_links_inside_the_page():
     # `linkList` links each `row.href`; every row handed to it carries an `href` built by
     # `hashHref` a line above.
     assert set(re.findall(r"\bhref: (\w+)", topics)) == {"href"}
-    assert "return '#' + tab + (qs ? '?' + qs : '');" in topics
+    assert "return '#' + ROUTE[tab] + (qs ? '?' + qs : '');" in topics
 
 
 def test_the_topics_words_that_carry_meaning_are_pinned():

@@ -686,11 +686,16 @@ generates an Obsidian wiki.
   `MessageEvent`s. Which filter a card is in is decided in Python (`in` keys, tested equal to
   the report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
   disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
-  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Topics tab
-  (`#topics`, `#topics?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
+  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Three top
+  tabs: «Revisar topics» (cost strip, three numbers, sub-tabs Posts · Topics · Comparar under
+  `#revisar/…`), «Preguntar» (`#ask`, its own cost line `asks.cost` = `report.ask_cost_total`),
+  «Configuración» (`#config`); old `#posts|#topics|#compare` are rewritten in place. The
+  estimate → confirm → progress block is INLINE under what opened it (`placePanel`, anchor
+  selectors re-found after every redraw), never `position: fixed`. Topics tab
+  (`#revisar/topics`, `?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
   `primary_confusion` in report.py (counts only; the post lists are `report.post_sets`,
   page-only, never in topics-report.json); the page never tallies cards into a number. Comparar
-  tab (`#compare`, `?b=`/`?px=`/`?pd=`): `confidence_bands` (edges defined ONCE in
+  tab (`#revisar/compare`, `?b=`/`?px=`/`?pd=`): `confidence_bands` (edges defined ONCE in
   `report._BAND_SPECS`, cut at `ItemComparison.threshold`) and `per_topic.primary_both`, lists
   from `post_sets.bands` / `pd` / `px`; the template's `loadData(blob)` is the one place derived
   values are set. Configuración tab (`#config`, read-only): the blob's `config` block from

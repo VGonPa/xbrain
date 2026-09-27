@@ -233,20 +233,25 @@ details.saw[open]>summary{color:var(--ink)}
 .evalnext{display:inline-flex;gap:6px;align-items:center}
 .evalnext[hidden]{display:none}
 .evalnext input{width:64px;background:var(--surface-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:3px 6px;font-size:12px}
-.askp{position:fixed;right:16px;bottom:16px;z-index:20;width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;
-  background:var(--surface);border:1px solid var(--accent-line);border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.askp[hidden]{display:none}
-.askp .tsec{margin-top:0}
-.askp .est{margin:6px 0;font-size:13px}
-.askp .askf{display:flex;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--ink-muted);margin:6px 0}
-.askp .askf[hidden]{display:none}
-.askp .err{color:var(--failed);font-size:13px;margin:6px 0;overflow-wrap:anywhere}
-.askp .err[hidden]{display:none}
-.askp .prog[hidden]{display:none}
-.askp .pbar{display:block;height:6px;background:var(--hairline);border-radius:3px;overflow:hidden;margin:8px 0 4px}
-.askp .pbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
-.askp .askb{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
-.askp .askb button[hidden]{display:none}
+/* The estimate → confirm → progress block: in the page, under what opened it (never floating). */
+.jobp{margin:12px 0;background:var(--surface);border:1px solid var(--accent-line);border-radius:10px;padding:14px 16px;scroll-margin-top:14px}
+.jobp[hidden]{display:none}
+.jobp .tsec{margin-top:0}
+.jobp .est{margin:6px 0;font-size:13px}
+.jobp .askf{display:flex;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--ink-muted);margin:6px 0}
+.jobp .askf[hidden]{display:none}
+.jobp .err{color:var(--failed);font-size:13px;margin:6px 0;overflow-wrap:anywhere}
+.jobp .err[hidden]{display:none}
+.jobp .prog[hidden]{display:none}
+.jobp .pbar{display:block;height:6px;background:var(--hairline);border-radius:3px;overflow:hidden;margin:8px 0 4px}
+.jobp .pbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.jobp .askb{display:flex;gap:8px;justify-content:flex-start;flex-wrap:wrap;margin-top:10px}
+.jobp .askb button[hidden]{display:none}
+.tabs.top{margin-top:22px;border-bottom:1px solid var(--hairline)}
+.tbadge{margin-left:6px;font-size:10px;border-radius:999px;padding:0 6px;background:var(--accent-soft);color:var(--accent)}
+.tbadge[hidden]{display:none}
+.askcost{font-size:12.5px;color:var(--ink-muted);margin:6px 0 0}
+.money{color:var(--accent);font-weight:600}
 /* the Preguntar tab: form, results (the post cards, each with what it answers) and history */
 .askl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:26px;margin-top:22px;align-items:start}
 .askform{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:16px 18px;margin-bottom:18px}
@@ -460,9 +465,18 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   </section></noscript>
   <section class="banner" id="banner" hidden></section>
 
+  <!-- The three top tabs: reviewing the labels, asking the archive, how the page was built. -->
+  <nav class="tabs top" id="toptabs" aria-label="Secciones">
+    <a href="#revisar/posts" data-tab="revisar">Revisar topics<span class="tbadge" hidden></span></a>
+    <a href="#ask" data-tab="ask">Preguntar<span class="tbadge" hidden></span></a>
+    <a href="#config" data-tab="config">Configuración</a>
+  </nav>
+
+  <section id="top-revisar" class="toptab" aria-label="Revisar topics">
+  <div class="jobslot" id="jobslot-revisar"></div>
   <section class="panel" id="cost">
     <div class="phead">
-      <div><span class="kick">01 · Coste</span><h2>Coste y peticiones</h2></div>
+      <div><h2>Coste y peticiones</h2></div>
       <div class="sub">estimación a precio de lista, calculada desde los tokens registrados</div>
     </div>
     <div class="kpis" id="kpis"></div>
@@ -474,24 +488,24 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
 
   <section class="panel" id="numbers">
     <div class="phead">
-      <div><span class="kick">02 · Resumen</span><h2>Lo que dice Jev, en tres números</h2></div>
+      <div><h2>Lo que dice Jev, en tres números</h2></div>
       <div class="sub" id="numbers-sub">—</div>
     </div>
     <div class="facts" id="facts"></div>
   </section>
 
   <div class="tabbar">
-    <nav class="tabs" aria-label="Secciones">
-      <a href="#posts" data-tab="posts">Posts</a>
-      <a href="#topics" data-tab="topics">Topics</a>
-      <a href="#compare" data-tab="compare">Comparar Jev vs enrich</a>
-      <a href="#ask" data-tab="ask">Preguntar</a>
-      <a href="#config" data-tab="config">Configuración</a>
+    <nav class="tabs sub" id="subtabs" aria-label="Revisar">
+      <a href="#revisar/posts" data-tab="posts">Posts</a>
+      <a href="#revisar/topics" data-tab="topics">Topics</a>
+      <a href="#revisar/compare" data-tab="compare">Comparar</a>
     </nav>
+    <div class="vista-host" id="vista-host-revisar">
     <div class="vista" id="vista" role="group" aria-label="Cómo se ven los posts">
       <span>Vista</span>
       <button type="button" data-vista="x" aria-pressed="true">X</button>
       <button type="button" data-vista="local" aria-pressed="false">copia guardada</button>
+    </div>
     </div>
   </div>
 
@@ -525,11 +539,20 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   <section id="tab-compare" class="tab" hidden>
     <div id="compare-body"></div>
   </section>
+  </section>
+
+  <section id="top-ask" class="toptab" aria-label="Preguntar" hidden>
+  <div class="jobslot" id="jobslot-ask"></div>
   <section id="tab-ask" class="tab" hidden>
     <div id="ask-body"></div>
   </section>
+  </section>
+
+  <section id="top-config" class="toptab" aria-label="Configuración" hidden>
+  <div class="jobslot" id="jobslot-config"></div>
   <section id="tab-config" class="tab" hidden>
     <div id="config-body"></div>
+  </section>
   </section>
 
   <footer>
@@ -707,8 +730,28 @@ function renderNumbers() {
 
 /* ---------------------------------------------------------------- tabs (hash-routed) */
 const TABS = ['posts', 'topics', 'compare', 'ask', 'config'];
+/** The three top tabs. «Revisar topics» holds the cost strip, the three numbers and its own
+    sub-tabs (Posts, Topics, Comparar); Preguntar and Configuración are one view each. */
+const TOP_TABS = ['revisar', 'ask', 'config'];
+const REVISAR = ['posts', 'topics', 'compare'];
+/** Each view's route: `#revisar/posts`, `#revisar/topics`, `#revisar/compare`, `#ask`, `#config`.
+    The old `#posts`, `#topics` and `#compare` are read as the same views and the URL is
+    rewritten in place (`readHash`), so a bookmark keeps working. */
+const ROUTE = {posts: 'revisar/posts', topics: 'revisar/topics', compare: 'revisar/compare', ask: 'ask', config: 'config'};
+const topOf = (tab) => (REVISAR.includes(tab) ? 'revisar' : tab);
 /** The whole Posts view: filter, topic, search, sort. The hash carries it (bookmarkable). */
 const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc'};
+/** The Revisar sub-tab last shown: a bare `#revisar` returns to it. */
+let lastSub = 'posts';
+
+/** The view a hash path names, and whether that path is an old one to rewrite. */
+function routeOf(path) {
+  const tab = Object.keys(ROUTE).find(k => ROUTE[k] === path);
+  if (tab) return {tab: tab, old: false};
+  if (REVISAR.includes(path)) return {tab: path, old: true};
+  if (path === 'revisar') return {tab: lastSub, old: true};
+  return {tab: 'posts', old: false};
+}
 
 function readHash() {
   // Split on the FIRST '?': the tab is the part before it, decoded on its own (a malformed
@@ -717,7 +760,11 @@ function readHash() {
   const cut = raw.indexOf('?');
   let tab = cut === -1 ? raw : raw.slice(0, cut);
   try { tab = decodeURIComponent(tab); } catch (err) { tab = ''; }
-  view.tab = TABS.includes(tab) ? tab : 'posts';
+  const route = routeOf(tab);
+  view.tab = route.tab;
+  // An old route (`#posts?f=all`) becomes the new one with the same query, in place: no
+  // history entry, and no second `hashchange`.
+  if (route.old) history.replaceState(null, '', '#' + ROUTE[view.tab] + (cut === -1 ? '' : raw.slice(cut)));
   const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
   if (view.tab === 'topics') readTopicsHash(params);
   if (view.tab === 'compare') readCompareHash(params);
@@ -737,21 +784,45 @@ function writeHash() {
   if (view.t) params.set('t', view.t);
   if (view.q) params.set('q', view.q);
   if (view.s !== 'disc') params.set('s', view.s);
-  const hash = '#posts' + (params.toString() ? '?' + params.toString() : '');
+  const hash = hashHref('posts', params);
   // The Posts tab link carries the view, so leaving for another tab and coming back keeps it.
-  document.querySelector('.tabs a[data-tab="posts"]').setAttribute('href', hash);
+  setTabHref('posts', hash);
   if (view.tab !== 'posts') return;
   // replaceState: typing in the search box must not push one history entry per keystroke.
   if (location.hash !== hash) history.replaceState(null, '', hash);
 }
 /* end hash */
 
+/** A tab link's href — a sub-tab keeps its own view in it — and «Revisar topics» follows the
+    sub-tab last shown, so leaving Revisar and coming back returns to where the reader was. */
+function setTabHref(tab, href) {
+  document.querySelector('.tabs a[data-tab="' + tab + '"]').setAttribute('href', href);
+  if (tab === lastSub) document.querySelector('.tabs a[data-tab="revisar"]').setAttribute('href', href);
+}
+
 function showTab() {
+  const top = topOf(view.tab);
+  if (top === 'revisar') lastSub = view.tab;
+  TOP_TABS.forEach(t => { $('top-' + t).hidden = t !== top; });
   TABS.forEach(tab => { $('tab-' + tab).hidden = tab !== view.tab; });
   document.querySelectorAll('.tabs a').forEach(a => {
-    if (a.dataset.tab === view.tab) a.setAttribute('aria-current', 'page');
+    if (a.dataset.tab === view.tab || a.dataset.tab === top) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
+  setTabHref(lastSub, document.querySelector('.tabs a[data-tab="' + lastSub + '"]').getAttribute('href'));
+  placeVista();
+  if (SERVED()) placePanel();
+}
+
+/** «Vista: X | copia guardada» sits where the post cards are: Revisar's sub-tab bar, or the
+    head of Preguntar's results. One switch, moved; Configuración shows no card. */
+let vistaBox = null;
+function placeVista() {
+  // Held by reference: Preguntar's host is redrawn with the tab, and a switch left in a
+  // detached host is no longer found by its id.
+  vistaBox = vistaBox || $('vista');
+  const host = view.tab === 'ask' ? $('ask-vista-host') : $('vista-host-revisar');
+  if (host && vistaBox.parentNode !== host) host.appendChild(vistaBox);
 }
 
 /* ---------------------------------------------------------------- the filter rail */
@@ -1405,7 +1476,7 @@ function redrawPreviews(id) {
 }
 
 function renderVista() {
-  document.querySelectorAll('#vista button').forEach((b) => {
+  (vistaBox || $('vista')).querySelectorAll('button').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.vista === vista));
   });
 }
@@ -1527,6 +1598,7 @@ function update() {
   renderRail();
   renderActive();
   renderList();
+  if (SERVED()) placePanel();
 }
 
 /* ---------------------------------------------------------------- keyboard */
@@ -1598,10 +1670,11 @@ const postById = () => {
   return postMap;
 };
 
-/** A hash link inside the page: `#<tab>?<params>`, the params encoded by URLSearchParams. */
+/** A hash link inside the page: `#<route>?<params>` (`ROUTE`: `#revisar/topics?t=…`), the
+    params encoded by URLSearchParams. */
 function hashHref(tab, params) {
   const qs = new URLSearchParams(params).toString();
-  return '#' + tab + (qs ? '?' + qs : '');
+  return '#' + ROUTE[tab] + (qs ? '?' + qs : '');
 }
 
 function topicHref(slug) {
@@ -1991,13 +2064,14 @@ function renderTopicDetail() {
 
 /** Draws the tab. Guarded: after boot, a throw here would otherwise leave an emptied tab. */
 function renderTopics() {
-  document.querySelector('.tabs a[data-tab="topics"]').setAttribute('href', indexHref());
+  setTabHref('topics', indexHref());
   const detail = !!(topicsView.t || topicsView.unknownT);
   try {
     $('topics-index').hidden = detail;
     $('topic-detail').hidden = !detail;
     if (detail) renderTopicDetail();
     else renderTopicsIndex();
+    if (SERVED()) placePanel();
   } catch (err) {
     console.error(err);
     $('topics-index').hidden = true;
@@ -2326,7 +2400,7 @@ function compareNothing(box) {
 
 /** Draws the tab. Guarded: after boot, a throw here would otherwise leave an emptied tab. */
 function renderCompare() {
-  document.querySelector('.tabs a[data-tab="compare"]').setAttribute('href', compareHref());
+  setTabHref('compare', compareHref());
   const box = $('compare-body');
   try {
     box.replaceChildren();
@@ -2345,6 +2419,7 @@ function renderCompare() {
       box.appendChild(build());
       if (list && list.sec === key) box.appendChild(compareList(list));
     });
+    if (SERVED()) placePanel();
   } catch (err) {
     console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Comparar no pudo dibujarse: ' +
@@ -2918,6 +2993,9 @@ function askResults(row) {
     box.appendChild(none);
     return box;
   }
+  const vh = el('div', 'vista-host');
+  vh.id = 'ask-vista-host';
+  box.appendChild(vh);
   const head = el('div', 'askhead');
   head.id = 'ask-head';
   head.appendChild(el('h3', 'tsec', '«' + row.query + '»'));
@@ -3113,10 +3191,34 @@ function askHistoryCount(row) {
   return nf(shown) + ' de ' + answered;
 }
 
+/** What asking has cost, every query together: the report's total (`asks.cost`,
+    `report.ask_cost_total`) — never added up here; «—» and why when the run log is unreadable. */
+function askCostLine() {
+  const c = (DATA.asks && DATA.asks.cost) || null;
+  const line = el('p', 'askcost');
+  line.id = 'ask-cost';
+  if (!c) return line;
+  if (c.error) {
+    line.textContent = 'Lo que ha costado preguntar: — (' + c.error + ')';
+  } else if (!c.runs) {
+    line.textContent = 'Aún no se ha pagado ninguna pregunta.';
+  } else {
+    line.appendChild(document.createTextNode('Lo que ha costado preguntar: '));
+    line.appendChild(el('b', 'money', usd(c.cost_usd)));
+    line.appendChild(document.createTextNode(' en ' + pl(c.runs, 'pasada', 'pasadas') + ' y ' +
+      pl(c.requests, 'petición', 'peticiones') + unpricedWords(c.unpriced_providers) + '.'));
+  }
+  return line;
+}
+
+/** «, sin tarifa: a, b» — the providers a bill could not price. */
+const unpricedWords = (names) => (names && names.length ? ', sin tarifa: ' + names.join(', ') : '');
+
 function askHistory(open) {
   const side = el('aside', 'askside');
   side.setAttribute('aria-label', 'Consultas hechas');
   side.appendChild(el('h3', 'tsec', 'Consultas hechas'));
+  side.appendChild(askCostLine());
   side.appendChild(el('p', 'muted', 'Reabrir una consulta no cuesta nada: sus respuestas están guardadas.'));
   if (DATA.asks && DATA.asks.error) {
     const banner = el('p', 'err', 'No se pudo leer el historial: ' + DATA.asks.error);
@@ -3152,6 +3254,8 @@ function renderAsk() {
     grid.appendChild(main);
     grid.appendChild(askHistory(row));
     box.replaceChildren(grid);
+    placeVista();
+    if (SERVED()) placePanel();
   } catch (err) {
     console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Preguntar no pudo dibujarse: ' +
@@ -3214,6 +3318,10 @@ let PANEL = null;
 let ESTIMATES = 0;
 /** The button that opened the panel: focus goes back to it when the panel closes. */
 let opener = null;
+/** Where the panel lives: the top tab it belongs to, and the place in it (a CSS selector, found
+    again after every redraw) it sits right under — the card whose button opened it, the list or
+    the form. With no such place on screen it sits in its top tab's own slot (`#jobslot-…`). */
+let panelHome = {top: 'revisar', anchor: null};
 /** The last finished job whose files this page's data includes, by its `number` (`/api/job`'s):
     its `finished_at` is a time to the second, and two jobs can end in the same one. */
 let seenFinish = null;
@@ -3227,6 +3335,7 @@ let watchLostShown = false;
 function watchLost() {
   const P = panel();
   asking = null;
+  panelHome = {top: topOf(view.tab), anchor: null};
   watchLostShown = true;
   P.title.textContent = 'Sin contacto con el servidor';
   P.est.textContent = '';
@@ -3236,6 +3345,7 @@ function watchLost() {
   P.reload.hidden = false;
   P.box.hidden = false;
   showError('Se perdió el contacto con el servidor; recarga la página.');
+  placePanel();
 }
 
 function watchFound() {
@@ -3243,6 +3353,7 @@ function watchFound() {
   watchLostShown = false;
   P.error.hidden = true;
   P.box.hidden = true;
+  renderBadges();
 }
 
 /** A call to this page's server: GET without a body, POST (JSON, with the page's token) with
@@ -3340,14 +3451,69 @@ function panelButton(id, cls, text, onClick) {
   return b;
 }
 
+/** The place a job of `kind` goes when no button of this page opened it: an ask under the
+    Preguntar form, a topics pass at the top of Revisar. */
+const kindHome = (kind) => (kind === 'ask' ? {top: 'ask', anchor: '#ask-form'} : {top: 'revisar', anchor: null});
+
+/** The place right under the button that opened the panel, as a selector found again after a
+    redraw: the card (the block goes after it, never inside: a card is swapped whole when its
+    post is re-evaluated), the Posts toolbar, the topic chip, a list's or topic's row of
+    buttons, the Preguntar form. */
+function panelAnchor(from) {
+  if (!from || !from.isConnected) return null;
+  const card = from.closest('.card');
+  if (card && card.id) return '#' + card.id;
+  if (from.closest('#evalnext')) return '#tab-posts .controls';
+  if (from.closest('#active')) return '#active';
+  if (from.closest('#ask-form')) return '#ask-form';
+  for (const id of ['topic-pair', 'compare-list', 'topic-detail']) {
+    if (from.closest('#' + id)) return '#' + id + ' > .evalrow';
+  }
+  return null;
+}
+
+/** Puts the panel in its place (`panelHome`): under its anchor where one is on screen — else,
+    while its top tab is not the one shown, under any copy of it — else in its top tab's slot.
+    Called after every draw that can replace what it sat under. */
+function placePanel() {
+  if (!PANEL) return;
+  const box = PANEL.box;
+  const found = panelHome.anchor ? [...document.querySelectorAll(panelHome.anchor)] : [];
+  const shownTop = topOf(view.tab);
+  const spot = found.find(n => !n.closest('[hidden]')) || (panelHome.top !== shownTop ? found[0] : null);
+  if (spot) {
+    if (spot.nextElementSibling !== box) spot.after(box);
+  } else {
+    const slot = $('jobslot-' + panelHome.top);
+    if (box.parentNode !== slot) slot.appendChild(box);
+  }
+  renderBadges();
+}
+
+/** A small badge on a top tab whose panel is out of sight: a job running there, or an end
+    there that needs reading. */
+function renderBadges() {
+  document.querySelectorAll('#toptabs a[data-tab]').forEach(a => {
+    const badge = a.querySelector('.tbadge');
+    if (!badge) return;
+    const box = PANEL && PANEL.box;
+    const there = !!box && panelHome.top === a.dataset.tab && topOf(view.tab) !== a.dataset.tab &&
+      (following || !box.hidden);
+    badge.hidden = !there;
+    badge.textContent = there ? (following ? 'en curso' : 'aviso') : '';
+  });
+}
+
 function panel() {
   if (PANEL) return PANEL;
-  const box = el('section', 'askp');
+  const box = el('section', 'jobp');
   box.id = 'jobp';
   box.hidden = true;
-  box.setAttribute('role', 'dialog');
+  box.setAttribute('role', 'region');
   box.setAttribute('aria-labelledby', 'ask-title');
-  box.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
+  // Escape closes it — never while a job runs: «Ocultar» is the word for that, and a running
+  // job's block is the one place its spending is shown.
+  box.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !following) closePanel(); });
   const title = el('h3', 'tsec');
   title.id = 'ask-title';
   title.tabIndex = -1;
@@ -3385,7 +3551,7 @@ function panel() {
   const buttons = el('div', 'askb');
   [go, stop, reload, cancel].forEach(b => buttons.appendChild(b));
   [title, est, forceRow, error, prog, buttons].forEach(n => box.appendChild(n));
-  document.body.appendChild(box);
+  $('jobslot-revisar').appendChild(box);
   PANEL = {box, title, est, forceRow, force, error, prog, track, fill, progText, go, stop, reload, cancel};
   return PANEL;
 }
@@ -3396,6 +3562,7 @@ function closePanel() {
   const P = panel();
   P.box.hidden = true;
   if (!following) asking = null;
+  renderBadges();
   if (opener && document.body.contains(opener)) opener.focus();
 }
 
@@ -3420,7 +3587,9 @@ function openAsk(kind, ask, title, from) {
   const P = panel();
   watchLostShown = false;  // the panel is the reader's now
   opener = from || null;
+  if (!following) panelHome = {top: from ? topOf(view.tab) : kindHome(kind).top, anchor: panelAnchor(from) || kindHome(kind).anchor};
   P.box.hidden = false;
+  placePanel();
   P.title.focus();
   if (following) return;  // the running job's panel, as it is
   asking = {kind: kind, ask: ask, title: title, sent: null, estimate: null, seq: 0};
@@ -3572,6 +3741,7 @@ function follow(job) {
   P.forceRow.hidden = true;
   P.prog.hidden = false;
   panelMode('follow');
+  placePanel();
   progress(job);
   setTimeout(() => poll(0), POLL_MS);
 }
@@ -3580,6 +3750,10 @@ function follow(job) {
 function resume(job) {
   const P = panel();
   asking = null;
+  // Another tab's job (or this page's, after a reload): in its kind's place — under the button
+  // that was pressed here, when a refused confirm led to it and it is of the same kind.
+  const home = kindHome(job.kind);
+  panelHome = {top: home.top, anchor: panelHome.top === home.top && panelHome.anchor ? panelHome.anchor : home.anchor};
   P.title.textContent = KIND_RUNNING[job.kind] || 'Trabajo en curso';
   P.est.textContent = 'Empezó ' + when(job.started_at) + ' · ' + pl(job.total, 'post', 'posts') +
     '. ' + capText(job.max_usd);
@@ -3612,6 +3786,7 @@ function lost(err) {
   const P = panel();
   following = false;
   P.box.hidden = false;
+  renderBadges();
   panelMode('done');
   P.reload.hidden = false;
   showError('Se perdió el contacto con el servidor (' + err.message + '). El trabajo puede seguir ' +
@@ -3694,6 +3869,7 @@ function showEnd(job) {
   panelMode('done');
   P.prog.hidden = false;
   if (!endedCleanly(job)) P.box.hidden = false;
+  renderBadges();
   if (job.state === 'error') {
     P.progText.textContent = spentText(job);
     showError('El trabajo falló: ' + job.error);
@@ -3728,6 +3904,8 @@ async function endedElsewhere(job) {
   if (!endedCleanly(job)) {
     const P = panel();
     asking = null;
+    panelHome = kindHome(job.kind);
+    placePanel();
     P.title.textContent = KIND_ENDED[job.kind] || 'Un trabajo lanzado en otra pestaña';
     P.est.textContent = 'Empezó ' + when(job.started_at || job.finished_at) + ' · ' + pl(job.total, 'post', 'posts') + '.';
     P.forceRow.hidden = true;
@@ -3773,6 +3951,7 @@ function refresh(blob) {
   if (view.tab === 'compare') renderCompare();
   if (view.tab === 'ask') renderAsk();
   if (view.tab === 'config') renderConfig();
+  placePanel();
 }
 
 /** Whether a job this page is not following is running or has ended, asked at load and then
@@ -3876,7 +4055,7 @@ function boot() {
   });
   document.addEventListener('keydown', onKey);
   renderVista();
-  document.querySelectorAll('#vista button').forEach((b) => b.addEventListener('click', () => setVista(b.dataset.vista)));
+  vistaBox.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setVista(b.dataset.vista)));
   // A frame takes the theme it was drawn in: the system theme changing redraws them.
   // Every card again (an argument would be read as a post id): the frames take the new theme.
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => redrawPreviews());
