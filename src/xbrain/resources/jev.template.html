@@ -211,6 +211,28 @@ details.saw[open]>summary{color:var(--ink)}
 .ask code{font-family:var(--mono);font-size:11.5px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere}
 .ask button{background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px}
 .ask button:hover{border-color:var(--accent-line)}
+/* Serve mode: the evaluate buttons and the estimate → confirm → progress panel. */
+.evalb{background:var(--surface-2);border:1px solid var(--accent-line);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;font-family:var(--ui)}
+.evalb:hover{background:var(--accent-soft)}
+.evalb:disabled{opacity:.45;cursor:default}
+.evalb.go{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.evalrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.evalnext{display:inline-flex;gap:6px;align-items:center}
+.evalnext input{width:64px;background:var(--surface-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:3px 6px;font-size:12px}
+.askp{position:fixed;right:16px;bottom:16px;z-index:20;width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;
+  background:var(--surface);border:1px solid var(--accent-line);border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.askp[hidden]{display:none}
+.askp .tsec{margin-top:0}
+.askp .est{margin:6px 0;font-size:13px}
+.askp .askf{display:flex;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--ink-muted);margin:6px 0}
+.askp .askf[hidden]{display:none}
+.askp .err{color:var(--failed);font-size:13px;margin:6px 0;overflow-wrap:anywhere}
+.askp .err[hidden]{display:none}
+.askp .prog[hidden]{display:none}
+.askp .bar{height:6px;background:var(--hairline);border-radius:3px;overflow:hidden;margin:8px 0 4px}
+.askp .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.askp .askb{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+.askp .askb button[hidden]{display:none}
 .echips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .echips span{font-size:12px;border:1px solid var(--hairline);border-radius:999px;padding:1px 9px}
 
@@ -422,6 +444,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
             <option value="cost">Más caros primero</option>
           </select>
           <span class="count" id="count">—</span>
+          <span class="evalnext" id="evalnext" hidden></span>
         </div>
         <div class="chipline" id="active"></div>
         <p class="keys">Teclado: <kbd>j</kbd>/<kbd>k</kbd> siguiente / anterior post · <kbd>n</kbd>/<kbd>p</kbd> siguiente / anterior con discrepancias</p>
@@ -1031,6 +1054,7 @@ function jevBlock(p) {
     if (j.topics.length) box.appendChild(topicTable(j.topics));
     box.appendChild(primaries(j));
     box.appendChild(whatJevSaw(j));
+    if (SERVED()) box.appendChild(evalButton(EVAL_AGAIN, {ids: [p.id], force: true}));
     return box;
   }
   h.appendChild(el('span', 'badge', STATUS[p.status] || 'sin evaluar por Jev'));
@@ -1048,7 +1072,7 @@ function jevBlock(p) {
   if (p.no_evidence) {
     box.appendChild(el('p', 'muted', 'sin evidencia: el post no tiene texto ni fuentes que preguntar, y `xbrain jev topics` lo salta.'));
   } else {
-    box.appendChild(askLine(p.id));
+    box.appendChild(SERVED() ? evalButton(EVAL_POST, {ids: [p.id]}) : askLine(p.id));
   }
   return box;
 }
@@ -1168,6 +1192,7 @@ function renderActive() {
     b.type = 'button';
     b.addEventListener('click', () => { view.t = ''; update(); });
     box.appendChild(b);
+    if (SERVED()) box.appendChild(topicEvalButton(view.t));
   }
 }
 
@@ -1552,6 +1577,7 @@ function renderPair(box, slug, pair) {
   sec.appendChild(el('h3', 'tsec', title + ' · ' + pl(row.posts, 'post', 'posts')));
   const clear = hashHref('topics', {t: slug});
   sec.appendChild(link(clear, 'lk', 'quitar este cruce ✕'));
+  if (SERVED()) sec.appendChild(evalRow(evalButton(EVAL_THESE, {pair: {kind: kind, key: pair.key}, force: true})));
   if (posts.length < pair.ids.length) {
     sec.appendChild(el('p', 'note', nf(pair.ids.length - posts.length) + ' de ' + nf(pair.ids.length) + ' posts no están en esta página.'));
   }
@@ -1604,6 +1630,7 @@ function renderTopicDetail() {
   box.appendChild(h);
   box.appendChild(el('p', 'tdesc', DESC[slug] || ''));
   box.appendChild(topicNumbers(r));
+  if (SERVED()) box.appendChild(evalRow(topicEvalButton(slug)));
 
   box.appendChild(el('h3', 'tsec', 'Con qué se confunde'));
   box.appendChild(el('p', 'muted', 'En los posts donde este topic está solo en un lado: qué topic puso el otro lado en su lugar. Pulsa un cruce para ver exactamente esos posts.'));
@@ -1704,20 +1731,20 @@ function resolveCompareList() {
     const row = S.confidence_bands.find(r => r.key === compareView.b);
     const ids = own(sets.bands, compareView.b);
     if (!row || !ids) return {sec: 'bands', stale: true};
-    return {sec: 'bands', ids: ids, count: row.posts, title: row.label + ' (' + bandRange(row) + ')'};
+    return {sec: 'bands', ids: ids, count: row.posts, title: row.label + ' (' + bandRange(row) + ')', ask: {band: compareView.b, force: true}};
   }
   if (compareView.px) {
     const row = S.primary_confusion.find(r => pairKey(r) === compareView.px);
     const ids = own(sets.px, compareView.px);
     if (!row || !ids) return {sec: 'cross', stale: true};
     const title = 'Principal · enrich: ' + otherName(row.enrich, 'px', 'enrich') + ' · Jev: ' + otherName(row.jev, 'px', 'jev');
-    return {sec: row.jev === DATA.fallback ? 'otro' : 'cross', ids: ids, count: row.posts, title: title};
+    return {sec: row.jev === DATA.fallback ? 'otro' : 'cross', ids: ids, count: row.posts, title: title, ask: {pair: {kind: 'px', key: compareView.px}, force: true}};
   }
   if (compareView.pd) {
     const row = own(topicRows(), compareView.pd);
     const ids = own(sets.pd, compareView.pd);
     if (!row || !ids) return {sec: 'cross', stale: true};
-    return {sec: 'cross', ids: ids, count: row.primary_both, title: 'Principal · los dos eligen ' + label(compareView.pd)};
+    return {sec: 'cross', ids: ids, count: row.primary_both, title: 'Principal · los dos eligen ' + label(compareView.pd), ask: {pair: {kind: 'pd', key: compareView.pd}, force: true}};
   }
   return null;
 }
@@ -1947,6 +1974,7 @@ function compareList(list) {
   sec.appendChild(el('h3', 'tsec', pl(list.ids.length, 'post', 'posts') + ' · ' + list.title));
   const clear = hashHref('compare', {});
   sec.appendChild(link(clear, 'lk clear', 'cerrar esta lista ✕'));
+  if (SERVED()) sec.appendChild(evalRow(evalButton(EVAL_THESE, list.ask)));
   if (list.count !== list.ids.length) {
     sec.appendChild(el('p', 'note', 'El resumen cuenta ' + pl(list.count, 'post', 'posts') + ' en este grupo; la lista tiene ' + nf(list.ids.length) + '.'));
   }
@@ -2263,6 +2291,314 @@ function renderConfig() {
 }
 /* end config */
 
+/* ---------------------------------------------------------------- serve mode */
+/* serve */
+/* The page as `xbrain jev serve` serves it (DATA.serve is set): buttons that ask the server
+   for an ESTIMATE of a selection, a confirmation, and ONE job — the same pass as
+   `xbrain jev topics`. Every number in the panel is the server's; the page only shows it and,
+   when the job ends, loads the new data (`loadData`) and re-draws in place. The file
+   `xbrain jev dashboard` writes has DATA.serve null and none of this: it keeps «copiar
+   comando». Only relative paths are fetched — the API is this page's own server. */
+const SERVED = () => !!(DATA && DATA.serve);
+const EVAL_POST = 'Evaluar este post';
+const EVAL_AGAIN = 'Re-evaluar';
+const EVAL_THESE = 'Evaluar estos posts';
+const NEXT_DEFAULT = 20;
+/** The selection the panel is about: what was asked, what was sent, what the server said. */
+let asking = null;
+/** True while a job is being followed: another button re-opens its panel instead. */
+let following = false;
+let PANEL = null;
+
+/** A call to this page's server: GET without a body, POST (JSON, with the page's token) with
+    one. The server's Spanish error, when it gives one, is the message. */
+function api(path, body) {
+  const init = body === undefined ? {} : {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Xbrain-Token': DATA.serve.token},
+    body: JSON.stringify(body),
+  };
+  return fetch(path, init).then(async (r) => {
+    let data = null;
+    try { data = await r.json(); } catch (e) { data = null; }
+    if (!r.ok) throw new Error(data && data.error ? data.error : 'el servidor respondió ' + r.status);
+    if (data === null) throw new Error('respuesta ilegible del servidor');
+    return data;
+  });
+}
+
+function evalButton(text, ask) {
+  const b = el('button', 'evalb', text);
+  b.type = 'button';
+  b.addEventListener('click', () => openAsk(ask, text));
+  return b;
+}
+
+function evalRow(button) {
+  const row = el('div', 'evalrow');
+  row.appendChild(button);
+  return row;
+}
+
+/** «N sin evaluar» on a topic's button: the posts the page lists under it with no current
+    answer and something to ask about. A label — the estimate is the server's count. */
+function topicEvalButton(slug) {
+  const pending = DATA.posts.filter(p => p.slugs.includes(slug) && !p.no_evidence &&
+    (p.status === 'stale' || p.status === 'unevaluated')).length;
+  return evalButton('Evaluar este topic (' + nf(pending) + ' sin evaluar)', {topic: slug});
+}
+
+/** The Posts toolbar's «Evaluar los N siguientes sin evaluar», N typed by the reader. */
+function renderNextControl() {
+  const box = $('evalnext');
+  const n = el('input');
+  n.type = 'number';
+  n.min = '1';
+  n.value = String(NEXT_DEFAULT);
+  n.setAttribute('aria-label', 'Cuántos posts sin evaluar');
+  const words = () => 'Evaluar los ' + nf(Math.max(0, Math.floor(Number(n.value) || 0))) + ' siguientes sin evaluar';
+  const b = el('button', 'evalb', words());
+  b.type = 'button';
+  n.addEventListener('input', () => { b.textContent = words(); });
+  b.addEventListener('click', () => {
+    const k = Math.floor(Number(n.value));
+    if (k >= 1) openAsk({unevaluated: k}, words());
+  });
+  box.replaceChildren(n, b);
+  box.hidden = false;
+}
+
+function panel() {
+  if (PANEL) return PANEL;
+  const box = el('section', 'askp');
+  box.id = 'ask';
+  box.hidden = true;
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-labelledby', 'ask-title');
+  const title = el('h3', 'tsec');
+  title.id = 'ask-title';
+  const est = el('p', 'est');
+  est.id = 'ask-est';
+  const forceRow = el('label', 'askf');
+  const force = el('input');
+  force.type = 'checkbox';
+  force.id = 'ask-force';
+  forceRow.appendChild(force);
+  forceRow.appendChild(document.createTextNode('re-evaluar también las evaluaciones vigentes (se hace copia de topics.json antes)'));
+  force.addEventListener('change', estimate);
+  const error = el('p', 'err');
+  error.id = 'ask-error';
+  error.hidden = true;
+  const prog = el('div', 'prog');
+  prog.hidden = true;
+  const track = el('div', 'bar');
+  const bar = el('i');
+  track.appendChild(bar);
+  const progText = el('p', 'muted');
+  progText.id = 'ask-progress';
+  prog.appendChild(track);
+  prog.appendChild(progText);
+  const go = el('button', 'evalb go', 'Confirmar');
+  go.type = 'button';
+  go.id = 'ask-go';
+  go.addEventListener('click', confirmAsk);
+  const cancel = el('button', 'evalb', 'Cancelar');
+  cancel.type = 'button';
+  cancel.id = 'ask-cancel';
+  cancel.addEventListener('click', () => { box.hidden = true; if (!following) asking = null; });
+  const buttons = el('div', 'askb');
+  buttons.appendChild(go);
+  buttons.appendChild(cancel);
+  [title, est, forceRow, error, prog, buttons].forEach(n => box.appendChild(n));
+  document.body.appendChild(box);
+  PANEL = {box, title, est, forceRow, force, error, prog, bar, progText, go, cancel};
+  return PANEL;
+}
+
+function showError(text) {
+  const P = panel();
+  P.error.textContent = text;
+  P.error.hidden = false;
+}
+
+function openAsk(ask, title) {
+  const P = panel();
+  P.box.hidden = false;
+  if (following) return;  // the running job's panel, as it is
+  asking = {ask: ask, title: title, sent: null, estimate: null};
+  P.title.textContent = title;
+  P.force.checked = !!ask.force;
+  // «Los N siguientes sin evaluar» is never forced (the server refuses it).
+  P.forceRow.hidden = 'unevaluated' in ask;
+  P.prog.hidden = true;
+  P.go.hidden = false;
+  P.cancel.textContent = 'Cancelar';
+  estimate();
+}
+
+/** The selection as it will be sent: what the button asked, with the checkbox's `force`. */
+function selection() {
+  const sent = Object.assign({}, asking.ask);
+  if (!('unevaluated' in sent)) sent.force = panel().force.checked;
+  return sent;
+}
+
+async function estimate() {
+  if (!asking || following) return;
+  const P = panel();
+  const mine = asking;
+  P.error.hidden = true;
+  P.go.disabled = true;
+  P.est.textContent = 'Estimando…';
+  const sent = selection();
+  try {
+    const e = await api('/api/estimate', sent);
+    if (asking !== mine) return;  // another button was pressed meanwhile
+    mine.sent = sent;
+    mine.estimate = e;
+    P.est.textContent = pickText(e);
+    if (e.allowed) P.go.disabled = false;
+    else showError('No se puede evaluar: ' + e.refusal);
+  } catch (err) {
+    if (asking !== mine) return;
+    P.est.textContent = '';
+    showError('No se puede evaluar: ' + err.message);
+  }
+}
+
+function pickText(e) {
+  const parts = [pl(e.posts, 'post por evaluar', 'posts por evaluar') + ' · ' + usd(e.usd, 5)];
+  if (e.forced) parts.push(pl(e.forced, 'vigente que se re-evalúa', 'vigentes que se re-evalúan'));
+  if (e.skipped_current) parts.push(pl(e.skipped_current, 'vigente que no se repite', 'vigentes que no se repiten'));
+  if (e.skipped_no_evidence) parts.push(nf(e.skipped_no_evidence) + ' sin evidencia');
+  if (e.remaining) parts.push(nf(e.remaining) + ' quedan para otra vez');
+  return parts.join(' · ') + '. Es una estimación: la media de ' + nf(e.per_post.n) + ' de ' +
+    nf(e.per_post.of) + ' respuestas ya pagadas, por el número de posts. Tope por trabajo: ' +
+    dec(e.max_usd, 2) + ' $.';
+}
+
+async function confirmAsk() {
+  const e = asking && asking.estimate;
+  if (!e || !e.allowed || following) return;
+  const P = panel();
+  P.go.disabled = true;
+  P.error.hidden = true;
+  try {
+    const job = await api('/api/evaluate', Object.assign({}, asking.sent, {confirm_token: e.confirm_token}));
+    follow(job);
+  } catch (err) {
+    showError('No se puede evaluar: ' + err.message);
+  }
+}
+
+/** The panel turns into the job's progress, polled until it ends. */
+function follow(job) {
+  const P = panel();
+  following = true;
+  P.box.hidden = false;
+  P.go.hidden = true;
+  P.forceRow.hidden = true;
+  P.prog.hidden = false;
+  P.cancel.textContent = 'Ocultar';
+  progress(job);
+  poll();
+}
+
+async function poll() {
+  let job;
+  try {
+    job = await api('/api/job');
+  } catch (err) {
+    following = false;
+    showError('Se perdió el contacto con el servidor: ' + err.message);
+    return;
+  }
+  progress(job);
+  if (job.state === 'running' || job.state === 'starting') {
+    setTimeout(poll, 400);
+    return;
+  }
+  await finished(job);
+}
+
+function progress(job) {
+  const P = panel();
+  const total = job.total || 0;
+  const done = job.done || 0;
+  P.bar.style.width = (total ? Math.round(100 * done / total) : 0) + '%';
+  P.progText.textContent = nf(done) + ' de ' + nf(total) + ' posts · ' +
+    pl(job.answered || 0, 'respuesta', 'respuestas') + ' · ' + usd(job.usd, 5) + ' gastado' +
+    (job.failed_calls ? ' · ' + pl(job.failed_calls, 'llamada fallida', 'llamadas fallidas') : '');
+}
+
+function outcomeText(job) {
+  const o = job.outcome;
+  if (!o) return 'No se guardó nada.';
+  let t = pl(o.ok, 'evaluación guardada', 'evaluaciones guardadas') + ' · ' + usd(job.usd, 5) + ' gastado';
+  if (o.failed) t += ' · ' + pl(o.failed, 'fallida', 'fallidas') + ': ' + o.failures.map(f => f[0] + ' (' + f[1] + ')').join('; ');
+  if (o.unsaved) t += ' · ' + pl(o.unsaved, 'respuesta pagada sin guardar', 'respuestas pagadas sin guardar');
+  if (job.state === 'interrupted') {
+    t = 'Interrumpido (' + (job.reason === 'tope' ? 'se alcanzó el tope por trabajo' : 'se paró el servidor') + '): ' + t;
+  }
+  if (!o.logged) t += ' · la pasada no quedó en runs.jsonl' + (job.log_error ? ' (' + job.log_error + ')' : '');
+  return t;
+}
+
+async function finished(job) {
+  const P = panel();
+  following = false;
+  asking = null;
+  P.cancel.textContent = 'Cerrar';
+  if (job.state === 'error') {
+    P.progText.textContent = '';
+    showError('El trabajo falló: ' + job.error);
+  } else {
+    P.bar.style.width = '100%';
+    P.progText.textContent = outcomeText(job);
+  }
+  try {
+    refresh(await api('/api/data'));
+  } catch (err) {
+    showError('No se pudieron recargar los datos: ' + err.message + ' (recarga la página)');
+  }
+}
+
+/** New data in place: every value derived from it, the header, and the open tab. On Posts
+    the cards already drawn are swapped one by one, so the list and the scroll stay put. */
+function refresh(blob) {
+  loadData(blob);
+  renderStamp();
+  renderCost();
+  renderNumbers();
+  renderExcluded();
+  if (view.tab === 'posts') {
+    const byId = postById();
+    shown = shown.map(p => byId[p.id]).filter(Boolean);
+    renderRail();
+    renderActive();
+    document.querySelectorAll('#cards > .card').forEach(node => {
+      const p = byId[node.dataset.id];
+      if (p) node.replaceWith(safeCard(p));
+    });
+  }
+  if (view.tab === 'topics') renderTopics();
+  if (view.tab === 'compare') renderCompare();
+  if (view.tab === 'config') renderConfig();
+}
+
+/** Serve mode at load: the toolbar's control, and a job already running (the page was
+    reloaded mid-job) picked up where it is. */
+function bootServe() {
+  renderNextControl();
+  api('/api/job').then(job => {
+    if (job.state === 'running' || job.state === 'starting') {
+      panel().title.textContent = 'Trabajo en curso';
+      follow(job);
+    }
+  }, err => console.warn('jev serve: no se pudo leer /api/job', err));
+}
+/* end serve */
+
 /** What the numbers leave out, one phrase each: stale and orphaned answers, and evaluated
     posts with no enrichment to compare against. The Posts footer and the Comparar tab say it. */
 function excludedParts() {
@@ -2284,6 +2620,7 @@ let shownTopic = '';
 /** Everything that touches the DOM at load. Its single call site is wrapped. */
 function boot() {
   loadData(DATA);
+  if (SERVED()) bootServe();
   renderStamp();
   renderCost();
   renderNumbers();

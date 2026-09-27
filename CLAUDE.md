@@ -694,7 +694,8 @@ generates an Obsidian wiki.
   to the selection as asked; ONE background job calling `run_topics`, re-selected under the
   lock and refused if the posts moved; `[jev].serve_max_usd` refused by estimate AND enforced
   on real spend; Host on every route, Origin + token + JSON on every POST; Ctrl-C cancels the
-  job at its next call, exit 130). A paid pass holds `data/jev/.lock` (`jev/lock.py`, `flock`)
+  job at its next call, exit 130; the page's buttons live in the template's `/* serve */`
+  section, behind `SERVED()` — `blob.serve` is null in the static file). A paid pass holds `data/jev/.lock` (`jev/lock.py`, `flock`)
   from LOADING the side-car to saving it — `run_topics` refuses without it — so the terminal
   and the page never lose each other's records. `report` and `dashboard` re-read what was
   paid for, free. Key from

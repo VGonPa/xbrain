@@ -221,16 +221,20 @@ def _fixture() -> dict[str, Any]:
 
 
 def _open(page: Path, hash_: str = "") -> dict[str, Any]:
+    return _dump(page.as_uri() + hash_)
+
+
+def _dump(url: str, budget_ms: int = 8000) -> dict[str, Any]:
     assert CHROME is not None
-    result = subprocess.run(  # nosec B603 - fixed argv, a file this test wrote
+    result = subprocess.run(  # nosec B603 - fixed argv, a file or local server this test made
         [
             CHROME,
             "--headless=new",
             "--disable-gpu",
             "--no-sandbox",
-            "--virtual-time-budget=8000",
+            f"--virtual-time-budget={budget_ms}",
             "--dump-dom",
-            page.as_uri() + hash_,
+            url,
         ],
         capture_output=True,
         text=True,
@@ -1862,3 +1866,210 @@ def test_the_config_tab_draws_when_reached_from_another_tab(tmp_path):
 
     assert seen["hash"] == "#config"
     assert len(seen["titles"]) == 6 and seen["titles"][0] == "Ajustes"
+
+
+# --------------------------------------------------------------------------- served (PR 10b)
+#
+# The page as `xbrain jev serve` serves it, driven in Chrome against a REAL local server whose
+# jobs ask `tests/jev_fakes.FakeJevClient` — never TypeSafe. Each wait in the probe is a fetch
+# to the server, so real time passes for the job thread while Chrome's virtual clock waits.
+
+_SERVE_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
+const sOut = {};
+const sWait = async (cond, what) => {
+  for (let i = 0; i < 400; i++) {
+    if (cond()) return;
+    await fetch('/api/job');
+  }
+  throw new Error('nunca: ' + what);
+};
+const sStep = async (name, fn) => { try { sOut[name] = await fn(); } catch (e) { sOut[name] = 'ERROR ' + e.message; } };
+const sCard = id => document.getElementById('post-' + id);
+const sButtons = (root) => (root ? [...root.querySelectorAll('button.evalb')].filter(seen).map(b => b.textContent) : []);
+const sPress = (root, text) => [...root.querySelectorAll('button.evalb')].find(b => seen(b) && b.textContent === text).click();
+const sPanel = () => ({
+  title: txt(document.getElementById('ask-title')),
+  est: txt(document.getElementById('ask-est')),
+  error: txt(document.getElementById('ask-error')),
+  force: seen(document.getElementById('ask-force')) ? document.getElementById('ask-force').checked : null,
+  go: seen(document.getElementById('ask-go')) ? !document.getElementById('ask-go').disabled : null,
+  progress: txt(document.getElementById('ask-progress')),
+});
+(async () => {
+  await sStep('before', async () => {
+    await sWait(() => seen(sCard('3')), 'la tarjeta 3');
+    return {
+      card3: sButtons(sCard('3')),
+      card1: sButtons(sCard('1')),
+      copy: [...document.querySelectorAll('.ask code')].filter(seen).length,
+      next: sButtons(document.getElementById('evalnext')),
+      order: seenCards(document.getElementById('cards')),
+    };
+  });
+  await sStep('estimate', async () => {
+    sPress(sCard('3'), 'Evaluar este post');
+    await sWait(() => (txt(document.getElementById('ask-est')) || '').includes('por evaluar'), 'la estimación');
+    return sPanel();
+  });
+  await sStep('done', async () => {
+    document.getElementById('ask-go').click();
+    await sWait(() => (txt(document.getElementById('ask-progress')) || '').includes('guardada'), 'el final del trabajo');
+    await sWait(() => !sButtons(sCard('3')).includes('Evaluar este post'), 'la tarjeta 3 nueva');
+    return Object.assign(sPanel(), {
+      card3: sButtons(sCard('3')),
+      card3text: txt(sCard('3')),
+      order: seenCards(document.getElementById('cards')),
+    });
+  });
+  await sStep('force', async () => {
+    sPress(sCard('3'), 'Re-evaluar');
+    await sWait(() => (txt(document.getElementById('ask-est')) || '').includes('re-evalúa'), 'la estimación forzada');
+    const forced = sPanel();
+    document.getElementById('ask-force').click();
+    await sWait(() => (txt(document.getElementById('ask-error')) || '').includes('nada que evaluar'), 'la negativa');
+    const unforced = sPanel();
+    document.getElementById('ask-cancel').click();
+    return {forced: forced, unforced: unforced, closed: !seen(document.getElementById('ask'))};
+  });
+  await sStep('places', async () => {
+    const go = async (hash, root) => {
+      location.hash = hash;
+      await sWait(() => sButtons(document.getElementById(root)).length > 0, hash);
+      return sButtons(document.getElementById(root));
+    };
+    const band = Object.keys(DATA.post_sets.bands).find(k => DATA.post_sets.bands[k].length);
+    const cx = Object.keys(DATA.post_sets.cx)[0];
+    const places = {
+      posts_topic: await go('#posts?f=all&t=startups', 'active'),
+      topic: await go('#topics?t=startups', 'topic-detail'),
+      topic_pair: await go('#topics?t=startups&cx=' + encodeURIComponent(cx), 'topic-pair'),
+      band: await go('#compare?b=' + encodeURIComponent(band), 'compare-list'),
+    };
+    sPress(document.getElementById('compare-list'), 'Evaluar estos posts');
+    await sWait(() => (txt(document.getElementById('ask-est')) || '').includes('por evaluar'), 'la estimación de la banda');
+    places.band_panel = sPanel();
+    document.getElementById('ask-cancel').click();
+    return places;
+  });
+  const pre = document.createElement('pre');
+  pre.id = 'probe';
+  pre.textContent = JSON.stringify(sOut);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def serve_probed(tmp_path_factory) -> dict[str, Any]:
+    import threading
+
+    from tests.test_jev_serve import _Recorder, _repo
+    from xbrain.jev.serve import JevService, make_server
+
+    _need_chrome()
+    root = tmp_path_factory.mktemp("served")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        cfg = _repo(root, monkeypatch)
+        client = _Recorder()
+
+        class _Probed(JevService):
+            def page_html(self) -> str:
+                return super().page_html().replace("</body>", _SERVE_PROBE + "</body>")
+
+        service = _Probed(cfg, lambda: client)
+        server = make_server(service, 0)
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        )
+        thread.start()
+        try:
+            port = server.server_address[1]
+            seen = _dump(f"http://127.0.0.1:{port}/#posts?f=all", budget_ms=60000)
+        finally:
+            server.shutdown()
+            server.server_close()
+            service.stop()
+        seen["asked"] = client.asked
+        return seen
+    finally:
+        monkeypatch.undo()
+
+
+@_requires_chrome
+def test_served_cards_offer_to_evaluate_instead_of_a_command(serve_probed):
+    before = serve_probed["before"]
+
+    assert before["card3"] == ["Evaluar este post"]
+    assert before["card1"] == ["Re-evaluar"]
+    assert before["copy"] == 0
+    assert before["next"] == ["Evaluar los 20 siguientes sin evaluar"]
+
+
+@_requires_chrome
+def test_served_estimate_shows_the_servers_count_and_cost_before_anything_is_spent(serve_probed):
+    estimate = serve_probed["estimate"]
+
+    assert estimate["title"] == "Evaluar este post"
+    assert estimate["est"].startswith("1 post por evaluar · ~0,00000 $")
+    assert "Es una estimación: la media de 2 de 2 respuestas ya pagadas" in estimate["est"]
+    assert "Tope por trabajo: 1,00 $." in estimate["est"]
+    assert (estimate["force"], estimate["go"], estimate["error"]) == (False, True, None)
+
+
+@_requires_chrome
+def test_served_confirm_runs_one_job_and_the_card_updates_in_place(serve_probed):
+    done = serve_probed["done"]
+
+    assert serve_probed["asked"][0] == "3"
+    assert done["progress"].startswith("1 evaluación guardada · ~0,00000 $ gastado")
+    assert done["card3"] == ["Re-evaluar"]
+    assert "sin evaluar por Jev" not in done["card3text"]
+    # In place: the same cards, in the same order, the evaluated one swapped where it was.
+    assert done["order"] == serve_probed["before"]["order"]
+
+
+@_requires_chrome
+def test_served_force_is_explicit_and_a_refusal_is_shown_inline(serve_probed):
+    force = serve_probed["force"]
+
+    assert force["forced"]["force"] is True
+    assert "1 vigente que se re-evalúa" in force["forced"]["est"]
+    assert force["forced"]["go"] is True
+    assert force["unforced"]["force"] is False
+    assert force["unforced"]["go"] is False
+    assert force["unforced"]["error"].startswith("No se puede evaluar: nada que evaluar")
+    assert force["closed"] is True
+    # Only the one confirmed job reached the client.
+    assert serve_probed["asked"] == ["3"]
+
+
+@_requires_chrome
+def test_the_static_page_has_no_evaluate_control(probed):
+    """The file `jev dashboard` writes is not served: «copiar comando», never a button that
+    would POST to a server that is not there."""
+    data, _ = probed
+    page = render_jev_dashboard_html(data)
+
+    assert data["serve"] is None
+    assert '"serve": null' in page
+
+
+@_requires_chrome
+def test_served_topic_pair_and_band_views_offer_to_evaluate_their_posts(serve_probed):
+    places = serve_probed["places"]
+
+    # After the job only post 4 is still unevaluated under «startups».
+    assert places["posts_topic"] == ["Evaluar este topic (1 sin evaluar)"]
+    assert "Evaluar este topic (1 sin evaluar)" in places["topic"]
+    assert places["topic_pair"][0] == "Evaluar estos posts"
+    assert places["band"][0] == "Evaluar estos posts"
+    # Posts on a pair or band are current: the panel opens forced, and says what it re-asks.
+    assert places["band_panel"]["force"] is True
+    assert "vigente que se re-evalúa" in places["band_panel"]["est"] or (
+        "vigentes que se re-evalúan" in places["band_panel"]["est"]
+    )

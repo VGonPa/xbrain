@@ -2188,3 +2188,70 @@ def test_the_tab_describes_exactly_the_files_page_files_ships(tmp_path):
     assert described == {f["key"] for f in page_files(load_config(tmp_path))}
     assert "CONFIG_FILES[f.key] ||" not in config
     assert "if (!spec) throw new Error(" in config
+
+
+# --------------------------------------------------------------------------- serve mode (PR 10b)
+
+
+def test_the_static_blob_says_it_is_not_served():
+    """`serve` is null in the file `jev dashboard` writes: the page keeps «copiar comando».
+    The server sets it (`jev.serve`: token and cap) — tests/test_jev_serve.py."""
+    item = _item()
+
+    assert _data([item], {})["serve"] is None
+
+
+def _serve_code() -> str:
+    return _script_section(_resource("jev.template.html"), "/* serve */", "/* end serve */")
+
+
+def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_server():
+    serve = _serve_code()
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in serve, sink
+    # Relative URLs only: the API is this page's own server, never another origin.
+    assert set(re.findall(r"api\('([^']+)'", serve)) == {
+        "/api/estimate",
+        "/api/evaluate",
+        "/api/job",
+        "/api/data",
+    }
+    assert "'X-Xbrain-Token': DATA.serve.token" in serve
+    assert "http" not in re.sub(r"//.*|/\*.*?\*/", "", serve, flags=re.S)
+
+
+def test_the_serve_words_that_carry_meaning_are_pinned():
+    serve = _serve_code()
+
+    for words in (
+        "'Evaluar este post'",
+        "'Re-evaluar'",
+        "'Evaluar estos posts'",
+        "'Evaluar este topic ('",
+        "' sin evaluar)'",
+        "'Evaluar los '",
+        "' siguientes sin evaluar'",
+        "'Confirmar'",
+        "'Cancelar'",
+        "estimación: la media de ",
+        "re-evaluar también las evaluaciones vigentes (se hace copia de topics.json antes)",
+        "'No se puede evaluar: '",
+    ):
+        assert words in serve, words
+
+
+def test_the_page_draws_serve_controls_only_when_served():
+    """Every serve control is behind `SERVED()`; the static page keeps «copiar comando»."""
+    template = _resource("jev.template.html")
+
+    assert "const SERVED = () => !!(DATA && DATA.serve);" in template
+    assert "SERVED() ? evalButton(" in template
+
+
+def test_no_two_top_level_functions_share_a_name():
+    """The page is one script: a second `function x(` silently REPLACES the first everywhere.
+    The serve section's `estimateText` did exactly that to the Configuración tab's."""
+    names = re.findall(r"^function (\w+)\(", _resource("jev.template.html"), re.M)
+
+    assert sorted(n for n in set(names) if names.count(n) > 1) == []

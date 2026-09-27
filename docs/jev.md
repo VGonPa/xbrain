@@ -818,8 +818,30 @@ no option to listen on anything else. Photos are served from `<output_dir>/_medi
 folder `xbrain generate` mirrors them into; the server looks up which photos exist once, when
 it starts, so photos mirrored later show after a restart.
 
-It also answers a small JSON API, which is how the page asks Jev about posts without leaving
-the browser. Every step is the terminal's, run by the same code:
+**On the page**, served, the «copiar comando» line of a post without an answer becomes a button:
+
+- **Evaluar este post** on a post with no current answer, and **Re-evaluar** on one that has
+  one;
+- **Evaluar los N siguientes sin evaluar** in the Posts toolbar (N is yours to type, 20 by
+  default);
+- **Evaluar este topic (N sin evaluar)** next to an open topic, in Posts and in Topics;
+- **Evaluar estos posts** on a pair in Topics and on each list the Comparar tab opens (a band,
+  a primary pair). Those posts already have answers, so this one starts with re-evaluating
+  checked.
+
+A button opens a panel in the corner. The panel shows the server's estimate first: the posts,
+the dollars, what it skips, the mean the estimate uses and the cap. **Confirmar** only works
+when the server allows the job. The checkbox *re-evaluar también las evaluaciones vigentes*
+is `force`; ticking or clearing it re-estimates. A refusal from the server shows in the panel,
+in its own words. After you confirm, the panel shows a progress bar with posts done,
+answers and dollars spent. When the job ends, the page loads the new data and redraws in
+place: the cards on screen are swapped where they are, and the header, the numbers and the
+open tab are redrawn. If you reload the page while a job runs, the panel picks it up. The
+static `jev.html` never shows these buttons (its data says it is not served) and keeps
+«copiar comando».
+
+It also answers a small JSON API, which is what those buttons call. Every step is the
+terminal's, run by the same code:
 
 1. **Estimate** (`POST /api/estimate`). The selection is one of: some posts by id, a topic
    (the posts the page lists under it: enrich's topics and Jev's rows), the next N posts
