@@ -473,6 +473,9 @@ def test_the_results_follow_a_querys_answers_file_even_without_the_history(serve
 
     served.ask_run({"query": QUERY})
     query = AskQuery.of(QUERY)
+    # Read once, so the server holds this data; only the answers file changes after.
+    _, before, _ = served.request("GET", f"/api/ask/{query.sha}")
+    assert [r["id"] for r in before["results"]] == ["1", "3"]
     path = served.cfg.jev_asks_dir / f"{query.sha}.json"
     records = load_asks(path, query)
     records["3"] = records["3"].model_copy(update={"probability": 0.1})
