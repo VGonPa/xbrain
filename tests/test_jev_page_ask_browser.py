@@ -26,7 +26,6 @@ from tests.test_jev_page_browser import (
     _ended,
     _need_chrome,
     _page,
-    _page_saw,
     _requires_chrome,
     _served_dump,
     _start_job,
@@ -871,11 +870,14 @@ _ASK_RESUME_PROBE = (
     await sWait(() => sBadges().includes('ask:en curso'), 'el aviso en la pestaña Preguntar');
     const badges = sBadges(), top = sPanelTop();
     location.hash = '#ask';
-    await sWait(() => sPanel().shown && /de 5 posts/.test(sPanel().progress || ''), 'el panel de la pregunta en curso');
+    await sWait(() => sPanel().shown && / de 5 · /.test(sPanel().progress || ''), 'el panel de la pregunta en curso');
+    const label = sId('jobp').getAttribute('aria-labelledby'), named = txt(sId(label)) || sId(label).textContent;
     const prev = sId('jobp').previousElementSibling;
-    return Object.assign(sPanel(), {badges, top, after: prev && prev.id});
+    return Object.assign(sPanel(), {badges, top, after: prev && prev.id, named});
   });
   await sStep('end', async () => {
+    // Only now may the job answer: everything above was read while it ran.
+    await sFetch0.call(window, '/probe-release', {method: 'POST', body: '1'});
     await sWait(() => sRefreshed > 0, 'la recarga');
     location.hash = '#ask';
     await sWait(() => sQHistory().length === 1, 'el historial');
@@ -889,19 +891,29 @@ _ASK_RESUME_PROBE = (
 
 @pytest.fixture(scope="module")
 def ask_resumed(tmp_path_factory) -> dict[str, Any]:
-    watched, saw = _page_saw()
+    import threading
 
-    class _SlowFirst(_Asker):
+    from xbrain.jev.service import JevService
+
+    # The job waits for the probe: it answers only once the page has been read mid-job (the
+    # page looks at a followed ask at once, so a job that answered when the page first saw it
+    # would end before its badge and block could be read).
+    released = threading.Event()
+
+    class _Held(_Asker):
         def ask(self, state, questions):
-            if not self.asked:
-                saw.wait(60)
+            assert released.wait(90), "the probe never let the job answer"
             return super().ask(state, questions)
+
+    class _Releasing(JevService):
+        def probe_release(self, n: int) -> None:
+            released.set()
 
     return _served_dump(
         tmp_path_factory.mktemp("ask-resume"),
         _ASK_RESUME_PROBE,
-        client=_SlowFirst(),
-        base=watched,
+        client=_Held(),
+        base=_Releasing,
         before_dump=lambda service, port: _start_job(service, port, {"query": QUERY}, kind="ask"),
     )
 
@@ -910,11 +922,16 @@ def ask_resumed(tmp_path_factory) -> dict[str, Any]:
 def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed):
     resumed, end = _step(ask_resumed, "resumed"), _step(ask_resumed, "end")
 
-    assert resumed["title"] == "Pregunta en curso"
+    # A running ask's block is one status line: no title on screen (it stays the region's
+    # accessible name), the line says it.
+    assert resumed["title"] is None and resumed["named"] == "Pregunta en curso"
     assert resumed["badges"] == ["ask:en curso"] and resumed["top"] == "top-ask"
-    # An ask this page did not start still goes where an ask's block goes: under the form.
-    assert resumed["after"] == "ask-form"
-    assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
+    # An ask this page did not start still goes where a running ask's block goes: one status
+    # line right over its results gallery, which the tab shows (no query named).
+    assert resumed["after"] == "ask-refine"
+    assert re.match(
+        r"^Preguntando… [0-4] de 5 · \d+ muy relevantes \(≥ 0,70\) · ", resumed["progress"]
+    )
     assert end["panel"]["progress"].startswith("5 respuestas guardadas · 5 resultados")
     assert [h["text"].split(" · ")[0] for h in end["history"]] == [QUERY]
 

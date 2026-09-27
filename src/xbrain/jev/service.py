@@ -41,11 +41,21 @@ is parsed, what it selects and costs, and which pass it runs; everything below i
   that kept answers is recorded (a soft stop included); one stopped before keeping any, or
   whose every call failed, is not. A history that cannot be written after the answers were
   paid leaves the job `done` with its outcome and `history_error` — never «failed».
+* An ask job STREAMS its answers (`job_view(since=…)`, `/api/job?since=<cursor>`): the
+  answers the query already had (ranked) and then each new one the moment the pass banks it
+  (`run.run_pass`' `on_answer`), each as `dashboard.streamed_answer` — the blob's own
+  `ask.answer_view`. The stream is the job's memory, never a file read per poll. Its order is
+  ARRIVAL order; ranking is the reader's (the page's `askOrder` is `ask._rank`'s key), and at
+  the end the page takes `finish_ask`'s results from the reloaded blob. A cursor
+  (`<job number>-<index>`, or `0` for "from the start") names a place in ONE job's stream, so
+  across polls no answer is missed or handed over twice; one reply carries at most
+  `STREAM_PAGE` answers and says whether more are waiting. A topics job has no stream.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import threading
 import time
@@ -60,12 +70,14 @@ from xbrain.jev.ask import (
     AskPlan,
     AskQuery,
     ask_path,
+    current_answers,
     filter_posts,
     finish_ask,
     plan_ask,
     question_chars,
     same_selection,
     topic_counts,
+    use_minimum,
 )
 from xbrain.jev.assess import Selection, select_items
 from xbrain.jev.client import CallSkipped, JevClient, JevError, JevResult, Question
@@ -74,11 +86,12 @@ from xbrain.jev.dashboard import (
     build_page_data,
     collect_jev_media,
     render_jev_dashboard_html,
+    streamed_answer,
 )
 from xbrain.jev.defaults import DEFAULT_PROVIDER, tokens_cost_usd, unpriced
 from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.lock import PassLock, pass_lock
-from xbrain.jev.models import AskIndex
+from xbrain.jev.models import AskAssessment, AskIndex
 from xbrain.jev.questions import STATE_KEY
 from xbrain.jev.errors import ServeError, refuse
 from xbrain.jev.picks import (
@@ -107,6 +120,12 @@ CONFIRM_TTL_S = 600
 #: Float room at the cap: `n × mean` summed call by call must not refuse the n-th post the
 #: estimate allowed at exactly the cap.
 _CAP_ROOM = 1e-9
+#: Answers one `/api/job?since=` reply hands over at most; the rest wait for the next poll,
+#: which the page makes at once when a reply says `more`. What Jev read ships cut per surface
+#: (`dashboard.PAGE_SURFACE_CHARS`), so this bounds the reply's size too.
+STREAM_PAGE = 100
+#: A stream cursor: `0` (the start of whatever job is current) or `<job number>-<index>`.
+_CURSOR = re.compile(r"^(?:0|([1-9][0-9]*)-(0|[1-9][0-9]*))$")
 
 
 def _monotonic() -> float:
@@ -191,6 +210,14 @@ class _Job:
     #: `finished_at` is a time to the second, and two jobs can end in the same one (a free ask
     #: right after another): an idle tab that compared times missed the second end.
     number: int = 0
+    #: What the page's live results receive (`dashboard.streamed_answer` each), in arrival
+    #: order: the answers already current first, then each one the pass banks. `None` for a
+    #: kind that does not stream (topics). Append-only: a cursor is an index into it.
+    stream: list[dict[str, Any]] | None = None
+    #: How many answers the stream will hold if every post answers: current + to ask.
+    stream_expected: int = 0
+    #: The minimum the results open at (`ask.use_minimum`): the live list's refine default.
+    stream_min: float = 0.0
 
     def planned(self, state: dict[str, str]) -> float:
         """What this post was planned to cost: its own price when the kind knows it, else the
@@ -207,9 +234,39 @@ class _Job:
             return max(planned, self.priced_usd / self.priced_answers)
         return planned * max(1.0, self.priced_usd / self.planned_usd if self.planned_usd else 1.0)
 
-    def view(self) -> dict[str, Any]:
+    def view(self, since: tuple[int, int] | None = None) -> dict[str, Any]:
+        """What `/api/job` sends; with `since` (a parsed cursor, `_read_cursor`), the stream's
+        answers from there too — read under the same lock as the counters beside them."""
         with self.lock:
-            return self.view_unlocked()
+            view = self.view_unlocked()
+            if since is not None:
+                view["stream"] = self._stream_from(since)
+            return view
+
+    def _stream_from(self, since: tuple[int, int]) -> dict[str, Any] | None:
+        """At most `STREAM_PAGE` answers from the cursor `since`, and the cursor after them.
+        A cursor into another job (or `0`) starts at this job's first answer; one past this
+        job's end is not a cursor this server gave."""
+        if self.stream is None:
+            return None
+        number, index = since
+        if number != self.number:
+            index = 0
+        elif index > len(self.stream):
+            raise refuse(
+                f"cursor fuera de rango: el trabajo {self.number} tiene "
+                f"{len(self.stream)} respuestas"
+            )
+        answers = self.stream[index : index + STREAM_PAGE]
+        after = index + len(answers)
+        return {
+            "from": f"{self.number}-{index}",
+            "next": f"{self.number}-{after}",
+            "answers": answers,
+            "more": after < len(self.stream),
+            "expected": self.stream_expected,
+            "min": self.stream_min,
+        }
 
     def view_unlocked(self) -> dict[str, Any]:
         """`view` for a caller that already holds `lock`."""
@@ -599,7 +656,21 @@ class _AskKind:
         if not isinstance(pick, AskPick):  # pragma: no cover — the slot runs its own kind
             raise TypeError("an ask job carries an AskPick")
         job.post_price = _post_price(plan)
-        outcome = run_ask(cfg, plan, lambda: _Metered(make_client(), job), lock=lock, **_hooks(job))
+        answer = _stream_entry(cfg, plan, jev)
+        _open_stream(
+            job,
+            lambda: [answer(record, True) for _, record in current_answers(plan).ranked],
+            asking=len(plan.selection.items),
+            minimum=use_minimum(plan, pick.minimum),
+        )
+        outcome = run_ask(
+            cfg,
+            plan,
+            lambda: _Metered(make_client(), job),
+            lock=lock,
+            on_answer=lambda record: _stream(job, answer(record, False)),
+            **_hooks(job),
+        )
         try:
             found = finish_ask(cfg, plan, outcome, minimum=pick.minimum)
         except Exception as exc:
@@ -639,6 +710,72 @@ def _filters_from_query(params: dict[str, list[str]]) -> dict[str, Any]:
             raise refuse("el parámetro only_evaluated debe ser true o false")
         data["only_evaluated"] = flag
     return data
+
+
+def _stream_entry(
+    cfg: Config, plan: AskPlan, jev: JevPairs
+) -> Callable[[AskAssessment, bool], dict[str, Any]]:
+    """How one answer of `plan` goes on the job's stream: `dashboard.streamed_answer` over its
+    post, with the post's CURRENT topics answer at `[jev].threshold` — the blob's inputs."""
+    posts = {item.id: item for item in plan.candidates}
+    current = jev.current_by_id()
+
+    def entry(record: AskAssessment, cached: bool) -> dict[str, Any]:
+        return streamed_answer(
+            posts[record.item_id],
+            record,
+            current.get(record.item_id),
+            threshold=cfg.jev_threshold,
+            char_limit=cfg.jev_state_char_limit,
+            cached=cached,
+        )
+
+    return entry
+
+
+def _open_stream(
+    job: _Job, current: Callable[[], list[dict[str, Any]]], *, asking: int, minimum: float
+) -> None:
+    """The job's stream, opened with the answers the query already has (`current()`). Display
+    only: one that cannot be built is logged and the stream opens without them — the pass,
+    which pays, is never stopped by what the page shows."""
+    try:
+        opened = current()
+    except Exception as exc:
+        logger.warning(
+            "no se pudieron mostrar las respuestas ya guardadas (%s: %s)", type(exc).__name__, exc
+        )
+        opened = []
+    with job.lock:
+        job.stream = opened
+        job.stream_expected = len(opened) + asking
+        job.stream_min = minimum
+
+
+def _stream(job: _Job, entry: dict[str, Any]) -> None:
+    """`run_ask`'s `on_answer`: one banked answer onto the stream (append-only; a cursor is an
+    index). A display hook: `run._call_hook` logs what it raises and the answer is kept."""
+    with job.lock:
+        if job.stream is not None and not job.terminal:
+            job.stream.append(entry)
+
+
+def _read_cursor(params: dict[str, list[str]]) -> tuple[int, int]:
+    """`/api/job`'s query string: exactly one `since`, a cursor this server hands out (`0`, or
+    `<job number>-<index>` from a reply's `next`) as `(number, index)`; `0` is `(0, 0)`, which
+    names no job (they are numbered from 1). Anything else is a 400 naming it."""
+    unknown = sorted(set(params) - {"since"})
+    if unknown:
+        raise refuse(f"parámetro desconocido: {unknown[0]}")
+    values = params.get("since", [])
+    if len(values) != 1:
+        raise refuse("el parámetro since va una sola vez")
+    found = _CURSOR.match(values[0])
+    if found is None:
+        raise refuse(f"since no es un cursor: {values[0]!r} (0, o el `next` de una respuesta)")
+    if found.group(1) is None:
+        return 0, 0
+    return int(found.group(1)), int(found.group(2))
 
 
 def _post_price(plan: AskPlan) -> Callable[[dict[str, str]], float]:
@@ -1017,11 +1154,16 @@ class JevService:
                     return job.view_unlocked()
         raise ServeError(409, "no hay ningún trabajo en curso")
 
-    def job_view(self) -> dict[str, Any]:
-        """The current (or last) job, as `/api/job` sends it; `{"state": "idle"}` before any."""
+    def job_view(self, params: dict[str, list[str]] | None = None) -> dict[str, Any]:
+        """The current (or last) job, as `/api/job` sends it; `{"state": "idle"}` before any.
+        With a query string (`params`: `since=<cursor>`), its stream from that cursor too
+        (`stream`, `None` for a job with none — topics — or no job at all)."""
+        since = _read_cursor(params) if params else None
         with self._state:
             job = self._job
-        return {"state": "idle"} if job is None else job.view()
+        if job is None:
+            return {"state": "idle"} if since is None else {"state": "idle", "stream": None}
+        return job.view(since)
 
     def wait(self, timeout: float | None = None) -> None:
         """Block until the jobs this server started have ended (for tests and `stop`)."""

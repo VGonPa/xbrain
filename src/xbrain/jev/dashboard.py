@@ -23,7 +23,9 @@ NOTHING HERE RE-IMPLEMENTS A NUMBER.
   the default of the page's free refine — each through `ask.answer_view`, as compact columns
   (`answer_columns`) with each post's refine keys once (`asks.keys`), its cost
   `report.ask_cost_by_query`, and each topic's post count (`ask.topic_counts`) for the form —
-  so the static page shows what the server's `/api/asks` does.
+  so the static page shows what the server's `/api/asks` does. A served ask's answers reach
+  the page WHILE it runs through `streamed_answer`: the same `ask.answer_view`, one answer at a
+  time, with the same keys and what Jev read, so the live card and the final card agree.
 
 PURE, EXCEPT ONE FUNCTION. `compute_jev_dashboard_data` touches no disk: which media files
 exist is `collect_jev_media`'s answer, handed in. `build_page_data` is the IO shell that loads
@@ -1003,6 +1005,35 @@ def _ask_answers(saved: SavedAsk, page: _AskPage) -> tuple[dict[str, Any], int]:
         if item.id not in page.carded and item.id not in page.surfaces:
             page.surfaces[item.id] = _surfaces(item, page.char_limit)
     return answer_columns(views), found.answered
+
+
+def streamed_answer(
+    item: Item,
+    record: AskAssessment,
+    assessment: TopicAssessment | None,
+    *,
+    threshold: float,
+    char_limit: int,
+    cached: bool,
+) -> dict[str, Any]:
+    """ONE answer as a served ask hands it to the page mid-job (`/api/job?since=`): what the
+    blob carries for it after the job, answer by answer — `ask.answer_view` (probability as a
+    full float, model, the minute asked, the post's refine keys plus `n`, the size of the state
+    Jev read) and, for a post whose card has no Jev block (`assessment` is `None`: no current
+    topics answer), what Jev read (`_surfaces`, cut like the blob's). `cached`: an answer the
+    query already had, which this job does not pay for again (the page marks the new ones)."""
+    view = answer_view(item, record, assessment, threshold)
+    entry: dict[str, Any] = {
+        "id": view.id,
+        "p": view.p,
+        "model": view.model,
+        "asked_at": _minute(view.asked_at),
+        "keys": {**view.keys, "n": record.state_chars},
+        "cached": cached,
+    }
+    if assessment is None:
+        entry["surfaces"] = _surfaces(item, char_limit)
+    return entry
 
 
 def _filters_view(stored: dict[str, Any]) -> dict[str, Any]:

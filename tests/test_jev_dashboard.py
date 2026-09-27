@@ -2387,6 +2387,8 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
         "API.cancel",
         "API.data",
         "API.job",
+        # A followed ask's poll: the same relative route, with its stream cursor.
+        "API.job + (askLive ? '?since=' + encodeURIComponent(askLive.cursor",
         "API[mine.kind].estimate",
         "API[mine.kind].evaluate",
     ]

@@ -410,6 +410,7 @@ def run_ask(
     on_summary: Callable[[RunResult[AskAssessment]], None] | None = None,
     on_interrupted: Callable[[tuple[AskAssessment, ...], int], None] | None = None,
     on_logged: LoggedHook | None = None,
+    on_answer: Callable[[AskAssessment], None] | None = None,
     cancel: threading.Event | None = None,
 ) -> RunOutcome[AskAssessment]:
     """Ask `plan.query` about `plan.selection.items` — `run_pass` with the ask's call and file.
@@ -418,7 +419,9 @@ def run_ask(
     pass at a time, whatever it asks) — and its `records` are updated in place. Written whole
     to `data/jev/asks/<sha>.json`; logged as `kind: "ask"` with `query_sha`. No backup: an ask
     is never forced, so it only replaces an answer whose contract had already expired. Hooks,
-    `cancel` and what it raises are `run_topics`'. `ask.finish_ask` comes after.
+    `cancel` and what it raises are `run_topics`', plus `on_answer` (`run_pass`: each answer the
+    moment it is banked — how a served ask shows its results as they arrive). `ask.finish_ask`
+    comes after.
     """
     require_lock(cfg, lock)
     query, records, selection = plan.query, plan.records, plan.selection
@@ -453,6 +456,7 @@ def run_ask(
         on_summary=on_summary,
         on_interrupted=on_interrupted,
         on_logged=on_logged,
+        on_answer=on_answer,
     )
 
 
@@ -479,6 +483,7 @@ def run_pass(
     on_summary: Callable[[RunResult[R]], None] | None = None,
     on_interrupted: Callable[[tuple[R, ...], int], None] | None = None,
     on_logged: LoggedHook | None = None,
+    on_answer: Callable[[R], None] | None = None,
 ) -> RunOutcome[R]:
     """THE PASS, whatever is asked: client, checkpoint, save, log, release.
 
@@ -488,6 +493,11 @@ def run_pass(
     `CHECKPOINT_EVERY`, the Ctrl-C rescue, the save that names the bill, the run-log line on
     every exit path, the guarded release — exists here once. The caller has already checked
     the lock (`require_lock`) and made any backup; `records` is UPDATED IN PLACE.
+
+    `on_answer(record)` is told about each record the moment it is BANKED — before the
+    checkpoint's save, so a disk that fills does not hide a paid answer from the reader — in
+    arrival order, from the pool's calling thread. It is display (`_call_hook`): one that
+    raises is logged and the record is kept all the same.
     """
     # The records THIS pass paid for, in order of arrival. `records` also holds every
     # earlier pass's work, so reporting its length as the rescue would tell an operator who
@@ -508,6 +518,7 @@ def run_pass(
         nonlocal persisted
         records[record.item_id] = record
         banked[record.item_id] = record
+        _call_hook("on_answer", on_answer, record)
         if len(banked) % CHECKPOINT_EVERY == 0:
             count = len(banked)
             _save_side_car(save, path, paid=count)

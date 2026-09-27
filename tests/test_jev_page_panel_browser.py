@@ -652,11 +652,11 @@ def idle_lost(tmp_path_factory) -> dict[str, Any]:
 
         looks = 0
 
-        def job_view(self) -> dict[str, Any]:
+        def job_view(self, params: Any = None) -> dict[str, Any]:
             _Down.looks += 1
             if _Down.looks <= 6:
                 raise RuntimeError("se cayó")
-            return super().job_view()
+            return super().job_view(params)
 
     seen = _served_dump(
         tmp_path_factory.mktemp("idle-lost"), _IDLE_LOST_PROBE, client=_Recorder(), base=_Down
