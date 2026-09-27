@@ -702,3 +702,34 @@ def test_what_was_asked_is_only_read_by_this_page(
     status, _, _ = served.request("GET", path, **refusal)
 
     assert status == 403
+
+
+class _Triple(_PerChar):
+    """Bills three times what the plan said each post would cost."""
+
+    def ask(self, state, questions):
+        from dataclasses import replace
+
+        result = super().ask(state, questions)
+        return replace(result, input_tokens=3 * (result.input_tokens or 0))
+
+
+def test_answers_dearer_than_planned_raise_the_next_reservations(tmp_path: Path, monkeypatch):
+    """Planned p a post, billed 3p, cap 1.6 × the estimate (8p for five posts): reserving only
+    p would send the third post at 6p + p ≤ 8p and end at 9p, over the cap. Scaled by the
+    job's real/planned ratio, the third reserves 3p and is not sent."""
+    from xbrain.config import load_config
+
+    cfg = _repo(tmp_path, monkeypatch)
+    cap = _plan(cfg).estimate.usd * 1.6
+    config = cfg.repo_root / "config.toml"
+    config.write_text(config.read_text() + f"serve_max_usd = {cap!r}\n", encoding="utf-8")
+    s = _AskServed(load_config(cfg.repo_root), _Triple())
+    try:
+        job = s.ask_run({"query": QUERY})
+    finally:
+        s.close()
+
+    assert (job["state"], job["reason"]) == ("interrupted", "tope")
+    assert job["outcome"]["ok"] == 2
+    assert job["usd"] <= cap
