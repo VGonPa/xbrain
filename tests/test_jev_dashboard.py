@@ -208,7 +208,7 @@ def _data(
     options: dict[str, Any] = {
         "settings": _settings(**over),
         "id2note": {},
-        "updated": "SEP 22, 2026",
+        "updated": "2026-09-22",
         "now": NOW,
         "runs": [],
     }
@@ -672,7 +672,7 @@ def _compare_fixture() -> dict[str, Any]:
         COMPARE_VOCAB,
         settings=_settings(),
         id2note={},
-        updated="SEP 26, 2026",
+        updated="2026-09-26",
         runs=[],
         now=NOW,
     )
@@ -1465,7 +1465,10 @@ def test_the_word_noul_appears_nowhere_on_the_page():
 def test_the_page_names_the_threshold_as_config_and_links_the_docs():
     template = _resource("jev.template.html")
 
-    assert "(config)" in template
+    # The header's threshold is a link to where Configuración explains it (its row), not a
+    # «(config)» that names a file.
+    assert "'\">Umbral de topics '" in template and "(config)" not in template
+    assert 'data-cfg="threshold"' in template and "tr.id = 'cfg-' + C.settings[i].key" in template
     assert "DATA.threshold" in template
     assert "DATA.docs_url" in template
     assert _data([_item()], {"1": _assessment(_item())})["docs_url"] == DOCS_URL
@@ -1510,7 +1513,7 @@ def test_scraped_text_cannot_close_the_script_tag_or_break_the_parse():
         vocab,
         settings=_settings(),
         id2note={},
-        updated="SEP 22, 2026",
+        updated="2026-09-22",
         now=NOW,
         runs=[],
     )
@@ -1841,7 +1844,6 @@ def test_the_compare_words_that_carry_meaning_are_pinned():
     compare = _compare_code()
 
     for words in (
-        "'En tres frases'",
         "'Los tres tipos de desacuerdo'",
         "'Acuerdo por topic, peores primero'",
         "'Cruce del topic principal'",
@@ -1925,7 +1927,7 @@ def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():
         "probabilidad",
         "Lo que vio Jev",
         "recortado",
-        "sin evaluar por Jev",
+        "topics sin revisar por Jev",
         "sin evidencia",
         "copiar comando",
         "DATA.ask_command",
@@ -2044,7 +2046,7 @@ def test_the_page_is_built_from_one_settings_dict_keyed_like_the_defaults():
             VOCAB,
             settings={k: v for k, v in _settings().items() if k != "state_char_limit"},
             id2note={},
-            updated="SEP 22, 2026",
+            updated="2026-09-22",
             runs=[],
             now=NOW,
         )
@@ -2290,8 +2292,9 @@ def test_the_config_words_that_carry_meaning_are_pinned():
         "como si se volviera a preguntar todo",
         "(aún no existe: lo crea ",
         "'Modelo que se pedirá'",
-        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, "
-        "o un trabajo de `xbrain jev serve`",
+        "'Cambian lo que ves en esta página: '",
+        "'Se usan en la próxima pasada (`xbrain jev topics` o un trabajo de `xbrain jev serve`): '",
+        "'Se cambian en config.toml, nunca aquí.'",
         "'Tope por trabajo de xbrain jev serve'",
         "el servidor rechaza un trabajo cuya estimación lo pase",
         "no envía un post más cuando lo gastado y lo reservado",

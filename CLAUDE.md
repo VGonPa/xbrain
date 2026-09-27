@@ -691,7 +691,10 @@ generates an Obsidian wiki.
   `#revisar/…`), «Preguntar» (`#ask`, its own cost line `asks.cost` = `report.ask_cost_total`),
   «Configuración» (`#config`); old `#posts|#topics|#compare` are rewritten in place. The
   estimate → confirm → progress block is INLINE under what opened it (`placePanel`, anchor
-  selectors re-found after every redraw), never `position: fixed`. Topics tab
+  selectors re-found after every redraw; `closePanel` forgets the anchor when no job is
+  followed), never `position: fixed`; an ask estimate is held when the form changes after it
+  (`askEstimateStill`). `DATA.updated` is an ISO day the page words. The three numbers live
+  once, above the Revisar sub-tabs, with their Posts links (Comparar does not repeat them). Topics tab
   (`#revisar/topics`, `?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
   `primary_confusion` in report.py (counts only; the post lists are `report.post_sets`,
   page-only, never in topics-report.json); the page never tallies cards into a number. Comparar

@@ -1214,7 +1214,7 @@ def build_page_data(
         settings=cfg.jev_settings(),
         id2note=id2note,
         notes_dir=notes_dir,
-        updated=f"{now:%b} {now.day}, {now.year}".upper(),
+        updated=now.date().isoformat(),
         runs=runs,
         files=page_files(cfg, served=served),
         runs_error=runs_error,

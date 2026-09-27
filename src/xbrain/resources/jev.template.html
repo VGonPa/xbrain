@@ -26,7 +26,10 @@
   color-scheme:dark;
   --bg:#15202A; --surface:#1D2A35; --surface-2:#253543; --sunk:#111A22;
   --line:rgba(214,226,235,.13); --line-2:rgba(214,226,235,.07);
-  --text:#E6EDF2; --muted:#A2B2BF; --faint:#8395A5;
+  /* a form control's edge: ≥ 3:1 on every background a control sits on (WCAG 1.4.11);
+     --line stays for hairlines, which only separate */
+  --ctl:#6B7F91;
+  --text:#E6EDF2; --muted:#A2B2BF; --faint:#8FA0AF;
   --agree:#46B8A6; --agree-fill:#2E9C8C; --agree-soft:rgba(46,156,140,.16); --agree-line:rgba(70,184,166,.5);
   --pencil:#B3A6F7; --pencil-soft:rgba(160,144,240,.15); --pencil-line:rgba(179,166,247,.5);
   --money:#E6AE4E; --money-fill:#D99A2B; --money-ink:#1B1304; --money-soft:rgba(217,154,43,.14); --money-line:rgba(230,174,78,.5);
@@ -42,7 +45,8 @@
     color-scheme:light;
     --bg:#F1F4F6; --surface:#FFFFFF; --surface-2:#E8EDF1; --sunk:#E2E8ED;
     --line:rgba(26,37,48,.15); --line-2:rgba(26,37,48,.08);
-    --text:#1A2530; --muted:#4D5D6A; --faint:#5E6D79;
+    --ctl:#788794;
+    --text:#1A2530; --muted:#4D5D6A; --faint:#56656F;
     --agree:#1B7466; --agree-fill:#2E9C8C; --agree-soft:rgba(46,156,140,.13); --agree-line:rgba(27,116,102,.45);
     --pencil:#5642BF; --pencil-soft:rgba(86,66,191,.09); --pencil-line:rgba(86,66,191,.42);
     --money:#8A5808; --money-fill:#D99A2B; --money-ink:#1B1304; --money-soft:rgba(217,154,43,.15); --money-line:rgba(138,88,8,.45);
@@ -156,12 +160,15 @@ details.hist[open]>summary{margin-bottom:8px}
 .f:hover{background:var(--surface);color:var(--text)}
 .f[aria-pressed="true"]{background:var(--surface-2);color:var(--text);font-weight:600}
 .f .c{font-size:12.5px;font-weight:400;color:var(--faint);white-space:nowrap}
+.f .c .ok{color:var(--agree)}
 .f .c .d{color:var(--pencil)}
+.f .c .dn{display:inline-block;min-width:1.6em;text-align:right}
+.rail .thead{font-size:12px;color:var(--faint);text-align:right;margin:0 9px 2px}
 .f .c .z{opacity:.55}
 .controls{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;margin-bottom:12px}
 .controls input[type=search]{flex:1;min-width:200px;background:var(--surface);color:var(--text);
-  border:1px solid var(--line);border-radius:var(--r-m);padding:8px 12px;font-size:15px}
-.controls select,.tsort{background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:var(--r-m);padding:7px 10px;font-size:14px}
+  border:1px solid var(--ctl);border-radius:var(--r-m);padding:8px 12px;font-size:15px}
+.controls select,.tsort{background:var(--surface);color:var(--text);border:1px solid var(--ctl);border-radius:var(--r-m);padding:7px 10px;font-size:14px}
 .count{font-size:13.5px;color:var(--faint)}
 .keys{font-size:12.5px;color:var(--faint);margin:-2px 0 12px}
 .keys kbd{font-family:var(--code);font-size:11.5px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;margin:0 1px}
@@ -178,13 +185,39 @@ details.hist[open]>summary{margin-bottom:8px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:16px 20px 16px;margin-bottom:14px;scroll-margin-top:14px}
 .card.cur{border-color:var(--muted);box-shadow:0 0 0 1px var(--muted)}
 .card:focus{outline:none}
+.card:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .card.asked{border-left:4px solid var(--agree-line);border-left-color:color-mix(in srgb,var(--agree-fill) calc(var(--p,.5) * 100%),var(--line))}
 @container (min-width: 1010px){
   .card{display:grid;grid-template-columns:minmax(0,550px) minmax(0,1fr);column-gap:28px;align-items:start}
   .card>.twh,.card>.askr,.card>.empty{grid-column:1 / -1}
   .card>.pv{grid-column:1}
   .card>.jev{grid-column:2;margin-top:0;padding:0 0 0 24px;border-top:0;border-left:1px solid var(--line-2);position:sticky;top:14px}
+  /* X's frame carries the author and date, so the head holds only our links: it goes to the
+     top of Jev's column and the frame starts at the card's top edge (no empty band above it). */
+  .card.x{grid-template-rows:auto 1fr}
+  .card.x>.twh{grid-column:2;grid-row:1;padding-left:24px;border-left:1px solid var(--line-2);margin-bottom:0}
+  .card.x>.pv{grid-row:1 / span 2}
+  .card.x>.pv>.xembed:first-child{margin-top:0}
+  .card.x>.jev{grid-row:2;padding-top:10px}
 }
+/* A Preguntar result's side is short (a score, a fold, a button): it goes beside the post at a
+   much narrower list than Posts' topic table needs. The last row takes the post's extra height,
+   so the strip and Jev's block stay together at the top. */
+@container (min-width: 780px){
+  .asklist .card{display:grid;grid-template-columns:minmax(0,550px) minmax(200px,1fr);grid-template-rows:auto auto auto 1fr;column-gap:24px;align-items:start}
+  .asklist .card>.twh{grid-column:1 / -1;grid-row:1;padding-left:0;border-left:0}
+  .asklist .card>.pv{grid-column:1;grid-row:2 / -1}
+  .asklist .card>.askr{grid-column:2;grid-row:2;margin-top:0}
+  .asklist .card>.jev{grid-column:2;grid-row:3;margin-top:12px;border-top:0;padding:0;border-left:0;position:static}
+  .asklist .card>.askr,.asklist .card>.jev{padding-left:20px;border-left:1px solid var(--line-2)}
+  /* X's frame carries the author: our links head the side column, the frame starts at the top */
+  .asklist .card.x>.twh{grid-column:2;grid-row:1;padding-left:20px;border-left:1px solid var(--line-2)}
+  .asklist .card.x>.pv{grid-row:1 / -1}
+  .asklist .card.x>.pv>.xembed:first-child{margin-top:0}
+}
+.jev>details>summary{cursor:pointer;font-size:13.5px;color:var(--muted);overflow-wrap:anywhere}
+.jev>details>summary:hover,.jev>details[open]>summary{color:var(--text)}
+.jev>details[open]>summary{margin-bottom:8px}
 .twh{display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-height:28px}
 .av{width:34px;height:34px;border-radius:50%;background:var(--surface-2);color:var(--muted);display:grid;place-items:center;font-weight:600;font-size:15px;flex:none}
 .who{min-width:0;line-height:1.3}
@@ -274,7 +307,7 @@ details.saw[open]>summary{color:var(--text)}
 .evalb.primary:hover{opacity:.9;background:var(--text)}
 .evalrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
 .evalnext{display:inline-flex;gap:6px;align-items:center}
-.evalnext input{width:64px;background:var(--surface);border:1px solid var(--line);color:var(--text);border-radius:var(--r-s);padding:5px 7px;font-size:14px}
+.evalnext input{width:64px;background:var(--surface);border:1px solid var(--ctl);color:var(--text);border-radius:var(--r-s);padding:5px 7px;font-size:14px}
 
 /* The estimate → confirm → progress block: in the page, under what opened it (never floating).
    The amber edge says: this block is about money. */
@@ -294,6 +327,7 @@ details.saw[open]>summary{color:var(--text)}
 
 /* Preguntar */
 .askcost{font-size:13.5px;color:var(--muted);margin:4px 0 0}
+.askmain>.askcost{margin:0 0 12px}
 .money{color:var(--money);font-weight:600}
 /* Preguntar: the question is the page's one large thing; everything around it stays quiet */
 .askl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:32px;align-items:start}
@@ -301,13 +335,13 @@ details.saw[open]>summary{color:var(--text)}
 .askform.hero{padding:4px 0 18px;border-bottom:1px solid var(--line-2);margin-bottom:6px}
 .asklabel{display:block;font-size:14px;font-weight:600;color:var(--muted);margin-bottom:8px}
 .askform textarea{display:block;width:100%;font-family:var(--read);font-size:23px;line-height:1.4;color:var(--text);
-  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:16px 18px;resize:vertical;min-height:96px}
+  background:var(--surface);border:1px solid var(--ctl);border-radius:var(--r-l);padding:16px 18px;resize:vertical;min-height:96px}
 .askform textarea::placeholder{color:var(--faint);opacity:1}
 .askform textarea:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-color:transparent}
 .askform h4,.askrefine h4{font-size:13.5px;font-weight:600;color:var(--muted);margin:16px 0 8px}
 .pills{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .pill{position:relative}
-.pillb{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:999px;
+.pillb{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--ctl);border-radius:999px;
   padding:5px 12px 5px 14px;font-size:14px;color:var(--muted);cursor:pointer;max-width:320px}
 .pillb .pn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pillb .chev{width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:translateY(-2px) rotate(45deg);opacity:.75;flex:none}
@@ -318,14 +352,14 @@ details.saw[open]>summary{color:var(--text)}
 .pop{position:absolute;z-index:30;top:calc(100% + 6px);left:0;min-width:260px;max-width:min(420px,calc(100vw - 32px));
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:12px 14px;
   box-shadow:0 14px 34px -12px rgba(0,0,0,.45);overscroll-behavior:contain}
-.pop .find{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-s);padding:6px 9px;font-size:14px;margin-bottom:8px}
+.pop .find{width:100%;background:var(--bg);border:1px solid var(--ctl);border-radius:var(--r-s);padding:6px 9px;font-size:14px;margin-bottom:8px}
 .pop .muted{margin:8px 0 0;font-size:13px}
 .presets{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .preset{background:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:13.5px;color:var(--muted);cursor:pointer}
 .preset:hover{color:var(--text);border-color:var(--muted)}
 .range{display:flex;gap:10px;flex-wrap:wrap}
 .askfld{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);min-width:0;max-width:100%}
-.askfld input,.askfld select{font-size:14.5px;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:var(--r-s);padding:5px 8px;max-width:100%}
+.askfld input,.askfld select{font-size:14.5px;color:var(--text);background:var(--bg);border:1px solid var(--ctl);border-radius:var(--r-s);padding:5px 8px;max-width:100%}
 .askfld.chk{flex-direction:row;align-items:center;gap:7px;font-size:14px;color:var(--muted);padding:5px 4px;cursor:pointer}
 .askfld.chk input{accent-color:var(--agree-fill);width:15px;height:15px}
 .askfld.inline{flex-direction:row;align-items:center;gap:7px;font-size:14px}
@@ -364,12 +398,13 @@ details.saw[open]>summary{color:var(--text)}
 .askside ol{list-style:none;padding:0;margin:14px 0 0}
 .askside li a{display:block;padding:10px 12px;border-radius:var(--r-m);margin:0 -12px 2px;text-decoration:none;color:var(--text);overflow-wrap:anywhere}
 .askside li a:hover{background:var(--surface)}
-.askside li a[aria-current="true"]{background:var(--surface);box-shadow:inset 3px 0 0 var(--agree-fill)}
+.askside li a[aria-current="true"]{background:var(--surface);box-shadow:inset 3px 0 0 var(--text)}
 .askside li b{display:block;font-family:var(--read);font-weight:600;font-size:16px;line-height:1.35}
 .askside li small{display:block;color:var(--faint);font-size:13px;margin-top:4px}
 .askside .err{color:var(--error);font-size:13.5px}
 #ask-launch{color:var(--muted);font-size:14.5px;margin:0 0 14px;padding:12px 14px;border:1px dashed var(--line);border-radius:var(--r-m)}
-#ask-launch code{background:var(--sunk);border-radius:4px;padding:1px 5px}
+#ask-launch code{background:var(--sunk);border-radius:4px;padding:1px 5px;white-space:nowrap}
+#ask-launch .cmd{display:block;margin-top:6px}
 @media (max-width:900px){
   .askl{grid-template-columns:1fr}
   .askside{position:static;max-height:none;padding-left:0;border-left:0;border-top:1px solid var(--line-2);padding-top:18px}
@@ -430,8 +465,10 @@ details.saw[open]>summary{color:var(--text)}
 .csec .twrap{margin-top:12px}
 .fact .go{display:inline-block;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
 .otro-n+.pairs{margin-top:12px}
-.kinds{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:12px}
-.kind{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:14px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+/* flat, like the three numbers: three columns parted by hairlines, no boxes */
+.kinds{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px}
+.kind{padding:2px 24px 4px;border-left:1px solid var(--line-2);display:flex;flex-direction:column;gap:6px;min-width:0}
+.kind:first-child{padding-left:0;border-left:0}
 .cnum{font-size:25px;font-weight:600;line-height:1.15}
 .csec[data-sec="kinds"] .cnum,.csec[data-sec="otro"] .cnum{color:var(--pencil)}
 .cfg .kind .cnum{color:var(--money)}
@@ -453,9 +490,9 @@ details.saw[open]>summary{color:var(--text)}
 .cfg:first-child{margin-top:4px}
 .cfg>.muted,.cfg>.note{max-width:78ch}
 .cfg .t{margin-top:12px}
-.cfg .t td.cv{min-width:120px;font-weight:500}
+.cfg .t td.cv{min-width:120px;width:22%;font-weight:500}
 .cfg .t td.cv small{display:block;font-size:12.5px;font-weight:400;color:var(--faint);margin-top:3px}
-.cfg .t td.cw{color:var(--muted);max-width:520px}
+.cfg .t td.cw{color:var(--muted);width:38%}
 .cfg .t td.cp small.missing{display:block;font-size:12.5px;color:var(--money);margin-top:3px}
 .cfg .t td.ck code,.cfg .t td.cp code{font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
 .cfg .t td a.tl{font-weight:600;color:var(--text);text-decoration:none}
@@ -492,6 +529,8 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line-2);
   .browse{grid-template-columns:1fr}
   .rail{position:static;max-height:none}
   .kinds,.bands,.qgrid{grid-template-columns:1fr}
+  .kind{padding:10px 0;border-left:0;border-top:1px solid var(--line-2)}
+  .kind:first-child{padding-top:2px;border-top:0}
   .stamp{justify-content:flex-start;max-width:none}
 }
 @media (max-width:640px){
@@ -505,7 +544,8 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line-2);
   .vista{order:-1;flex:0 0 100%}
   .tabs.sub{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
   .tabs.sub a{text-align:center;padding:7px 4px;font-size:14.5px}
-  .card{padding:14px 14px 12px}
+  /* X's frame needs every pixel a phone has: the card gives it 12 px, not 20 */
+  .card{padding:12px}
   .links{margin-left:0;width:100%}
   .rows td.tp{width:auto;min-width:0}
   .rows td{padding-right:6px}
@@ -709,13 +749,31 @@ function loadData(blob) {
 }
 
 /* ---------------------------------------------------------------- header */
+/** A Configuración row to bring into view once that tab has drawn (`jumpToSetting`). */
+let cfgJump = null;
+
 function renderStamp() {
   const models = Object.keys(DATA.totals.models).sort();
+  // `DATA.updated` is the ISO day the page was built: worded like every other date here.
   $('stamp').innerHTML =
-    '<span>Actualizado <b>' + esc(DATA.updated) + '</b></span>' +
+    '<span>Actualizado <b>' + esc(DATA.updated ? day(DATA.updated + 'T12:00:00Z') : '—') + '</b></span>' +
     '<span>' + (models.length === 1 ? 'Modelo ' : 'Modelos ') + '<b>' + esc(models.join(', ') || '—') + '</b></span>' +
-    '<span>Umbral <b>' + esc(pfmt(DATA.threshold)) + '</b> (config)</span>' +
+    // The threshold means something only where it is explained: the link opens that row.
+    '<a data-cfg="threshold" href="' + esc(hashHref('config')) + '">Umbral de topics ' + esc(pfmt(DATA.threshold)) + '</a>' +
     '<a href="' + esc(DATA.docs_url) + '" target="_blank" rel="noopener">Documentación ↗</a>';
+  $('stamp').querySelector('a[data-cfg]').addEventListener('click', (e) => {
+    cfgJump = e.currentTarget.dataset.cfg;
+    // Already on Configuración: no hashchange will come, so bring the row into view now.
+    if (view.tab === 'config') { e.preventDefault(); jumpToSetting(); }
+  });
+}
+
+/** Brings the setting a header link asked for (`cfgJump`) into the middle of the screen, once,
+    at once — as any in-page link lands. */
+function jumpToSetting() {
+  const row = cfgJump && $('cfg-' + cfgJump);
+  cfgJump = null;
+  if (row && !row.closest('[hidden]')) row.scrollIntoView({block: 'center'});
 }
 
 /* ---------------------------------------------------------------- 01 cost */
@@ -749,18 +807,31 @@ function renderCost() {
     return;
   }
   const T = c.total;
-  const unknown = T.input_tokens_unknown ? ' (+' + nf(T.input_tokens_unknown) + ' respuestas sin recuento)' : '';
-  $('kpis').innerHTML =
-    // No logged pass is not a free history: a bare ~0,0000 $ would read as one.
-    kpi('Total', T.runs ? usd(T.cost_usd) : '—',
-      (T.runs ? pl(T.requests, 'petición', 'peticiones') + ' · ' + pl(T.input_tokens, 'token', 'tokens') +
-        ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') + unpricedNote(T.unpriced_providers)
-        : 'sin pasadas registradas')) +
-    perPost + stored;
   const out = c.out_of_log;
-  // Drawn again after a served job: a note that no longer applies goes away.
-  $('before-log').hidden = !out.assessments;
-  if (out.assessments) {
+  const unknown = T.input_tokens_unknown ? ' (+' + nf(T.input_tokens_unknown) + ' respuestas sin recuento)' : '';
+  // The strip opens on a number. Logged passes: their total. None logged but answers saved:
+  // what those answers cost, by their own tokens, named as such (no logged pass is not a free
+  // history, and a bare ~0,0000 $ would read as one). Nothing paid at all: «—», in ink.
+  let total;
+  if (T.runs) {
+    total = kpi('Total', usd(T.cost_usd), pl(T.requests, 'petición', 'peticiones') + ' · ' +
+      pl(T.input_tokens, 'token', 'tokens') + ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') +
+      unpricedNote(T.unpriced_providers));
+  } else if (out.assessments) {
+    total = kpi('Total', usd(out.cost_usd), 'sin pasadas registradas: ' +
+      (out.assessments === 1 ? 'lo que costó la evaluación guardada'
+        : 'lo que costaron las ' + nf(out.assessments) + ' evaluaciones guardadas') +
+      ', estimado por sus propios tokens' + unpricedNote(out.unpriced_providers || []));
+  } else {
+    total = kpi('Total', '—', 'sin pasadas registradas: aún no se ha pagado nada', true);
+  }
+  $('kpis').innerHTML = total + perPost + stored;
+  // Answers out of the log beside a logged total: said apart, since they are not in it. With
+  // no logged pass the Total above already is their cost. Drawn again after a served job: a
+  // note that no longer applies goes away.
+  const apart = !!(T.runs && out.assessments);
+  $('before-log').hidden = !apart;
+  if (apart) {
     $('before-log').textContent =
       pl(out.assessments, 'evaluación', 'evaluaciones') +
       ' fuera del registro de pasadas (' + usd(out.cost_usd) + ' según sus propios tokens): se hicieron ' +
@@ -797,8 +868,11 @@ function renderRuns(runs) {
 }
 
 /* ---------------------------------------------------------------- 02 the three numbers */
-function fact(big, why) {
-  return '<div class="fact"><div class="big">' + big + '</div><div class="why">' + why + '</div></div>';
+/** One fact: the sentence, why it matters, and the Posts view listing the posts behind it
+    (`go`, a Posts filter). The three facts live here only: every Revisar sub-tab shows them. */
+function fact(big, why, go, words) {
+  return '<div class="fact"><div class="big">' + big + '</div><div class="why">' + why + '</div>' +
+    '<a class="lk go" data-go="' + esc(go) + '" href="' + esc(hashHref('posts', {f: go})) + '">' + esc(words) + '</a></div>';
 }
 
 function renderNumbers() {
@@ -809,16 +883,19 @@ function renderNumbers() {
     fact('Jev confirma <em>' + nf(S.assigned_backed) + '</em> de ' + nf(S.assigned_pairs) +
       ' topics de enrich (<em>' + pct(S.enrich_backed_pct, S.assigned_pairs) + '</em>)',
       'De todos los topics que puso enrich, cuántos ve también Jev con probabilidad ≥ ' +
-      pfmt(DATA.threshold) + '. Los que no, son candidatos a quitar.' +
+      pfmt(DATA.threshold) + '. Los otros ' + nf(S.doubtful_pairs) + ' son candidatos a quitar.' +
       (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está en el vocabulario y no se juzga.',
-        'topics ya no están en el vocabulario y no se juzgan.') : '')) +
+        'topics ya no están en el vocabulario y no se juzgan.') : ''),
+      'enrich_only', 'ver los ' + pl(S.posts_enrich_only, 'post', 'posts') + ' con un topic que Jev no confirma →') +
     fact('Jev añadiría <em>' + nf(S.missing_pairs) + '</em> topics que enrich no puso',
       'Topics que Jev ve con probabilidad ≥ ' + pfmt(DATA.threshold) +
-      ' y que enrich no asignó. Son candidatos a añadir.') +
+      ' y que enrich no asignó. Son candidatos a añadir.',
+      'adds', 'ver los ' + pl(S.posts_jev_only, 'post', 'posts') + ' donde Jev añadiría →') +
     fact('El topic principal coincide en <em>' + pct(S.primary_agree_pct, S.items_compared) + '</em>',
-      'En cuántos posts el topic principal de enrich es el mismo que elige Jev.' +
+      'En ' + nf(S.primary_agree) + ' de ' + nf(S.items_compared) + ' posts comparados, el principal de enrich es el que elige Jev.' +
       (S.primary_fallback ? ' En ' + pl(S.primary_fallback, 'post', 'posts') + ' Jev eligió «' +
-        esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''));
+        esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''),
+      'prim', 'ver los ' + pl(S.posts_primary_differs, 'post', 'posts') + ' donde no coincide →');
 }
 
 /* ---------------------------------------------------------------- tabs (hash-routed) */
@@ -841,6 +918,8 @@ let lastSub = 'posts';
 function routeOf(path) {
   const tab = Object.keys(ROUTE).find(k => ROUTE[k] === path);
   if (tab) return {tab: tab, old: false};
+  // Old routes. `#posts` would reach Posts anyway (the default, which `writeHash` rewrites):
+  // this line is what `#topics` and `#compare` need.
   if (REVISAR.includes(path)) return {tab: path, old: true};
   if (path === 'revisar') return {tab: lastSub, old: true};
   return {tab: 'posts', old: false};
@@ -980,26 +1059,25 @@ function renderRail() {
   th.textContent = 'Topics';
   box.appendChild(th);
   rail.appendChild(box);
+  // One line to read the counts by; the full definition is the legend's title.
   const legend = document.createElement('p');
   legend.className = 'legend';
-  legend.textContent = 'Cada topic: posts donde lo puso enrich · de esos, los que Jev confirma · ' +
-    'posts que discrepan sobre él. Cuentan solo los ' + nf(S.items_compared) + ' posts comparados; ' +
+  legend.textContent = 'Solo los posts comparados, con el filtro de arriba.';
+  legend.title = 'Cada topic: de los posts donde lo puso enrich, los que Jev confirma / todos ellos; ' +
+    'después, los posts que discrepan sobre él. Cuentan solo los ' + nf(S.items_compared) + ' posts comparados; ' +
     'la lista usa además el filtro de arriba, y su total va en «mostrando».';
   box.appendChild(legend);
+  box.appendChild(el('p', 'thead', 'confirma/pone · discrepan'));
   const rows = Object.fromEntries(S.per_topic.map(r => [r.slug, r]));
   const topics = DATA.topics.slice().sort((a, b) =>
     ((rows[b.slug] || {}).disagreeing || 0) - ((rows[a.slug] || {}).disagreeing || 0) || a.label.localeCompare(b.label, 'es'));
   topics.forEach(t => {
     const r = rows[t.slug] || {assigned: 0, backed: 0, disagreeing: 0};
+    // «confirma/pone» in the colour of agreement, then the posts that disagree in the pencil's.
     const c = countSpan('');
-    const parts = [[nf(r.assigned), r.assigned ? '' : 'z'], [nf(r.backed), r.backed ? '' : 'z'], [nf(r.disagreeing), r.disagreeing ? 'd' : 'z']];
-    parts.forEach(([text, cls], i) => {
-      if (i) c.appendChild(document.createTextNode(' · '));
-      const s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = text;
-      c.appendChild(s);
-    });
+    c.appendChild(el('span', 'ok' + (r.assigned ? '' : ' z'), nf(r.backed) + '/' + nf(r.assigned)));
+    c.appendChild(document.createTextNode(' '));
+    c.appendChild(el('span', 'dn ' + (r.disagreeing ? 'd' : 'z'), nf(r.disagreeing)));
     box.appendChild(railButton(view.t === t.slug, t.label, c, () => {
       view.t = view.t === t.slug ? '' : t.slug;
       update();
@@ -1068,9 +1146,13 @@ function linkified(text) {
   return frag;
 }
 
+/** What a card says about Jev's review of its topics — said ONCE per card: in the Jev block
+    when there is no answer to show (unevaluated, stale), in the head when there is one
+    (not_enriched). The words name what was not done, the TOPICS review, so they never
+    contradict a Preguntar score on the same card: Jev did read that post for the question. */
 const STATUS = {
-  unevaluated: 'sin evaluar por Jev',
-  stale: 'sin evaluar por Jev · evaluación caducada',
+  unevaluated: 'topics sin revisar por Jev',
+  stale: 'topics revisados con datos antiguos',
   not_enriched: 'sin enrich con el que comparar',
 };
 
@@ -1081,7 +1163,7 @@ function header(p) {
   who.appendChild(el('b', null, p.author.name || p.author.handle));
   who.appendChild(el('span', null, ' @' + p.author.handle + ' · ' + day(p.created)));
   h.appendChild(who);
-  if (STATUS[p.status]) h.appendChild(el('span', 'st', STATUS[p.status]));
+  if (p.jev && STATUS[p.status]) h.appendChild(el('span', 'st', STATUS[p.status]));
   const links = el('div', 'links');
   const x = httpUrl(p.url);
   if (x) links.appendChild(link(x, 'lk', 'X ↗'));
@@ -1303,7 +1385,7 @@ function jevBlock(p) {
     if (SERVED()) box.appendChild(evalButton(EVAL_AGAIN, {ids: [p.id]}));
     return box;
   }
-  h.appendChild(el('span', 'badge', STATUS[p.status] || 'sin evaluar por Jev'));
+  h.appendChild(el('span', 'badge', STATUS[p.status] || STATUS.unevaluated));
   box.appendChild(h);
   if (p.enrich && p.enrich.topics.length) {
     const chips = el('div', 'echips');
@@ -2261,38 +2343,6 @@ function csec(key, title, intro) {
   return sec;
 }
 
-/** 1 · The header's three numbers, in words, each with the posts behind it. */
-function compareResumen() {
-  const S = DATA.summary;
-  const thr = pfmt(DATA.threshold);
-  const sec = csec('resumen', 'En tres frases', null);
-  const facts = el('div', 'facts');
-  const line = (big, why, go, words) => {
-    const box = el('div', 'fact');
-    box.appendChild(el('div', 'big', big));
-    box.appendChild(el('div', 'why', why));
-    const href = hashHref('posts', {f: go});
-    const a = link(href, 'lk go', words);
-    a.dataset.go = go;
-    box.appendChild(a);
-    facts.appendChild(box);
-  };
-  line('Jev confirma ' + nf(S.assigned_backed) + ' de ' + nf(S.assigned_pairs) + ' topics de enrich (' + pct(S.enrich_backed_pct, S.assigned_pairs) + ').',
-    'De los topics que puso enrich, los que Jev también ve con probabilidad ≥ ' + thr + '. Los otros ' + nf(S.doubtful_pairs) +
-    ' (probabilidad < ' + thr + ') son candidatos a quitar.' +
-    (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está en el vocabulario y no se juzga.',
-      'topics ya no están en el vocabulario y no se juzgan.') : ''),
-    'enrich_only', 'ver los ' + pl(S.posts_enrich_only, 'post', 'posts') + ' con un topic que Jev no confirma →');
-  line('Jev añadiría ' + nf(S.missing_pairs) + ' topics que enrich no puso.',
-    'Topics que Jev ve con probabilidad ≥ ' + thr + ' y enrich no asignó. Son candidatos a añadir.',
-    'adds', 'ver los ' + pl(S.posts_jev_only, 'post', 'posts') + ' donde Jev añadiría →');
-  line('El topic principal coincide en ' + pct(S.primary_agree_pct, S.items_compared) + ' de los posts.',
-    'En ' + nf(S.primary_agree) + ' de ' + nf(S.items_compared) + ' posts comparados, el principal de enrich es el que elige Jev.',
-    'prim', 'ver los ' + pl(S.posts_primary_differs, 'post', 'posts') + ' donde no coincide →');
-  sec.appendChild(facts);
-  return sec;
-}
-
 /** 2 · The three kinds of disagreement: each is a Posts filter, with the report's count. */
 function compareKinds() {
   const S = DATA.summary;
@@ -2508,7 +2558,7 @@ function renderCompare() {
     }
     const list = resolveCompareList();
     const sections = [
-      ['resumen', compareResumen], ['kinds', compareKinds], ['topics', compareTopics],
+      ['kinds', compareKinds], ['topics', compareTopics],
       ['cross', compareCross], ['otro', compareOtro], ['bands', compareBands],
     ];
     sections.forEach(([key, build]) => {
@@ -2632,9 +2682,12 @@ function valueCell(text, small) {
 function configSettings(C) {
   const built = C.settings.filter(s => CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
   const next = C.settings.filter(s => !CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
-  const sec = cfgSection('Ajustes', built.join(', ') + ': con estos valores se calculó esta página. ' +
-    andList(next) + ': no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo de `xbrain jev serve`. ' +
-    'Todo se cambia en config.toml, nunca aquí.');
+  // Two short lines, one per kind of setting, then where they change.
+  const sec = cfgSection('Ajustes', null);
+  sec.appendChild(codePara('muted', 'Cambian lo que ves en esta página: ' + andList(built) + '.'));
+  sec.appendChild(codePara('muted', 'Se usan en la próxima pasada (`xbrain jev topics` o un trabajo de `xbrain jev serve`): ' +
+    andList(next) + '.'));
+  sec.appendChild(codePara('muted', 'Se cambian en config.toml, nunca aquí.'));
   // Shipped most answers first, then by name: drawn in that order.
   const models = C.models_answered;
   const rows = C.settings.map(s => {
@@ -2653,7 +2706,10 @@ function configSettings(C) {
       'la tarifa de lista con la que esta página y `xbrain jev report` calculan todo coste. Es una estimación: el modelo pedido puede ser un alias.',
       el('code', null, 'jev/defaults.py (no está en config.toml)')]);
   });
-  sec.appendChild(cfgTable([['Ajuste', null], ['Valor', 'cv'], ['Qué cambia', 'cw'], ['Dónde', 'ck']], rows));
+  const table = cfgTable([['Ajuste', null], ['Valor', 'cv'], ['Qué cambia', 'cw'], ['Dónde', 'ck']], rows);
+  // Each setting's row can be linked to (the header's «Umbral de topics» opens its row).
+  table.querySelectorAll('tbody tr').forEach((tr, i) => { if (C.settings[i]) tr.id = 'cfg-' + C.settings[i].key; });
+  sec.appendChild(table);
   sec.appendChild(el('p', 'muted', 'Los tokens de salida son gratis.'));
   return sec;
 }
@@ -2912,14 +2968,17 @@ function popPill(id, name, summary, build) {
   pop.hidden = true;
   pop.setAttribute('role', 'dialog');
   pop.setAttribute('aria-label', name);
+  // `summary()`: '' (nothing set: the pill says its name), a string (the pill says it), or
+  // `{text, title}` when the pill's words are short and its title carries the whole of it.
   const label = () => {
     const now = summary();
-    b.replaceChildren(el('span', 'pn', now || name));
+    const text = now && typeof now === 'object' ? now.text : now;
+    b.replaceChildren(el('span', 'pn', text || name));
     b.classList.toggle('set', !!now);
     const chev = el('span', 'chev');
     chev.setAttribute('aria-hidden', 'true');
     b.appendChild(chev);
-    b.title = name + (now ? ': ' + now : '');
+    b.title = now && typeof now === 'object' ? now.title : name + (now ? ': ' + now : '');
   };
   const show = (open) => {
     pop.hidden = !open;
@@ -3165,7 +3224,31 @@ function askFormBox() {
     e.preventDefault();
     openAsk('ask', askBody(), 'Preguntar: «' + askText(askForm.query) + '»', go);
   });
+  // The estimate block sits right under this form: an edit after the estimate holds its pay
+  // button (listened for on the form, after each control has updated `askForm`).
+  ['input', 'change', 'click'].forEach(ev => form.addEventListener(ev, askEstimateStill));
   return form;
+}
+
+const ASK_CHANGED = 'La pregunta cambió desde la estimación: vuelve a estimar.';
+/** Whether the open ask estimate is still for the form as it is. Not: the pay button is held
+    and the block says so. The same again (the edit undone): what the block said comes back. */
+function askEstimateStill() {
+  const mine = asking;
+  if (!mine || mine.kind !== 'ask' || following) return;
+  const same = JSON.stringify(askBody()) === JSON.stringify(mine.ask);
+  if (same === !mine.changed) return;
+  const P = panel();
+  if (!same) {
+    mine.changed = true;
+    mine.said = P.error.hidden ? null : P.error.textContent;
+    P.go.disabled = true;
+    showError(ASK_CHANGED);
+    return;
+  }
+  mine.changed = false;
+  if (mine.said) showError(mine.said); else P.error.hidden = true;
+  P.go.disabled = !(mine.estimate && mine.estimate.allowed);
 }
 
 /** The form's topics: a pill whose panel lists every topic with its count under the other
@@ -3188,10 +3271,12 @@ function askTopicsPill() {
   });
 }
 
-/** «AI Coding», «AI Coding y 2 más», or '' with none ticked. */
+/** A Topics pill's words: «Topics: AI Coding», «Topics: AI Coding +2» (the filter keeps its
+    name), the whole list in its title — or '' with none ticked. */
 function askTopicsWords(topics) {
   if (!topics.length) return '';
-  return label(topics[0]) + (topics.length > 1 ? ' y ' + nf(topics.length - 1) + ' más' : '');
+  return {text: 'Topics: ' + label(topics[0]) + (topics.length > 1 ? ' +' + nf(topics.length - 1) : ''),
+    title: 'Topics: ' + andList(topics.map(label))};
 }
 
 /** Hides the topics whose name or slug does not contain `text` (case and accents ignored). */
@@ -3210,9 +3295,14 @@ function askLaunchLine() {
   line.id = 'ask-launch';
   line.appendChild(document.createTextNode('Para preguntar desde esta página, ábrela con '));
   line.appendChild(el('code', null, 'xbrain jev serve'));
-  line.appendChild(document.createTextNode('. Desde la terminal: '));
-  line.appendChild(el('code', null, 'xbrain jev ask "tu pregunta" --dry-run'));
-  line.appendChild(document.createTextNode(' (estima sin pagar; sin --dry-run, pregunta).'));
+  line.appendChild(document.createTextNode('.'));
+  // The terminal's command on its own line, never broken inside (`white-space: nowrap`).
+  const cmd = el('span', 'cmd', 'Desde la terminal, ');
+  cmd.appendChild(el('code', null, 'xbrain jev ask "tu pregunta" --dry-run'));
+  cmd.appendChild(document.createTextNode(' estima sin pagar; sin '));
+  cmd.appendChild(el('code', null, '--dry-run'));
+  cmd.appendChild(document.createTextNode(', pregunta.'));
+  line.appendChild(cmd);
   return line;
 }
 
@@ -3222,8 +3312,9 @@ function askFiltersText(f) {
   const parts = [];
   const topics = f.topics || [];
   if (topics.length) parts.push((topics.length === 1 ? 'topic ' : 'topics ') + topics.map(label).join(' o '));
-  if (f.since) parts.push('desde ' + f.since);
-  if (f.until) parts.push('hasta ' + f.until);
+  // Dates in the page's words («desde 7 may 2026»), as the rest of the line says them.
+  const dates = datesWords(f.since, f.until);
+  if (dates) parts.push(dates.charAt(0).toLowerCase() + dates.slice(1));
   if (f.author) parts.push('autor @' + String(f.author).replace(/^@/, ''));
   if (f.only_evaluated) parts.push('solo posts con evaluación de topics');
   return parts.length ? 'Filtros: ' + parts.join(', ') : 'Sin filtros: todo el corpus';
@@ -3264,7 +3355,25 @@ function askCard(p, r) {
   const chars = askKeys()[r.id].n;
   strip.appendChild(whatJevSaw({surfaces: surfaces, state_chars: chars, truncated: chars > DATA.char_limit}));
   a.insertBefore(strip, a.children[1] || null);
+  foldJev(a, p);
   return a;
+}
+
+/** On a result, the question is the context, not the topics audit: the card's Jev block folds
+    behind one line naming the post's topics and what Jev made of them. */
+function foldJev(a, p) {
+  const block = a.querySelector(':scope > .jev');
+  if (!block) return;
+  const fold = el('details');
+  const topics = (p.enrich && p.enrich.topics.length ? p.enrich.topics : (p.jev ? p.jev.topics.map(t => t.slug) : []));
+  const j = p.jev;
+  const state = !j ? STATUS[p.status] || STATUS.unevaluated
+    : j.compared ? (j.disagreements ? pl(j.disagreements, 'discrepancia', 'discrepancias') : 'sin discrepancias')
+    : STATUS[p.status] || '';
+  fold.appendChild(el('summary', null, (topics.length ? 'Topics: ' + topics.map(label).join(', ') : 'Topics') +
+    (state ? ' · ' + state : '')));
+  fold.append(...block.childNodes);
+  block.appendChild(fold);
 }
 
 /** Each result post's refine keys and state size (`dashboard.asks_view`: `ask.answer_view`'s
@@ -3512,8 +3621,10 @@ function askCostLine() {
   } else {
     line.appendChild(document.createTextNode('Lo que ha costado preguntar: '));
     line.appendChild(el('b', 'money', usd(c.cost_usd)));
+    // As the CLI's «Consultas» line and the topics strip say it: answers with no token count.
+    const unknown = c.input_tokens_unknown ? ' (+' + pl(c.input_tokens_unknown, 'respuesta', 'respuestas') + ' sin recuento)' : '';
     line.appendChild(document.createTextNode(' en ' + pl(c.runs, 'pasada', 'pasadas') + ' y ' +
-      pl(c.requests, 'petición', 'peticiones') + unpricedWords(c.unpriced_providers) + '.'));
+      pl(c.requests, 'petición', 'peticiones') + unpricedWords(c.unpriced_providers) + unknown + '.'));
   }
   return line;
 }
@@ -3564,6 +3675,7 @@ function renderAsk() {
     grid.appendChild(main);
     grid.appendChild(askHistory(row));
     box.replaceChildren(grid);
+    placeAskCost();
     placeVista();
     if (SERVED()) placePanel();
     restorePops(focusId);
@@ -3573,6 +3685,18 @@ function renderAsk() {
       (err && err.message ? err.message : err)));
   }
 }
+/** One column (≤ 900 px) puts the history under the results; what asking has cost then opens
+    the tab instead of trailing every result. Beside the results, it heads the history. */
+const ONE_COLUMN = matchMedia('(max-width: 900px)');
+function placeAskCost() {
+  const line = $('ask-cost');
+  const main = document.querySelector('#ask-body .askmain');
+  const title = document.querySelector('#ask-body .askside > .tsec');
+  if (!line || !main || !title) return;
+  if (ONE_COLUMN.matches) { if (main.firstChild !== line) main.prepend(line); }
+  else if (title.nextElementSibling !== line) title.after(line);
+}
+ONE_COLUMN.addEventListener('change', placeAskCost);
 /* end ask tab */
 
 /* ---------------------------------------------------------------- serve mode */
@@ -3872,7 +3996,12 @@ function panel() {
 function closePanel() {
   const P = panel();
   P.box.hidden = true;
-  if (!following) asking = null;
+  // Closed with no job followed: nothing of where it was opened is kept, so a job another tab
+  // starts later goes to its own place (`kindHome`), never under this card or list.
+  if (!following) {
+    asking = null;
+    panelHome = {top: topOf(view.tab), anchor: null};
+  }
   renderBadges();
   if (opener && document.body.contains(opener)) opener.focus();
 }
@@ -3950,7 +4079,8 @@ async function estimate() {
     mine.estimate = e;
     P.est.textContent = mine.kind === 'ask' ? askPickText(e) : pickText(e);
     if (e.allowed) {
-      P.go.disabled = false;
+      // Answered after the form was edited: priced, but not payable until estimated again.
+      P.go.disabled = !!mine.changed;
       // A query every post already answered asks nobody: it only opens the results.
       P.go.textContent = e.posts ? words.go + ' ' + usd(e.usd, 5) : 'Ver resultados (gratis)';
     } else {
@@ -4019,7 +4149,7 @@ function capText(max) {
 async function confirmAsk() {
   const mine = asking;
   const e = mine && mine.estimate;
-  if (!e || !e.allowed || following) return;
+  if (!e || !e.allowed || following || mine.changed) return;
   const P = panel();
   if ('force' in mine.sent && mine.sent.force !== P.force.checked) {
     P.go.disabled = true;
@@ -4362,7 +4492,7 @@ function boot() {
     // scroll alone.
     if (view.tab === 'compare') showCompare();
     if (view.tab === 'ask') renderAsk();
-    if (view.tab === 'config') renderConfig();
+    if (view.tab === 'config') { renderConfig(); jumpToSetting(); }
   });
   document.addEventListener('keydown', onKey);
   // The skip link moves the focus to the current top tab: its `#` is not a route.

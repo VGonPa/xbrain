@@ -316,8 +316,11 @@ if (window.top === window) (async () => {
     await sWait(() => { const g = w.document.getElementById('ask-go'); return g && !g.disabled; }, 'la estimación de la pregunta');
     const main = w.document.querySelector('.askmain').getBoundingClientRect();
     const side = w.document.querySelector('.askside').getBoundingClientRect();
+    const cost = w.document.getElementById('ask-cost').getBoundingClientRect();
+    const form = w.document.getElementById('ask-form').getBoundingClientRect();
     return Object.assign(measure(w, w.document.body), {width: w.innerWidth,
-      main: Math.round(main.width), side_below: side.top >= main.bottom - 1});
+      main: Math.round(main.width), side_below: side.top >= main.bottom - 1,
+      cost_first: cost.height > 0 && cost.bottom <= form.top + 1});
   });
   sDone();
 })();
@@ -343,6 +346,8 @@ def test_the_panel_and_the_tabs_fit_a_375_px_screen(narrow, view):
     if view == "ask":
         # One column: the results use the width, the history goes below them.
         assert measured["main"] >= 300 and measured["side_below"] is True, measured
+        # What asking has cost is not left after every result: it opens the tab.
+        assert measured["cost_first"] is True, measured
 
 
 # --------------------------------------------------------------------------- «fuera del registro»
@@ -354,7 +359,7 @@ _OUT_OF_LOG_PROBE = (
 (async () => {
   await sStep('before', async () => {
     await sWait(() => seen(sCard('1')), 'la tarjeta 1');
-    return {line: txt(sId('before-log')), n: DATA.cost.out_of_log.assessments};
+    return {line: txt(sId('before-log')), kpis: txt(sId('kpis')), n: DATA.cost.out_of_log.assessments};
   });
   await sStep('after', async () => {
     sPress(sCard('1'), 'Re-evaluar');
@@ -363,7 +368,7 @@ _OUT_OF_LOG_PROBE = (
     await sWait(() => sPanel().go, 'la estimación forzada');
     sId('ask-go').click();
     await sWait(() => sRefreshed > 0, 'la recarga');
-    return {line: txt(sId('before-log')), hidden: sId('before-log').hidden, n: DATA.cost.out_of_log.assessments};
+    return {line: txt(sId('before-log')), hidden: sId('before-log').hidden, kpis: txt(sId('kpis')), n: DATA.cost.out_of_log.assessments};
   });
   sDone();
 })();
@@ -396,9 +401,12 @@ def out_of_log(tmp_path_factory) -> dict[str, Any]:
 def test_the_out_of_log_line_goes_when_its_last_answer_is_logged(out_of_log):
     before, after = _step(out_of_log, "before"), _step(out_of_log, "after")
 
-    assert before["n"] == 1 and "1 evaluación" in before["line"]
+    # No pass logged yet: the Total itself is the out-of-log answer's cost (no second line).
+    assert before["n"] == 1 and before["line"] is None
+    assert "lo que costó la evaluación guardada, estimado por sus propios tokens" in before["kpis"]
     assert after["n"] == 0
     assert after["line"] is None and after["hidden"] is True
+    assert "evaluación guardada" not in after["kpis"]
 
 
 # --------------------------------------------------------------------------- 409: follow it
@@ -675,8 +683,10 @@ _POLICY_PROBE = (
 (async () => {
   await sStep('policy', async () => {
     await sWait(() => seen(sCard('3')), 'la página');
-    const refused = [];
-    document.addEventListener('securitypolicyviolation', (e) => refused.push(e.violatedDirective + ' ' + e.blockedURI));
+    // Listened for since before the page's own script (`_EarlyWatch`): its start-up, fonts,
+    // X's frames and media included, is refused nothing.
+    const refused = window.sRefused;
+    const early = refused.slice();
     // What a reintroduced `widgets.js` would be: refused by the policy before any request.
     const s = document.createElement('script');
     s.src = 'https://platform.twitter.com/widgets.js';
@@ -684,8 +694,11 @@ _POLICY_PROBE = (
     const f = document.createElement('iframe');
     f.src = 'https://example.com/';
     document.body.appendChild(f);
+    // A frame's refusal is reported when its load is tried, later under load: wait for both,
+    // then a little longer for any third.
+    await sWait(() => refused.length >= 2, 'las dos negativas');
     for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
-    return {refused: refused.sort(), page_drew: seen(sCard('3'))};
+    return {early: early, refused: refused.slice().sort(), page_drew: seen(sCard('3'))};
   });
   sDone();
 })();
@@ -697,10 +710,24 @@ _POLICY_PROBE = (
 def test_the_served_page_refuses_a_third_party_script_and_frame_by_policy(tmp_path):
     from tests.test_jev_serve import _Recorder
 
-    seen = _served_dump(tmp_path, _POLICY_PROBE, client=_Recorder())
+    from xbrain.jev.service import JevService
+
+    class _EarlyWatch(JevService):
+        """The page with a violation listener that runs before anything else in it."""
+
+        def page_html(self) -> str:
+            listen = (
+                "<script>window.sRefused = []; document.addEventListener("
+                "'securitypolicyviolation', (e) => sRefused.push(e.violatedDirective + ' ' + "
+                "e.blockedURI));</script>"
+            )
+            return super().page_html().replace("<head>", "<head>" + listen, 1)
+
+    seen = _served_dump(tmp_path, _POLICY_PROBE, client=_Recorder(), base=_EarlyWatch)
     policy = _step(seen, "policy")
 
     assert policy["page_drew"] is True  # the page itself runs under the policy
+    assert policy["early"] == []
     assert policy["refused"] == [
         "frame-src https://example.com",
         "script-src-elem https://platform.twitter.com/widgets.js",

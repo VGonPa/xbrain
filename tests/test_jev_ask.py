@@ -937,6 +937,13 @@ def test_the_page_ships_the_asks_total_and_no_zero_when_the_log_is_unreadable(cf
     assert set(cost) == {"error"} and "runs.jsonl" in cost["error"]
 
 
+def test_the_page_ships_the_day_it_was_built_as_an_iso_date(cfg: Config):
+    """The page words it («27 sept 2026», as every other date on it); Python only says which day."""
+    from xbrain.jev.dashboard import build_page_data
+
+    assert build_page_data(cfg, now=DT)["updated"] == DT.date().isoformat()
+
+
 # --------------------------------------------------------------------------- the CLI
 
 

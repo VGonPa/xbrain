@@ -259,11 +259,16 @@ def test_the_page_is_the_live_page_with_its_token_and_the_served_flag(served: _S
     assert sorted(p["id"] for p in blob["posts"] if p["status"] == "compared") == ["1", "2"]
 
 
-def test_the_served_page_carries_a_policy_that_admits_no_third_party_script(served: _Served):
+@pytest.mark.parametrize("path", ["/", "/jev.html"])
+def test_the_served_page_carries_a_policy_that_admits_no_third_party_script(
+    served: _Served, path: str
+):
     """The served page holds the spending token: no script but its own inline one may run, no
     frame but X's embed, no page may frame IT (the money buttons), and it talks only to its own
-    server. Fonts and X's frame are the only other hosts (PR 15, arch review M7)."""
-    _, _, response = served.request("GET", "/")
+    server. Fonts and X's frame are the only other hosts (PR 15, arch review M7). Both paths
+    serve that page, token and all, so both carry it."""
+    status, html, response = served.request("GET", path)
+    assert status == 200 and b"X-Xbrain-Token" in html
     policy = dict(
         part.strip().split(" ", 1)
         for part in response.getheader("Content-Security-Policy").split(";")
