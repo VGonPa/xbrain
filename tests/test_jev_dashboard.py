@@ -2231,12 +2231,13 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
     assert (
         "const API = {\n"
         "  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},\n"
-        "  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate'},\n"
+        "  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate', counts: '/api/ask/counts'},\n"
         "  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',\n"
         "};" in serve
     )
     assert re.findall(r"\bapi\('", serve) == []
     assert sorted(set(re.findall(r"\bapi\((API[^,)]*)", serve))) == [
+        "API.ask.counts",
         "API.cancel",
         "API.data",
         "API.job",

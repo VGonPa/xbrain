@@ -2995,11 +2995,7 @@ def jev_ask_cmd(
     `\\[jev].ask_max_usd` pide confirmación. Nunca toca items.json.
     """
     cfg = _config()
-    if not 0.0 <= minimum <= 1.0:
-        raise ValueError("--min debe estar en [0.0, 1.0]")
-    shown = cfg.jev_ask_top if top is None else top
-    if shown < 1:
-        raise ValueError("--top debe ser >= 1")
+    shown = _ask_shown(cfg, minimum, top, show_all)
     ask_query = AskQuery.of(query)
     filters = _ask_filters(topic, since, until, author, only_evaluated)
     # Planned WITHOUT the lock: the estimate and the confirmation must never hold it while a
@@ -3019,7 +3015,7 @@ def jev_ask_cmd(
                 plan,
                 lock,
                 minimum=minimum,
-                top=None if show_all else shown,
+                top=shown,
                 yes=yes,
                 confirmed=confirmed,
                 limit=limit,
@@ -3029,6 +3025,17 @@ def jev_ask_cmd(
         raise typer.Exit(code=75) from exc
     if outcome is not None and outcome.interrupted:
         raise typer.Exit(code=130)
+
+
+def _ask_shown(cfg: Config, minimum: float, top: int | None, show_all: bool) -> int | None:
+    """How many results to print (`None`: every one), refusing a `--min` outside [0, 1] and a
+    `--top` below 1. The default is `[jev].ask_top`."""
+    if not 0.0 <= minimum <= 1.0:
+        raise ValueError("--min debe estar en [0.0, 1.0]")
+    shown = cfg.jev_ask_top if top is None else top
+    if shown < 1:
+        raise ValueError("--top debe ser >= 1")
+    return None if show_all else shown
 
 
 def _ask_filters(

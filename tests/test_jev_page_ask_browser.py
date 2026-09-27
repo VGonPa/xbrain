@@ -40,7 +40,8 @@ from xbrain.jev.run import run_ask
 from xbrain.jev.store import load_runs
 
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
-#: A query asked only over «startups»: its posts (2, 4) answer 0.1 and 0.2 — no result.
+#: A query asked only over «startups»: its posts (2, 4) answer 0.1 and 0.2 — both results,
+#: ranked (nothing is cut at `[jev].threshold` any more).
 SEED_QUERY = "¿Quién cuenta cómo levantó una ronda seed?"
 #: A query whose file is later broken: its row says so, and costs nothing else.
 BROKEN_QUERY = "posts con datos de estudios sobre creatina"
@@ -53,7 +54,7 @@ def _asked(cfg: Config, text: str, *, when: datetime, **filters: Any) -> AskQuer
         plan = plan_ask(cfg, query, AskFilters(**filters), None)
         # Enough tokens that a query's cost shows at four decimals.
         outcome = run_ask(cfg, plan, lambda: _Asker(input_tokens=200_000), lock=lock)
-        finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold, now=when)
+        finish_ask(cfg, plan, outcome, now=when)
     return query
 
 
@@ -61,7 +62,7 @@ def _asked_repo(cfg: Config) -> dict[str, str]:
     """Three queries: the hooks one (results 1 and 3), a later «startups» one with no result,
     and an earlier one whose file is then broken."""
     hooks = _asked(cfg, QUERY, when=DT + timedelta(hours=1))
-    seed = _asked(cfg, SEED_QUERY, when=DT + timedelta(hours=2), topic="startups")
+    seed = _asked(cfg, SEED_QUERY, when=DT + timedelta(hours=2), topics=("startups",))
     broken = _asked(cfg, BROKEN_QUERY, when=DT + timedelta(minutes=30), author="bob")
     (cfg.jev_asks_dir / f"{broken.sha}.json").write_text("{", encoding="utf-8")
     return {"hooks": hooks.sha, "seed": seed.sha, "broken": broken.sha}
@@ -72,9 +73,14 @@ _ASK_JS = r"""
 const sQHistory = () => [...document.querySelectorAll('#ask-history li')].filter(seen).map(li => ({
   text: [...li.querySelectorAll('b, small')].map(e => e.textContent).join(' · '),
   current: li.querySelector('a').getAttribute('aria-current') === 'true'}));
-const sQResults = () => [...document.querySelectorAll('#ask-results .card')].filter(seen).map(c => ({
-  id: c.dataset.id, p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
-  jev: txt(c.querySelector('.jev .badge'))}));
+const sQResults = () => [...document.querySelectorAll('#ask-results .card')].filter(seen).map(c => {
+  const bar = c.querySelector('.askr .apbar');
+  const fill = bar && bar.firstElementChild;
+  return {id: c.dataset.id, p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
+    jev: txt(c.querySelector('.jev .badge')),
+    bar: seen(bar) ? {width: fill.style.width, fill: fill.getBoundingClientRect().width,
+      track: bar.getBoundingClientRect().width, label: bar.getAttribute('aria-label')} : null};
+});
 const sQView = () => ({
   hash: location.hash,
   tab: txt(document.querySelector('.tabs a[data-tab="ask"]')),
@@ -86,6 +92,7 @@ const sQView = () => ({
   launch: txt(document.getElementById('ask-launch')),
   history: sQHistory(),
   results: sQResults(),
+  more: txt(document.getElementById('ask-more')),
 });
 const sQOpen = (words) => [...document.querySelectorAll('#ask-history li a')].find(a => seen(a) && a.textContent.includes(words)).click();
 """
@@ -190,8 +197,8 @@ def test_static_the_tab_lists_every_query_last_asked_first(ask_static):
     ]
     seed_cost, hooks_cost = shas["cost:seed"], shas["cost:hooks"]
     assert seed_cost != "~0,0000 $" and hooks_cost != seed_cost
-    assert f"0 resultados · 2 posts con respuesta · {seed_cost}" in view["history"][0]["text"]
-    assert f"3 resultados · 5 posts con respuesta · {hooks_cost}" in view["history"][1]["text"]
+    assert f" · 2 posts con respuesta · {seed_cost}" in view["history"][0]["text"]
+    assert f" · 5 posts con respuesta · {hooks_cost}" in view["history"][1]["text"]
     assert view["history"][0]["current"] is True
     # The broken file stopped the history's rebuild: said above the list, its row kept.
     assert view["banner"].startswith("No se pudo leer el historial: ")
@@ -206,11 +213,10 @@ def test_static_the_last_query_opens_by_default_and_says_what_it_found(ask_stati
     assert view["hash"] == "#ask"
     assert view["head"].startswith(f"«{SEED_QUERY}»")
     assert "Filtros: topic Startups" in view["head"]
-    assert view["results"] == []
-    assert view["empty"] == (
-        "Ningún post llega a 0,85: Jev no ve una respuesta a esta pregunta en los 2 posts con "
-        "respuesta vigente."
-    )
+    # Both answers are results, ranked — the old cut at 0,85 showed none.
+    assert _probs(view["results"]) == [("4", "0,20"), ("2", "0,10")]
+    assert view["empty"] is None and view["more"] is None
+    assert "Los 2 posts con respuesta vigente, de mayor a menor probabilidad." in view["head"]
 
 
 @_requires_chrome
@@ -221,9 +227,16 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
     assert view["hash"] == f"#ask?q={shas['hooks']}"
     assert _probs(view["results"]) == _shown(ranked())
     assert [h["current"] for h in view["history"]] == [False, True, False]
-    assert "3 de 5 posts con respuesta vigente llegan a 0,85" in view["head"]
+    assert "Los 5 posts con respuesta vigente, de mayor a menor probabilidad." in view["head"]
+    assert "0,85" not in view["head"]
     for result in view["results"]:
         assert re.fullmatch(r"Lo que vio Jev · 2 fuentes, \d+ caracteres", result["saw"])
+    # Each result's probability is drawn: the bar's fill is the number, over its track.
+    for result, (_, p) in zip(view["results"], ranked(), strict=True):
+        bar = result["bar"]
+        assert bar["width"] == f"{round(p * 100)}%"
+        assert bar["fill"] == pytest.approx(bar["track"] * p, abs=1.5)
+        assert bar["label"] == "probabilidad " + f"{p:.2f}".replace(".", ",")
 
 
 @_requires_chrome
@@ -451,7 +464,7 @@ def test_served_an_ask_job_ends_on_its_results_and_its_history(ask_served):
     assert sorted(ask_served["asked"]) == ["1", "2"]
     assert done["hash"] == f"#ask?q={sha}"
     assert _probs(done["results"]) == _shown(ranked(posts="12"))
-    assert done["panel"]["progress"].startswith("2 respuestas guardadas · 1 resultado · ")
+    assert done["panel"]["progress"].startswith("2 respuestas guardadas · 2 resultados · ")
     assert [h["text"].split(" · ")[0] for h in done["history"]] == [QUERY]
     assert done["history"][0]["current"] is True
     assert ask_served["job"]["query_sha"] == sha
@@ -473,7 +486,7 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
         "llegar se para; lo que ya esté en vuelo termina y puede pasarlo por poco (como mucho "
         "1 post)."
     )
-    assert again["end_text"].startswith("0 respuestas guardadas · 1 resultado · ")
+    assert again["end_text"].startswith("0 respuestas guardadas · 2 resultados · ")
     assert "runs.jsonl" not in again["end_text"]
     assert "no quedó en el historial" not in again["end_text"]
     # Nothing was sent, so nothing to log: a clean end — no alarm, and the panel stays hidden.
@@ -551,7 +564,7 @@ def test_served_an_ask_cut_by_the_cap_says_so_and_keeps_what_it_paid(ask_ended):
 
     assert (seen["job"]["state"], seen["job"]["reason"]) == ("interrupted", "tope")
     assert seen["end"]["progress"].startswith(
-        "Interrumpido (se alcanzó el tope por trabajo): 1 respuesta guardada · 0 resultados · "
+        "Interrumpido (se alcanzó el tope por trabajo): 1 respuesta guardada · 1 resultado · "
     )
 
 
@@ -582,7 +595,7 @@ def test_served_an_ask_that_failed_says_why(ask_ended):
 def test_served_an_asks_failures_unsaved_and_unpriced_answers_are_named(ask_ended):
     end = ask_ended("failures")["end"]
 
-    assert end["progress"].startswith("4 respuestas guardadas · 0 resultados · ")
+    assert end["progress"].startswith("4 respuestas guardadas · 4 resultados · ")
     assert "1 respuesta cobrada a la media estimada" in end["progress"]
     assert "sin tarifa: fake" in end["progress"]
     assert "1 fallida: 4 (" in end["progress"] and "respuesta ilegible" in end["progress"]
@@ -593,7 +606,7 @@ def test_served_an_asks_failures_unsaved_and_unpriced_answers_are_named(ask_ende
 def test_served_an_ask_that_did_not_reach_the_run_log_says_so(ask_ended):
     end = ask_ended("not-logged")["end"]
 
-    assert end["progress"].startswith("1 respuesta guardada · 0 resultados")
+    assert end["progress"].startswith("1 respuesta guardada · 1 resultado")
     assert "la pasada no quedó en runs.jsonl" in end["progress"]
 
 
@@ -672,13 +685,13 @@ def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed)
 
     assert resumed["title"] == "Pregunta en curso"
     assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
-    assert end["panel"]["progress"].startswith("5 respuestas guardadas · 3 resultados")
+    assert end["panel"]["progress"].startswith("5 respuestas guardadas · 5 resultados")
     assert [h["text"].split(" · ")[0] for h in end["history"]] == [QUERY]
 
 
 def test_the_fake_answers_what_the_assertions_expect():
     """The results the browser tests read: probability order is not id order, and 1 and 5 tie."""
-    assert ranked() == [("3", 0.97), ("1", 0.9), ("5", 0.9)]
+    assert ranked() == [("3", 0.97), ("1", 0.9), ("5", 0.9), ("4", 0.2), ("2", 0.1)]
     assert json.dumps(PROBS)
 
 
@@ -708,3 +721,321 @@ def test_static_a_rebuilt_query_and_an_unreadable_run_log_say_so(tmp_path):
     assert "~0,0000 $" not in seen["head"]
     assert " · — · reconstruida" in seen["history"][0]["text"]
     assert _probs(seen["results"]) == _shown(ranked())
+
+
+# --------------------------------------------------------------------------- task 14: Víctor's ask
+# His first real ask answered 808 posts with a max of 0.80, and the tab said «0 de 808 llegan a
+# 0,85». The same shape (`jev_ask_fixtures`), reopened: ranked, the first `[jev].ask_top`
+# shown, «Ver más» adding as many, each probability drawn; and served, the topics as a
+# multi-select with each topic's count, the minimum, and the estimate following the filters.
+
+_VICTOR_STATIC_PROBE = (
+    "<script>"
+    + _SEEN
+    + _ASK_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
+  await step('first', async () => { location.hash = '#ask'; await sleep(80); return sQView(); });
+  await step('more', async () => { document.getElementById('ask-more').click(); await sleep(40); return sQView(); });
+  await step('more2', async () => { document.getElementById('ask-more').click(); await sleep(40); return sQView(); });
+  await step('away_back', async () => {
+    location.hash = '#posts?f=all'; await sleep(60);
+    location.hash = '#ask'; await sleep(60);
+    return sQView();
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+def _victor_page(root: Path, probe: str, *, jev: str = "", minimum: float | None = None):
+    from tests.jev_ask_fixtures import victor_shaped_repo
+    from xbrain.jev.dashboard import build_page_data
+
+    _need_chrome()
+    cfg = victor_shaped_repo(root, jev=jev)
+    if minimum is not None:
+        path = cfg.jev_asks_dir / "index.json"
+        index = json.loads(path.read_text(encoding="utf-8"))
+        for entry in index["queries"].values():
+            entry["last_min"] = minimum
+        path.write_text(json.dumps(index), encoding="utf-8")
+    data = build_page_data(cfg, now=DT)
+    return _page(root, data, probe), data
+
+
+def _python_order(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """The one source of the order: Python's rows, as the page prints them."""
+    return [
+        (r["id"], f"{r['p']:.2f}".replace(".", ",")) for r in data["asks"]["history"][0]["results"]
+    ]
+
+
+@pytest.fixture(scope="module")
+def victor_static(tmp_path_factory):
+    page, data = _victor_page(tmp_path_factory.mktemp("victor-static"), _VICTOR_STATIC_PROBE)
+    return _dump(page.as_uri()), data
+
+
+@_requires_chrome
+def test_static_victors_ask_opens_on_the_first_20_ranked_not_on_nothing(victor_static):
+    seen, data = victor_static
+    first = seen["first"]
+    order = _python_order(data)
+
+    assert len(order) == 808
+    assert _probs(first["results"]) == order[:20]
+    assert [p for _, p in order[:3]] == ["0,80", "0,79", "0,79"]
+    assert first["head"].startswith("«En qué topics hablo de agentic engineering?»")
+    assert "Filtros: desde 2026-05-07" in first["head"]
+    assert (
+        "Se muestran los 20 primeros de 808 posts con respuesta vigente, de mayor a menor "
+        "probabilidad." in first["head"]
+    )
+    assert "0,85" not in first["head"] and first["empty"] is None
+    assert first["more"] == "Ver 20 más (quedan 788)"
+    assert " · 20 primeros de 808 posts con respuesta · " in first["history"][0]["text"]
+    for result in first["results"]:
+        assert result["bar"] is not None and result["bar"]["fill"] > 0
+
+
+@_requires_chrome
+def test_static_see_more_adds_20_each_time_in_the_same_order(victor_static):
+    seen, data = victor_static
+    order = _python_order(data)
+
+    assert _probs(seen["more"]["results"]) == order[:40]
+    assert seen["more"]["more"] == "Ver 20 más (quedan 768)"
+    assert "Se muestran los 40 primeros de 808" in seen["more"]["head"]
+    assert _probs(seen["more2"]["results"]) == order[:60]
+    # Leaving the tab and coming back to the same query keeps what was opened.
+    assert _probs(seen["away_back"]["results"]) == order[:60]
+
+
+@_requires_chrome
+def test_static_a_minimum_and_ask_top_shape_what_is_shown(tmp_path):
+    page, data = _victor_page(tmp_path, _VICTOR_STATIC_PROBE, jev="ask_top = 7\n", minimum=0.5)
+    seen = _dump(page.as_uri())
+    first, more = seen["first"], seen["more"]
+    order = _python_order(data)
+
+    assert len(order) == 156 and data["asks"]["history"][0]["answered"] == 808
+    assert _probs(first["results"]) == order[:7]
+    assert all(float(p.replace(",", ".")) >= 0.5 for _, p in order)
+    assert (
+        "156 de 808 posts con respuesta vigente llegan a la relevancia mínima 0,50; se muestran "
+        "los 7 primeros, de mayor a menor probabilidad." in first["head"]
+    )
+    assert first["more"] == "Ver 7 más (quedan 149)"
+    assert _probs(more["results"]) == order[:14]
+    assert (
+        " · 7 primeros de 156 resultados ≥ 0,50 · 808 posts con respuesta · "
+        in (first["history"][0]["text"])
+    )
+
+
+_VICTOR_SERVE_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + _ASK_JS
+    + r"""
+const sQForm = (fields) => {
+  for (const [id, value] of Object.entries(fields)) {
+    const box = sId(id);
+    if (box.type === 'checkbox') box.checked = value; else box.value = value;
+    box.dispatchEvent(new Event('input', {bubbles: true}));
+    box.dispatchEvent(new Event('change', {bubbles: true}));
+  }
+  sPress(sId('ask-form'), 'Estimar lo que cuesta');
+};
+const sTopics = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
+  id: b.id, checked: b.checked, text: txt(b.parentNode), count: txt(b.parentNode.querySelector('.tcount'))}));
+const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 && sPanel().go !== null, what); return sLastEstimate; };
+(async () => {
+  await sStep('form', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')) && sQResults().length > 0, 'el formulario y los resultados');
+    return Object.assign(sQView(), {topics: sTopics(), explain: txt(sId('ask-explain')), tip: txt(sId('ask-tip')),
+      min: seen(sId('ask-min')) ? txt(sId('ask-min').parentNode) : null, posts: sPosts});
+  });
+  await sStep('more', async () => {
+    sId('ask-more').click();
+    await sWait(() => sQResults().length === 40, 'veinte más');
+    return sQView();
+  });
+  await sStep('counts', async () => {
+    const posts0 = sPosts;
+    const box = sId('ask-since');
+    box.value = '2026-06-01';
+    box.dispatchEvent(new Event('input', {bubbles: true}));
+    box.dispatchEvent(new Event('change', {bubbles: true}));
+    await sWait(() => sTopics().some(t => t.id === 'ask-topic-startups' && t.count === '220'), 'los recuentos con «desde»');
+    return {topics: sTopics(), posts: sPosts - posts0};
+  });
+  await sStep('one', async () => {
+    const n0 = sEstimates;
+    sQForm({'ask-q': 'posts que explican cómo trabajar con agentes', 'ask-since': '', 'ask-topic-agentic-engineering': true});
+    const e = await sNextEstimate(n0, 'la estimación con un topic');
+    const panel = sPanel();
+    sId('ask-cancel').click();
+    return {estimate: e, panel: panel};
+  });
+  await sStep('two', async () => {
+    const n0 = sEstimates;
+    sQForm({'ask-topic-startups': true});
+    const e = await sNextEstimate(n0, 'la estimación con dos topics');
+    const panel = sPanel();
+    sId('ask-cancel').click();
+    return {estimate: e, panel: panel, topics: sTopics()};
+  });
+  await sStep('min', async () => {
+    const n0 = sEstimates, r0 = sRefreshed;
+    sQForm({'ask-q': 'En qué topics hablo de agentic engineering?', 'ask-since': '2026-05-07',
+      'ask-topic-agentic-engineering': false, 'ask-topic-startups': false, 'ask-min': '0.5'});
+    const e = await sNextEstimate(n0, 'la estimación gratis con mínimo');
+    const panel = sPanel();
+    sId('ask-go').click();
+    await sWait(() => sRefreshed > r0 && location.hash.startsWith('#ask?q='), 'los resultados con mínimo');
+    return Object.assign(sQView(), {estimate: e, panel: panel});
+  });
+  await sStep('reopen', async () => {
+    const posts0 = sPosts, r0 = sRefreshed;
+    location.hash = '#posts?f=all';
+    await sWait(() => seen(document.querySelector('#cards .card')), 'Posts');
+    if (sPanel().shown) sId('ask-cancel').click();
+    document.querySelector('.tabs a[data-tab="ask"]').click();
+    await sWait(() => sQResults().length > 0, 'los resultados reabiertos');
+    return Object.assign(sQView(), {posts: sPosts - posts0, reloads: sRefreshed - r0});
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def victor_served(tmp_path_factory) -> dict[str, Any]:
+    from tests.jev_ask_fixtures import victor_shaped_repo
+    from tests.jev_fakes import FakeJevClient
+
+    def _repo_builder(root: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+        monkeypatch.setenv("XBRAIN_REPO_ROOT", str(root))
+        return victor_shaped_repo(root)
+
+    client = FakeJevClient()
+    seen = _served_dump(
+        tmp_path_factory.mktemp("victor-served"),
+        _VICTOR_SERVE_PROBE,
+        client=client,
+        repo=_repo_builder,
+    )
+    seen["calls"] = len(client.calls)
+    return seen
+
+
+def _victor_expected(tmp_path: Path, **filters: Any):
+    """What Python says for the same repo: the plan (posts, price) and the topic counts."""
+    from tests.jev_ask_fixtures import victor_shaped_repo
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+
+    cfg = victor_shaped_repo(tmp_path)
+    jev = load_jev_pairs(cfg)
+    return cfg, jev, lambda f: topic_counts(jev.store, f, jev=jev, threshold=cfg.jev_threshold)
+
+
+@_requires_chrome
+def test_served_topics_are_a_multi_select_each_with_its_count(victor_served, tmp_path):
+    form = victor_served["form"]
+    _, _, counts = _victor_expected(tmp_path)
+    expected = counts(AskFilters())
+
+    shown = {t["id"].removeprefix("ask-topic-"): t for t in form["topics"]}
+    assert set(shown) == set(expected)
+    assert {slug: int(t["count"].replace(".", "")) for slug, t in shown.items()} == expected
+    assert shown["agentic-engineering"]["text"].startswith("Agentic Engineering")
+    assert not any(t["checked"] for t in form["topics"])
+    assert form["posts"] == 0  # the counts the page opens with are the blob's: no request
+
+
+@_requires_chrome
+def test_served_the_counts_follow_the_other_filters_from_the_server(victor_served, tmp_path):
+    counts_step = victor_served["counts"]
+    _, _, counts = _victor_expected(tmp_path)
+    expected = counts(AskFilters(since=datetime(2026, 6, 1).date()))
+
+    got = {t["id"].removeprefix("ask-topic-"): int(t["count"]) for t in counts_step["topics"]}
+    assert got == expected and expected["agentic-engineering"] == 0
+    assert counts_step["posts"] >= 1  # asked the server (`/api/ask/counts`), not computed here
+
+
+@_requires_chrome
+def test_served_the_filters_are_explained_in_one_line_and_a_tip(victor_served):
+    form = victor_served["form"]
+
+    assert form["explain"] == (
+        "Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan "
+        "por lo seguro que está Jev de que el post responde. Topic: posts que enrich o Jev "
+        "(≥ 0,85) ponen en alguno de los topics marcados."
+    )
+    assert form["tip"] == (
+        'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.'
+    )
+    assert form["min"].startswith("Relevancia mínima")
+
+
+@_requires_chrome
+def test_served_ticking_a_second_topic_widens_the_estimate(victor_served, tmp_path):
+    one, two = victor_served["one"]["estimate"], victor_served["two"]["estimate"]
+    cfg, _, _ = _victor_expected(tmp_path)
+    query = AskQuery.of("posts que explican cómo trabajar con agentes")
+    plan_one = plan_ask(cfg, query, AskFilters(topics=("agentic-engineering",)), None)
+    plan_two = plan_ask(cfg, query, AskFilters(topics=("agentic-engineering", "startups")), None)
+
+    assert one["pick"]["topics"] == ["agentic-engineering"]
+    assert two["pick"]["topics"] == ["agentic-engineering", "startups"]
+    assert (one["posts"], two["posts"]) == (plan_one.estimate.posts, plan_two.estimate.posts)
+    assert (one["posts"], two["posts"]) == (156, 813)
+    assert (one["usd"], two["usd"]) == (plan_one.estimate.usd, plan_two.estimate.usd)
+    assert victor_served["one"]["panel"]["est"].startswith("156 posts por preguntar")
+    assert victor_served["two"]["panel"]["est"].startswith("813 posts por preguntar")
+
+
+@_requires_chrome
+def test_served_more_adds_twenty_ranked(victor_served):
+    form, more = victor_served["form"], victor_served["more"]
+
+    assert len(form["results"]) == 20 and form["more"] == "Ver 20 más (quedan 788)"
+    assert [r["p"] for r in form["results"]][:3] == ["0,80", "0,79", "0,79"]
+    assert _probs(more["results"])[:20] == _probs(form["results"])
+    assert len(more["results"]) == 40
+
+
+@_requires_chrome
+def test_served_a_minimum_is_asked_for_free_and_cuts_the_results(victor_served):
+    step = victor_served["min"]
+    e = step["estimate"]
+
+    assert e["pick"]["min"] == 0.5 and e["posts"] == 0 and e["skipped_current"] == 808
+    assert step["panel"]["go_text"] == "Ver resultados (gratis)"
+    assert victor_served["calls"] == 0  # nothing ever reached a client
+    assert len(step["results"]) == 20
+    assert all(float(r["p"].replace(",", ".")) >= 0.5 for r in step["results"])
+    assert (
+        "156 de 808 posts con respuesta vigente llegan a la relevancia mínima 0,50; se muestran "
+        "los 20 primeros" in step["head"]
+    )
+    assert "2 veces" in step["history"][0]["text"]
+
+
+@_requires_chrome
+def test_served_reopening_victors_query_costs_no_post(victor_served):
+    reopen = victor_served["reopen"]
+
+    assert (reopen["posts"], reopen["reloads"]) == (0, 0)
+    assert len(reopen["results"]) == 20

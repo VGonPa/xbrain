@@ -252,6 +252,15 @@ details.saw[open]>summary{color:var(--ink)}
 .askr{margin:10px 0 4px;padding:8px 10px;border:1px solid var(--accent-line);border-radius:10px;background:var(--accent-soft)}
 .askr .jh{margin-bottom:0}
 .askr .ap{font-family:var(--display);font-weight:600;font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}
+.askr .apbar{display:inline-block;flex:0 0 120px;width:120px;max-width:30vw;height:8px;background:var(--hairline);border-radius:4px;overflow:hidden;vertical-align:middle}
+.askr .apbar i{display:block;height:100%;background:var(--accent)}
+.asktopics{border:1px solid var(--hairline);border-radius:8px;padding:6px 8px;margin:10px 0 0;max-height:190px;overflow:auto;min-width:0}
+.asktopics legend{font-size:12px;color:var(--ink-muted);padding:0 4px}
+.asktopics label{display:inline-flex;align-items:center;gap:5px;margin:3px 12px 3px 0;font-size:12.5px;color:var(--ink);overflow-wrap:anywhere}
+.asktopics .tcount{color:var(--ink-faint);font-variant-numeric:tabular-nums}
+.asktopics .tcount::before{content:'('}
+.asktopics .tcount::after{content:')'}
+.askmore{margin:6px 0 12px}
 .askside{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;min-width:0}
 .askside .tsec{margin-top:0}
 .askside ol{list-style:none;padding:0;margin:10px 0 0}
@@ -2342,14 +2351,20 @@ function renderConfig() {
 /* ---------------------------------------------------------------- the Preguntar tab */
 /* ask tab */
 /* What was asked of the corpus (`xbrain jev ask`, or this tab when served): the query history
-   and, for the query open, the posts whose CURRENT answer reaches the threshold it was asked
-   at, best first — the same cards as Posts, each with its probability and what Jev read.
+   and, for the query open, its results RANKED by probability, best first — every post with a
+   current answer (at or above the minimum the query was asked with, if any), the first
+   `[jev].ask_top` shown and «Ver más» adding as many — the same cards as Posts, each with its
+   probability (a number and a bar) and what Jev read. `[jev].threshold` is not a results cut.
    Everything is `DATA.asks` (`dashboard.asks_view`): reopening a query costs nothing. The
    static page shows it all; launching a query needs `xbrain jev serve`. */
-/** The query open: its sha, or '' for the last one asked. The hash carries it. */
-const askView = {q: ''};
+/** The query open: its sha, or '' for the last one asked (the hash carries it), and how many
+    of its results are drawn (`[jev].ask_top`, and as many more per «Ver más»). */
+const askView = {q: '', shown: {}};
 /** What the reader typed, kept across re-draws (a job's end re-draws the tab). */
-const askForm = {query: '', topic: '', since: '', until: '', author: '', only_evaluated: false, limit: ''};
+const askForm = {query: '', topics: [], since: '', until: '', author: '', only_evaluated: false, limit: '', min: ''};
+/** Each topic's post count under the other filters: the blob's (whole corpus) until the
+    server answers `/api/ask/counts` for the filters typed — never counted here. */
+let askCounts = null;
 
 function readAskHash(params) {
   askView.q = params.get('q') || '';
@@ -2384,6 +2399,9 @@ function askField(text, input, cls) {
   return box;
 }
 
+/** `[jev].ask_top`: how many results are drawn first, and how many «Ver más» adds. */
+const askTop = () => DATA.config.settings.find(s => s.key === 'ask_top').value;
+
 /** One form control bound to `askForm[key]`. */
 function askInput(id, key, type, attrs) {
   const input = el(type === 'textarea' || type === 'select' ? type : 'input');
@@ -2396,21 +2414,53 @@ function askInput(id, key, type, attrs) {
   return input;
 }
 
-function askTopicSelect() {
-  const select = askInput('ask-topic', 'topic', 'select');
-  select.appendChild(new Option('Cualquier topic', ''));
-  DATA.topics.forEach(t => select.appendChild(new Option(t.label, t.slug)));
-  select.value = askForm.topic;
-  return select;
+/** The topics, as a multi-select: none ticked = every topic; several = posts in ANY of them.
+    Beside each, how many posts it keeps under the other filters (`askCounts`). */
+function askTopicBoxes() {
+  const box = el('fieldset', 'asktopics');
+  box.id = 'ask-topics';
+  box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
+  const counts = askCounts || (DATA.asks && DATA.asks.topic_counts) || {};
+  const offered = DATA.topics.map(t => t.slug).concat(Object.keys(counts).filter(k => !DATA.topics.some(t => t.slug === k)));
+  offered.forEach(slug => {
+    const item = el('label');
+    const input = el('input');
+    input.type = 'checkbox';
+    input.id = 'ask-topic-' + slug;
+    input.value = slug;
+    input.checked = askForm.topics.includes(slug);
+    const read = () => {
+      askForm.topics = askForm.topics.filter(t => t !== slug).concat(input.checked ? [slug] : []);
+    };
+    input.addEventListener('input', read);
+    input.addEventListener('change', read);
+    item.appendChild(input);
+    item.appendChild(el('span', null, label(slug)));
+    const n = el('span', 'tcount', slug in counts ? nf(counts[slug]) : '—');
+    n.dataset.topic = slug;
+    n.title = 'posts de este topic con los demás filtros';
+    item.appendChild(n);
+    box.appendChild(item);
+  });
+  return box;
 }
 
-/** The body `/api/ask/estimate` receives: the query and only the filters that are set. */
-function askBody() {
-  const body = {query: askForm.query};
-  ['topic', 'since', 'until'].forEach(k => { if (askForm[k]) body[k] = askForm[k]; });
+/** The filters as `AskFilters.from_json` reads them: only those set. */
+function askFilterBody() {
+  const body = {};
+  if (askForm.topics.length) body.topics = askForm.topics.slice().sort();
+  ['since', 'until'].forEach(k => { if (askForm[k]) body[k] = askForm[k]; });
   if (askForm.author.trim()) body.author = askForm.author.trim();
   if (askForm.only_evaluated) body.only_evaluated = true;
+  return body;
+}
+
+/** The body `/api/ask/estimate` receives: the query, the filters that are set, the limit and
+    the minimum (0 or empty = none). */
+function askBody() {
+  const body = Object.assign({query: askForm.query}, askFilterBody());
   if (String(askForm.limit).trim() !== '') body.limit = Number(askForm.limit);
+  if (String(askForm.min).trim() !== '' && Number(askForm.min) > 0) body.min = Number(askForm.min);
   return body;
 }
 
@@ -2433,10 +2483,24 @@ function askFormBox() {
   limit.value = askForm.limit;
   const evaluated = askInput('ask-evaluated', 'only_evaluated', 'checkbox');
   evaluated.checked = askForm.only_evaluated;
-  [askField('Topic', askTopicSelect()), askField('Desde', since), askField('Hasta', until),
+  const min = askInput('ask-min', 'min', 'number', {min: '0', max: '1', step: '0.05', placeholder: 'sin mínimo'});
+  min.value = askForm.min;
+  // Served: the counts beside the topics follow these filters (`askRecount`, the serve section's).
+  [since, until, author, evaluated].forEach(i => { i.addEventListener('input', askRecount); i.addEventListener('change', askRecount); });
+  [askField('Desde', since), askField('Hasta', until),
     askField('Autor', author), askField('Como mucho (posts)', limit),
+    askField('Relevancia mínima (0–1)', min),
     askField('Solo posts con evaluación de topics vigente', evaluated, 'chk')].forEach(f => fs.appendChild(f));
+  form.appendChild(askTopicBoxes());
   form.appendChild(fs);
+  const explain = el('p', 'muted', 'Los filtros eligen qué posts se preguntan (y lo que cuesta); los ' +
+    'resultados se ordenan por lo seguro que está Jev de que el post responde. Topic: posts que enrich o ' +
+    'Jev (≥ ' + pfmt(DATA.threshold) + ') ponen en alguno de los topics marcados.');
+  explain.id = 'ask-explain';
+  form.appendChild(explain);
+  const tip = el('p', 'muted', 'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.');
+  tip.id = 'ask-tip';
+  form.appendChild(tip);
   const go = el('button', 'evalb go', 'Estimar lo que cuesta');
   go.type = 'submit';
   form.appendChild(go);
@@ -2461,10 +2525,12 @@ function askLaunchLine() {
   return line;
 }
 
-/** The filters a query was asked with, in words. */
+/** The filters a query was asked with, in words (`topics`: Python sends an old entry's single
+    `topic` as a list too). */
 function askFiltersText(f) {
   const parts = [];
-  if (f.topic) parts.push('topic ' + label(f.topic));
+  const topics = f.topics || [];
+  if (topics.length) parts.push((topics.length === 1 ? 'topic ' : 'topics ') + topics.map(label).join(' o '));
   if (f.since) parts.push('desde ' + f.since);
   if (f.until) parts.push('hasta ' + f.until);
   if (f.author) parts.push('autor @' + String(f.author).replace(/^@/, ''));
@@ -2489,6 +2555,14 @@ function askCard(p, r) {
   const ap = el('span', 'ap', prob(r.p));
   ap.title = 'probabilidad según Jev de que el post responda a la pregunta';
   top.appendChild(ap);
+  // The probability drawn: the fill is the number, over the whole track.
+  const bar = el('span', 'apbar');
+  bar.setAttribute('role', 'img');
+  bar.setAttribute('aria-label', 'probabilidad ' + prob(r.p));
+  const fill = el('i');
+  fill.style.width = Math.round(r.p * 100) + '%';
+  bar.appendChild(fill);
+  top.appendChild(bar);
   top.appendChild(el('span', 'meta', r.model + ' · ' + when(r.asked_at)));
   strip.appendChild(top);
   // The same state a topics answer is asked with: the card's own block carries it when it has one.
@@ -2515,12 +2589,9 @@ function askResults(row) {
     (row.times > 1 ? ' (' + nf(row.times) + ' veces)' : '') + ' · ' + askFiltersText(row.filters) +
     ' · ' + askCostText(cost) +
     (row.rebuilt ? ' · reconstruida desde sus respuestas (el historial la había perdido)' : '')));
-  const edge = dec(row.threshold, 2);
-  if (!row.error) {
-    head.appendChild(el('p', null, nf(row.results.length) + ' de ' +
-      pl(row.answered, 'post con respuesta vigente', 'posts con respuesta vigente') + ' ' +
-      (row.results.length === 1 ? 'llega' : 'llegan') + ' a ' + edge + ', de mayor a menor probabilidad.'));
-  }
+  const total = row.results.length;
+  const shown = Math.min(total, askView.shown[row.sha] || askTop());
+  if (!row.error) head.appendChild(el('p', null, askReachText(row, shown)));
   box.appendChild(head);
   if (row.error) {
     const err = el('p', 'err', row.error);
@@ -2528,17 +2599,51 @@ function askResults(row) {
     head.appendChild(err);
     return box;
   }
-  if (!row.results.length) {
-    const none = el('p', 'empty', 'Ningún post llega a ' + edge + ': Jev no ve una respuesta a esta ' +
-      'pregunta en ' + (row.answered === 1 ? 'el post' : 'los ' + nf(row.answered) + ' posts') +
-      ' con respuesta vigente.');
+  if (!total) {
+    const none = el('p', 'empty', row.min > 0
+      ? 'Ningún post llega a la relevancia mínima ' + dec(row.min, 2) + ': Jev no ve una respuesta tan clara en ' +
+        (row.answered === 1 ? 'el post' : 'los ' + nf(row.answered) + ' posts') + ' con respuesta vigente.'
+      : 'Ningún post con respuesta vigente: los filtros no dejan ninguno, o sus posts cambiaron desde que se preguntó.');
     none.id = 'ask-empty';
     box.appendChild(none);
     return box;
   }
   const byId = postById();
-  row.results.forEach(r => { if (byId[r.id]) box.appendChild(askCard(byId[r.id], r)); });
+  row.results.slice(0, shown).forEach(r => { if (byId[r.id]) box.appendChild(askCard(byId[r.id], r)); });
+  if (shown < total) {
+    const left = total - shown;
+    const more = el('button', 'evalb askmore', 'Ver ' + nf(Math.min(askTop(), left)) + ' más (quedan ' + nf(left) + ')');
+    more.type = 'button';
+    more.id = 'ask-more';
+    more.addEventListener('click', () => { askView.shown[row.sha] = shown + askTop(); renderAsk(); });
+    box.appendChild(more);
+  }
   return box;
+}
+
+/** What the results head says: how many posts answered, how many reach the minimum when
+    there is one, and how many are drawn — ranked, never «N llegan a <umbral>». */
+function askReachText(row, shown) {
+  const total = row.results.length;
+  const answered = pl(row.answered, 'post con respuesta vigente', 'posts con respuesta vigente');
+  const order = ', de mayor a menor probabilidad.';
+  if (row.min > 0) {
+    return nf(total) + ' de ' + answered + ' ' + (total === 1 ? 'llega' : 'llegan') +
+      ' a la relevancia mínima ' + dec(row.min, 2) + '; ' +
+      (shown < total ? 'se muestran los ' + nf(shown) + ' primeros' : (total === 1 ? 'se muestra' : 'se muestran todos')) + order;
+  }
+  if (shown < total) return 'Se muestran los ' + nf(shown) + ' primeros de ' + answered + order;
+  return (row.answered === 1 ? 'El post con respuesta vigente' : 'Los ' + answered) + order;
+}
+
+/** A history row's count: the first `[jev].ask_top` of how many, and the minimum when set. */
+function askHistoryCount(row) {
+  const total = row.results.length;
+  const shown = Math.min(total, askTop());
+  const first = shown < total ? nf(shown) + ' primeros de ' : '';
+  const answered = pl(row.answered, 'post con respuesta', 'posts con respuesta');
+  if (row.min > 0) return first + pl(total, 'resultado', 'resultados') + ' ≥ ' + dec(row.min, 2) + ' · ' + answered;
+  return first + answered;
 }
 
 function askHistory(open) {
@@ -2557,9 +2662,7 @@ function askHistory(open) {
     const li = el('li');
     const a = link(askHref(row.sha), null, '');
     a.appendChild(el('b', null, row.query));
-    a.appendChild(el('small', null, day(row.last_asked_at) + ' · ' +
-      pl(row.results.length, 'resultado', 'resultados') + ' · ' +
-      pl(row.answered, 'post con respuesta', 'posts con respuesta') + ' · ' +
+    a.appendChild(el('small', null, day(row.last_asked_at) + ' · ' + askHistoryCount(row) + ' · ' +
       (row.cost.error ? '—' : usd(row.cost.cost_usd)) + (row.times > 1 ? ' · ' + nf(row.times) + ' veces' : '') +
       (row.rebuilt ? ' · reconstruida' : '') + (row.error ? ' · ilegible' : '')));
     if (open && row.sha === open.sha) a.setAttribute('aria-current', 'true');
@@ -2603,7 +2706,7 @@ const SERVED = () => !!(DATA && DATA.serve);
     kind of pass has its estimate and evaluate; the job slot is one for every kind. */
 const API = {
   topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},
-  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate'},
+  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate', counts: '/api/ask/counts'},
   job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',
 };
 /** What the panel calls a job of each kind when it did not start it (a reload, another tab). */
@@ -2693,6 +2796,27 @@ function api(path, body) {
     if (data === null) throw new Error('respuesta ilegible del servidor');
     return data;
   });
+}
+
+/** Served: ask the server each topic's count under the filters typed (a moment after the
+    last keystroke), and write them in place. A refusal (a range that runs backwards) shows «—». */
+let askCountsTimer = null, askCountsSeq = 0;
+function askRecount() {
+  if (!SERVED()) return;
+  clearTimeout(askCountsTimer);
+  askCountsTimer = setTimeout(async () => {
+    const seq = ++askCountsSeq;
+    const filters = askFilterBody();
+    delete filters.topics;
+    let counts = null;
+    try { counts = (await api(API.ask.counts, filters)).topic_counts; } catch (e) { counts = null; }
+    if (seq !== askCountsSeq) return;
+    askCounts = counts || {};
+    document.querySelectorAll('#ask-topics .tcount').forEach(n => {
+      const c = askCounts[n.dataset.topic];
+      n.textContent = c == null ? '—' : nf(c);
+    });
+  }, 250);
 }
 
 function evalButton(text, ask) {
@@ -3111,6 +3235,8 @@ async function finished(job) {
   asking = null;
   seenFinish = job.finished_at;
   showEnd(job);
+  // An ask's new results open at the top again (the first `[jev].ask_top`), before the redraw.
+  if (job.kind === 'ask' && job.query_sha) delete askView.shown[job.query_sha];
   await reloadData();
   showAskResults(job);
 }
