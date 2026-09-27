@@ -1037,6 +1037,28 @@ def test_without_a_fetch_the_link_card_is_the_first_link():
     assert _post(_data([_item("2")], {}), "2")["link"] is None
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://x.com/i/article/1909295899274039296", True),
+        ("https://twitter.com/i/article/5/", True),
+        ("https://www.x.com/i/article/5", True),
+        ("https://x.com/a/status/5", False),
+        ("https://blog.example.com/i/article/5", False),
+        ("https://x.com/i/articles", False),
+    ],
+)
+def test_a_post_linking_an_x_article_is_marked_for_the_page(url, expected):
+    """X's embed of an Article is its bare link: the page opens such a post on the saved copy.
+    The mark comes from the post's own links (every Article post in the corpus has one)."""
+    item = _item("1")
+    item.links = [Link(url="https://blog.example.com/a", domain="blog.example.com")]
+    item.links.append(Link(url=url, domain="x.com"))
+
+    assert _post(_data([item], {}), "1")["x_article"] is expected
+    assert _post(_data([_item("2")], {}), "2")["x_article"] is False
+
+
 # --------------------------------------------------------------------------- media on disk
 
 

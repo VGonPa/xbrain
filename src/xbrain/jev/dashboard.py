@@ -328,6 +328,21 @@ def _link_card(item: Item) -> dict[str, Any] | None:
     return None
 
 
+#: The hosts an X link can have (as `xbrain.fetch`'s, which this page does not import: it
+#: loads the article extractor).
+_X_HOSTS = frozenset({"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"})
+
+
+def _is_x_article(item: Item) -> bool:
+    """The post links an X Article (`x.com/i/article/<id>`). X's embed of such a post shows
+    only that link, so the page opens it on the saved copy."""
+    for link in item.links:
+        parts = urlsplit(link.url)
+        if (parts.hostname or "").lower() in _X_HOSTS and parts.path.startswith("/i/article/"):
+            return True
+    return False
+
+
 def _topic_rows(
     comparison: ItemComparison, membership: dict[str, float], slugs: set[str]
 ) -> list[dict[str, Any]]:
@@ -508,6 +523,7 @@ def _card(item: Item, corpus: _Corpus) -> dict[str, Any]:
         "media": _card_media(item, corpus.media),
         "quoted": _quoted_card(item),
         "link": _link_card(item),
+        "x_article": _is_x_article(item),
         "enrich": (
             {"topics": enrich_topics, "primary": enriched.primary_topic} if enriched else None
         ),
