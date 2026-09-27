@@ -604,21 +604,28 @@ card shows **the post through X's own embed** — the post as X shows it, loaded
 card comes near the screen — under a head of ours (author, `@handle`, date, `X ↗`, `nota ↗` and
 the toggle). The embed is a plain frame to X's embed page: X's script never runs in this page,
 where the served page keeps the token that can spend money. X receives the post id and your
-IP (and its own cookies in your browser), never this page's address or data. See
-ARCHITECTURE.md (jev · *The X embed*).
+IP (and its own cookies in your browser). It gets no referrer: at most the page's origin
+(`file://` or the local port), never its path or data. See ARCHITECTURE.md (jev · *The X
+embed*).
 
-**The local copy is always one click away.** *ver versión local* on a card swaps X's view for
-the copy XBrain saved (below), and *ver en X* swaps it back. The switch **Vista: X | local**
-at the right of the tabs sets every card at once; this browser remembers it. Opening the page
-with `?embed=0` (`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every
-card local. A card shows the local copy by itself, with one line saying why, when:
+**The saved copy is always one click away.** *ver copia guardada* on a card swaps X's view for
+the copy XBrain saved (below), and *ver en X* swaps it back. The choice is per post: when the
+same post is on screen twice (Posts and a Preguntar result), both cards follow. The switch
+**Vista: X | copia guardada** beside the tabs (on a phone, on its own row above them) sets
+every card at once; this browser remembers it. Opening the page with `?embed=0`
+(`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every card on the
+saved copy. A card shows the saved copy by itself, with one line saying why (*… · se muestra
+la copia guardada*), when:
 
 - the post's id is not an X id (*Sin vista de X: el id de este post no es de X*);
+- the post is an X Article (it links `x.com/i/article/…`): X's view of an Article is only its
+  link, so the card opens on the saved copy (*Artículo de X: la vista de X solo enseña su
+  enlace*); *ver en X* still shows X's view;
 - X has not got the post — deleted, protected or a suspended account (*X no tiene este post*);
 - X did not answer within 8 seconds — no network, X blocked, the file opened offline (*X no
   respondió en 8 s (¿sin red?)*). *ver en X* tries again.
 
-The local copy is a share-style preview built from data XBrain already has, with nothing
+The saved copy is a share-style preview built from data XBrain already has, with nothing
 fetched from X:
 
 - the whole text (a long one starts folded behind *ver todo*);
@@ -673,7 +680,8 @@ It is **one file**: the data as a JSON blob in the page, no charting library, no
 scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
 the vault loses the pictures and nothing else. Two things come off the network: the Google
 Fonts stylesheet, and X's embed for each card near the screen (a frame from
-`platform.twitter.com`; offline, the cards fall back to the local copy after 8 s). Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
+`platform.twitter.com`; offline, the cards fall back to the saved copy after 8 s). Measured
+2026-09-26 on the real vault (2,609 posts, 293 evaluated):
 **3,799,403 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
 rows and evidence) and ~1.2 KB for the rest. The Topics and Comparar tabs' data is the
 confusion lists and bands (~19 KB of counts) and `post_sets` (~38 KB, ~130 bytes per evaluated

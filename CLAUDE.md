@@ -677,11 +677,13 @@ generates an Obsidian wiki.
   base64). Each card shows the post through X's own embed: a sandboxed `<iframe>` to
   `platform.twitter.com/embed/Tweet.html` (`dnt=true`, `no-referrer`), NEVER `widgets.js` (X's
   script in the page origin, next to the serve token); ids must match `^\d{1,25}$`; resize
-  messages are matched by `event.source` from X's origin only; local copy per card, page-wide
-  «Vista: X | local» / `?embed=0`, auto fallback after 8 s or `no_results` (ARCHITECTURE.md,
-  jev · The X embed). Page tests run with no network (`_NO_NETWORK`); the embed tests run Chrome
-  in real time (virtual time starves the IntersectionObserver). Which filter a card is in is decided in Python (`in` keys, tested equal to the
-  report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
+  messages are matched by `event.source` from X's origin only; «copia guardada» per post (every
+  card of it follows), page-wide «Vista: X | copia guardada» / `?embed=0`, auto fallback after
+  8 s or `no_results`; an X Article (`x_article`, Python) opens saved (ARCHITECTURE.md, jev ·
+  The X embed). Page tests run with no network (`_NO_NETWORK`); the embed tests run Chrome in
+  real time (virtual time starves the IntersectionObserver) and dispatch X's messages as real
+  `MessageEvent`s. Which filter a card is in is decided in Python (`in` keys, tested equal to
+  the report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
   disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
   headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Topics tab
   (`#topics`, `#topics?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
