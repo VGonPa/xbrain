@@ -161,6 +161,7 @@ details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;lette
 .st{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px dashed var(--hairline);border-radius:999px;padding:1px 8px;color:var(--ink-faint)}
 .twt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15.5px;line-height:1.55;margin:10px 0 4px}
 .twt a{color:var(--accent)}
+.artmore{display:flex;gap:14px;margin:6px 0 0}
 .twt.clamp{max-height:12.5em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
 .toggle{background:none;border:0;color:var(--accent);cursor:pointer;font-size:13px;padding:2px 0}
 .media{display:grid;gap:4px;border-radius:12px;overflow:hidden;margin-top:10px}
@@ -920,12 +921,17 @@ function header(p) {
   const links = el('div', 'links');
   const x = httpUrl(p.url);
   if (x) links.appendChild(link(x, 'lk', 'X ↗'));
-  if (p.note && DATA.notes_dir) {
-    links.appendChild(link('obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note), 'lk', 'nota ↗'));
-  }
+  const note = noteLink(p);
+  if (note) links.appendChild(note);
   if (X_ID.test(p.id)) links.appendChild(vistaToggle(p));
   h.appendChild(links);
   return h;
+}
+
+/** «nota ↗»: the post's note in the vault, when the page knows where the notes are. */
+function noteLink(p) {
+  if (!p.note || !DATA.notes_dir) return null;
+  return link('obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note), 'lk', 'nota ↗');
 }
 
 /** The text, whole; a long one starts collapsed with a "ver todo" toggle. */
@@ -1234,13 +1240,30 @@ function cardShows(p) {
   return {x: vista === 'x', why: null};
 }
 
-/** The saved copy: text, pictures, quoted post, link card. */
+/** The saved copy: text, pictures, quoted post, link card — and an X Article's body. */
 function localView(p) {
   const box = el('div', 'local');
   box.appendChild(body(p.text));
   if (p.media.length) box.appendChild(mediaGrid(p.media));
   if (p.quoted) box.appendChild(quotedCard(p.quoted));
   if (p.link) box.appendChild(linkCard(p.link));
+  if (p.article) box.appendChild(articleBody(p));
+  return box;
+}
+
+/** An X Article's body as the page ships it (cut in Python to `PAGE_ARTICLE_CHARS` at a
+    paragraph or sentence end), folded under «ver todo»; a cut one says where the rest is. */
+function articleBody(p) {
+  const box = document.createDocumentFragment();
+  box.appendChild(body(p.article.text, 'twt artb'));
+  if (p.article.cut) {
+    const more = el('p', 'artmore');
+    const x = httpUrl(p.article.url);
+    if (x) more.appendChild(link(x, 'lk', 'sigue en X ↗'));
+    const note = noteLink(p);
+    if (note) more.appendChild(note);
+    box.appendChild(more);
+  }
   return box;
 }
 

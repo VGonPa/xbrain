@@ -639,7 +639,11 @@ fetched from X:
   fetch failed, or *sin leer todavía: corre xbrain refresh-quoted* when none was tried;
 - the fetched linked page as a mini card with its domain and kind (`artículo`, or
   `x_article · página de X` — some of those hold scraped replies rather than an article),
-  marked *no se pudo leer* when the fetch failed, or else the first link in the post.
+  marked *no se pudo leer* when the fetch failed, or else the first link in the post;
+- for an X Article, its body as XBrain fetched it, up to 2,000 characters cut at the end of a
+  paragraph or sentence (marked *…*), folded behind *ver todo*; a cut body ends with *sigue
+  en X ↗* and *nota ↗* (the vault note has the whole article). The bodies add about 0.43 MB
+  to the page (201 Articles, measured 2026-09-27).
 
 Under the preview, **Jev vs enrich**: one row per topic either side has — enrich ✓ or —,
 Jev's probability as a bar (the tick is the threshold) and a number, and the verdict

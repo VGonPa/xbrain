@@ -37,9 +37,11 @@ from xbrain.jev.dashboard import (
     ASK_COMMAND,
     DOCS_CONFIG_URL,
     DOCS_URL,
+    PAGE_ARTICLE_CHARS,
     SURFACE_LABELS,
     TOPIC_MIN,
     MediaFiles,
+    _cut_at_boundary,
     _question_row,
     collect_jev_media,
     compute_jev_dashboard_data,
@@ -1057,6 +1059,76 @@ def test_a_post_linking_an_x_article_is_marked_for_the_page(url, expected):
 
     assert _post(_data([item], {}), "1")["x_article"] is expected
     assert _post(_data([_item("2")], {}), "2")["x_article"] is False
+
+
+def _article_item(body: str, url: str = "https://x.com/i/article/9") -> Item:
+    item = _item("1", text="https://t.co/x")
+    item.links = [Link(url=url, domain="x.com")]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[ContentSourceSuccess(kind="x_article", url=url, title="Un artículo", text=body)],
+    )
+    return item
+
+
+def test_an_x_articles_body_ships_whole_when_it_fits():
+    body = "Primer párrafo.\n\nSegundo párrafo."
+
+    assert _post(_data([_article_item(body)], {}), "1")["article"] == {
+        "text": body,
+        "cut": False,
+        "chars": len(body),
+        "url": "https://x.com/i/article/9",
+    }
+
+
+def test_a_long_x_article_body_is_cut_at_a_boundary_to_the_one_cap():
+    paragraph = "Una frase de relleno que se repite. " * 20  # ~720 chars, sentences inside
+    body = "\n\n".join([paragraph.strip()] * 6)  # ~4,300 chars
+    article = _post(_data([_article_item(body)], {}), "1")["article"]
+
+    assert article["cut"] is True
+    assert article["chars"] == len(body)
+    assert len(article["text"]) <= PAGE_ARTICLE_CHARS
+    # A paragraph boundary is found before the cap: the text is whole paragraphs, marked.
+    assert article["text"].endswith(" …")
+    kept = article["text"][: -len(" …")]
+    assert body.startswith(kept)
+    assert body[len(kept) : len(kept) + 2] == "\n\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Whole: nothing to cut, no marker.
+        ("corto.", "corto."),
+        # A paragraph end in the second half of the window wins over a later sentence end.
+        ("a" * 11 + ". " + "\n\n" + "b" * 20, "a" * 11 + ". …"),
+        ("a" * 12 + "\n\nb. c" + "d" * 20, "a" * 12 + " …"),
+        # No paragraph end: the last sentence end in the second half.
+        ("Uno dos tres. Cuatro cinco seis", "Uno dos tres. …"),
+        # A boundary in the first half is too early: the next rule is tried.
+        ("Uno. dos tres cuatro cinco", "Uno. dos tres …"),
+        # No sentence end: the last space in the second half.
+        ("palabra " * 5, "palabra palabra …"),
+        # Nothing to cut at: a hard cut, still marked.
+        ("x" * 40, "x" * 19 + "…"),
+    ],
+)
+def test_the_article_cut_prefers_a_paragraph_then_a_sentence_then_a_word(text, expected):
+    cut = _cut_at_boundary(text, 20)
+
+    assert cut == expected
+    assert len(cut) <= 20
+
+
+def test_only_an_x_article_ships_a_body():
+    """A post whose fetched link is another site's article keeps its link card and no body:
+    the page's own share card is the rule there."""
+    item = _article_item("texto", url="https://blog.example.com/i/article/9")
+
+    assert _post(_data([item], {}), "1")["article"] is None
+    assert _post(_data([_item("2")], {}), "2")["article"] is None
 
 
 # --------------------------------------------------------------------------- media on disk

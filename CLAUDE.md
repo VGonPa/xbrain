@@ -679,9 +679,10 @@ generates an Obsidian wiki.
   script in the page origin, next to the serve token); ids must match `^\d{1,25}$`; resize
   messages are matched by `event.source` from X's origin only; «copia guardada» per post (every
   card of it follows), page-wide «Vista: X | copia guardada» / `?embed=0`, auto fallback after
-  8 s or `no_results`; an X Article (`x_article`, Python) opens saved (ARCHITECTURE.md, jev ·
-  The X embed). Page tests run with no network (`_NO_NETWORK`); the embed tests run Chrome in
-  real time (virtual time starves the IntersectionObserver) and dispatch X's messages as real
+  8 s or `no_results`; an X Article (`x_article`, Python) opens saved, with its body cut to
+  `PAGE_ARTICLE_CHARS` at a boundary in Python (ARCHITECTURE.md, jev · The X embed). Page
+  tests run with no network (`_NO_NETWORK`); the embed tests run Chrome in real time
+  (virtual time starves the IntersectionObserver) and dispatch X's messages as real
   `MessageEvent`s. Which filter a card is in is decided in Python (`in` keys, tested equal to
   the report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
   disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in

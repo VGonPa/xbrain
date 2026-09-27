@@ -42,7 +42,8 @@ from tests.test_jev_page_browser import (
     _page,
     _requires_chrome,
 )
-from xbrain.models import Link
+from xbrain.jev.dashboard import PAGE_ARTICLE_CHARS
+from xbrain.models import Content, ContentSourceSuccess, Link
 
 X_EMBED = "https://platform.twitter.com/embed/Tweet.html"
 SANDBOX = "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
@@ -60,10 +61,23 @@ QUIET = "1875225613952544936"
 ART = "1876000000000000001"
 
 
+#: The Article's body as fetched: longer than the page's cap, in paragraphs.
+ART_URL = "http://x.com/i/article/1909295899274039296"
+ART_BODY = "\n\n".join(f"Párrafo {n} del artículo, con su frase. " * 12 for n in range(8))
+
+
 def _fixture() -> dict[str, Any]:
     items = [_item(i, text=f"texto local de {i}") for i in (*IDS, QUIET, ART, BAD, *ODD)]
-    items[4].links = [Link(url="http://x.com/i/article/1909295899274039296", domain="x.com")]
-    return _data(items, {it.id: _assessment(it, membership={"ai-coding": 0.9}) for it in items})
+    items[4].links = [Link(url=ART_URL, domain="x.com")]
+    items[4].content = Content(
+        fetched_at=items[4].created_at,
+        sources=[ContentSourceSuccess(kind="x_article", url=ART_URL, title="Tít", text=ART_BODY)],
+    )
+    data = _data(items, {it.id: _assessment(it, membership={"ai-coding": 0.9}) for it in items})
+    # The vault's notes, so the Article's saved copy can point at its note.
+    data["notes_dir"] = "/vault/x"
+    next(p for p in data["posts"] if p["id"] == ART)["note"] = "a.md"
+    return data
 
 
 #: Real seconds a probe may take (the one that waits out X's 8 s runs ~12 s; a busy runner
@@ -161,6 +175,9 @@ const sCard = (id, root) => {
       seen: seen(f)} : null,
     slot: !!(c && c.querySelector('.xembed')),
     local: txt(c.querySelector('.twt')),
+    article: txt(c.querySelector('.artb')),
+    article_folded: !!(c.querySelector('.artb') && c.querySelector('.artb').classList.contains('clamp')),
+    article_links: [...c.querySelectorAll('.artmore a')].map(a => [txt(a), a.getAttribute('href')]),
     note: txt(c.querySelector('.xnote')),
     toggle: txt(c.querySelector('.vtog')),
     jev: seen(c.querySelector('.jev')),
@@ -390,6 +407,17 @@ def test_an_x_article_opens_on_the_saved_copy_and_ver_en_x_shows_xs_view(embedde
     assert art["local"] == f"texto local de {ART}"
     assert art["note"] == _note("Artículo de X: la vista de X solo enseña su enlace")
     assert art["toggle"] == "ver en X"
+    # The saved copy carries the Article's body, cut to the page's cap at a paragraph end,
+    # folded under «ver todo», and says where the rest is.
+    assert art["article"] is not None
+    assert art["article"].endswith(" …")
+    assert ART_BODY.startswith(art["article"][: -len(" …")])
+    assert len(art["article"]) <= PAGE_ARTICLE_CHARS
+    assert art["article_folded"] is True
+    assert art["article_links"] == [
+        ["sigue en X ↗", ART_URL],
+        ["nota ↗", "obsidian://open?path=%2Fvault%2Fx%2Fa.md"],
+    ]
     assert flipped["frame"]["src"] == _src(ART, _other(embedded["theme"]))
     assert flipped["local"] is None
     assert flipped["note"] is None

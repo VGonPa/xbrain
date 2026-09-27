@@ -117,6 +117,13 @@ from xbrain.worksheet import link_content_source
 #: How much of each evidence surface, and of a quoted post, the page ships, in characters.
 #: Enough to recognise what Jev read; the whole corpus of them must stay a fraction of the page.
 PAGE_SURFACE_CHARS = 600
+#: How much of an X Article's body the saved copy on a card ships, in characters, cut at a
+#: boundary (`_cut_at_boundary`). X's embed of an Article is its bare link, so the page opens
+#: it on the saved copy; the whole body is in the vault note («nota ↗») and on X. 201 Articles
+#: × this cap is ~0.4 MB of page; whole, they were 2.3 MB.
+PAGE_ARTICLE_CHARS = 2000
+#: What a cut body ends with.
+CUT_MARK = " …"
 #: A photo's vision caption, as the page's alt text and tooltip, in characters.
 _CAPTION_CHARS = 280
 #: Topics enrich put on fewer posts than this sort after the rest in the Topics index, and are
@@ -199,6 +206,27 @@ def collect_jev_media(items: Sequence[Item], page_dir: Path, media_root: Path | 
             p for p in paths if media_root is not None and (media_root / p).is_file()
         ),
     )
+
+
+def _cut_at_boundary(text: str, width: int) -> str:
+    """`text` whole when it fits; else at most `width` characters ending in `CUT_MARK`, cut
+    at the last paragraph end in the second half of the window, else the last sentence end
+    there, else the last space there, else hard (marked with a bare ellipsis)."""
+    if len(text) <= width:
+        return text
+    head = text[: width - len(CUT_MARK)]
+    floor = width // 2
+    # (the ends a rule cuts at, how many of their characters the kept text ends with)
+    rules: tuple[tuple[tuple[str, ...], int], ...] = (
+        (("\n\n",), 0),
+        ((". ", "! ", "? ", ".\n", "!\n", "?\n"), 1),  # keeps the full stop
+        ((" ", "\n"), 0),
+    )
+    for ends, kept in rules:
+        at = max(head.rfind(end) for end in ends)
+        if at >= floor:
+            return head[: at + kept].rstrip() + CUT_MARK
+    return text[: width - 1] + "…"
 
 
 def _cut(text: str, width: int) -> str:
@@ -333,14 +361,39 @@ def _link_card(item: Item) -> dict[str, Any] | None:
 _X_HOSTS = frozenset({"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"})
 
 
+def _is_x_article_url(url: str) -> bool:
+    """`x.com/i/article/<id>` (or twitter.com's)."""
+    parts = urlsplit(url)
+    return (parts.hostname or "").lower() in _X_HOSTS and parts.path.startswith("/i/article/")
+
+
 def _is_x_article(item: Item) -> bool:
     """The post links an X Article (`x.com/i/article/<id>`). X's embed of such a post shows
     only that link, so the page opens it on the saved copy."""
-    for link in item.links:
-        parts = urlsplit(link.url)
-        if (parts.hostname or "").lower() in _X_HOSTS and parts.path.startswith("/i/article/"):
-            return True
-    return False
+    return any(_is_x_article_url(link.url) for link in item.links)
+
+
+def _article_body(item: Item) -> dict[str, Any] | None:
+    """An X Article's fetched body for the saved copy, cut to `PAGE_ARTICLE_CHARS` at a
+    boundary, with its full size and URL; None for any other post, or when the body was never
+    fetched."""
+    if not _is_x_article(item) or item.content is None:
+        return None
+    for source in item.content.sources:
+        if (
+            isinstance(source, ContentSourceSuccess)
+            and source.kind == "x_article"
+            and source.text
+            and _is_x_article_url(source.url)
+        ):
+            text = _cut_at_boundary(source.text, PAGE_ARTICLE_CHARS)
+            return {
+                "text": text,
+                "cut": text != source.text,
+                "chars": len(source.text),
+                "url": source.url,
+            }
+    return None
 
 
 def _topic_rows(
@@ -524,6 +577,7 @@ def _card(item: Item, corpus: _Corpus) -> dict[str, Any]:
         "quoted": _quoted_card(item),
         "link": _link_card(item),
         "x_article": _is_x_article(item),
+        "article": _article_body(item),
         "enrich": (
             {"topics": enrich_topics, "primary": enriched.primary_topic} if enriched else None
         ),
