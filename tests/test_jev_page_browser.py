@@ -1894,7 +1894,7 @@ def test_the_config_tab_draws_when_reached_from_another_tab(tmp_path):
 # to the server, so real time passes for the job thread while Chrome's virtual clock waits.
 
 #: The served probes' helpers, all prefixed `s` (the probe shares the page's scope). Every wait
-#: fetches a path the server does not have (a quick 404, never a call the page makes), so real
+#: fetches `/probe-wait` (a paced look, never a call the page makes: `_probe_handler`), so real
 #: time passes for the job thread while Chrome's clock waits, and gives up after 30 real
 #: seconds by the server's `Date` (the virtual budget is large: the waits bound the probe).
 #: `refresh` is wrapped to count the page's reloads; `fetch` to count estimate replies and keep
@@ -2195,12 +2195,29 @@ def _served_dump(
 _SERVED_DEADLINE_S = 110
 
 
+#: Real seconds `/probe-wait` holds each look. A wait is a loop of looks while Chrome's clock
+#: stands still; unpaced, one that never comes true opened ~2,500 connections a second and
+#: ran the machine out of ephemeral ports (TIME_WAIT) long before its 30 s bound — a bare
+#: «Failed to fetch» on Linux, a stalled Chrome on macOS (16,377 looks: its 16,384 ports).
+#: Paced, 30 s of looks is ~3,000 connections.
+_PROBE_WAIT_S = 0.01
+
+
 def _probe_handler() -> Any:
-    """The server's handler, plus two POST routes only a probe uses: `/probe-step` (the step
-    now running) and `/probe-done` (the output). Both land on the server object."""
+    """The server's handler, plus the routes only a probe uses: `/probe-step` (the step now
+    running) and `/probe-done` (the output), which land on the server object, and
+    `/probe-wait` (one paced look: 204 with the server's `Date`, for `sWait`)."""
     from xbrain.jev.serve import _Handler
 
     class _ProbeHandler(_Handler):
+        def do_GET(self) -> None:  # noqa: N802 — the stdlib's name
+            if self.path != "/probe-wait":
+                super().do_GET()
+                return
+            time.sleep(_PROBE_WAIT_S)
+            self.send_response(204)
+            self.end_headers()
+
         def do_POST(self) -> None:  # noqa: N802 — the stdlib's name
             if self.path not in ("/probe-step", "/probe-done"):
                 super().do_POST()

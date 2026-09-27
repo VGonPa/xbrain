@@ -248,7 +248,12 @@ def test_the_page_is_the_live_page_with_its_token_and_the_served_flag(served: _S
 
     assert status == 200
     assert response.getheader("Content-Type") == "text/html; charset=utf-8"
-    assert blob["serve"] == {"token": served.service.token, "max_usd": 1.0, "finished_at": None}
+    assert blob["serve"] == {
+        "token": served.service.token,
+        "max_usd": 1.0,
+        "finished_at": None,
+        "finished_job": None,
+    }
     page_row = next(row for row in blob["config"]["files"] if row["key"] == "page")
     assert page_row["served"] is True
     assert sorted(p["id"] for p in blob["posts"] if p["status"] == "compared") == ["1", "2"]
@@ -1407,16 +1412,46 @@ def test_a_cancel_needs_json(served: _Served):
 
 
 def test_the_blob_names_the_last_finished_job_its_data_already_includes(served: _Served):
-    """An idle tab compares this with `/api/job`'s `finished_at` to know that a job another
-    tab ran has ended since its data was built."""
+    """An idle tab compares this with `/api/job`'s `number` to know that a job another tab ran
+    has ended since its data was built."""
     _, before, _ = served.request("GET", "/api/data")
     job = _run_job(served, {"ids": ["3"]})
     _, after, _ = served.request("GET", "/api/data")
 
-    assert before["serve"]["finished_at"] is None
-    assert job["finished_at"] is not None
+    assert (before["serve"]["finished_at"], before["serve"]["finished_job"]) == (None, None)
+    assert job["finished_at"] is not None and job["number"] == 1
     assert after["serve"]["finished_at"] == job["finished_at"]
+    assert after["serve"]["finished_job"] == 1
     assert next(p for p in after["posts"] if p["id"] == "3")["status"] == "compared"
+
+
+def test_two_jobs_that_end_in_the_same_second_are_told_apart(served: _Served, monkeypatch):
+    """`finished_at` is to the second: a job ending in the same second as the one the data
+    includes has the same time, and a tab comparing times never reloaded (CI, twice). The
+    job's `number` tells them apart."""
+    monkeypatch.setattr("xbrain.jev.service._now_iso", lambda: "2026-09-27T12:00:00+00:00")
+    first = _run_job(served, {"ids": ["3"]})
+    _, data, _ = served.request("GET", "/api/data")
+    second = _run_job(served, {"ids": ["4"]})
+
+    assert first["finished_at"] == second["finished_at"]
+    assert (first["number"], second["number"]) == (1, 2)
+    assert data["serve"]["finished_job"] == 1
+    assert second["number"] != data["serve"]["finished_job"]
+
+
+def test_a_job_that_is_still_running_is_not_the_blobs_last_finished_one(tmp_path, monkeypatch):
+    """Only an ENDED job's number goes in the blob: one still running has no files to include."""
+    from xbrain.jev.service import JevService, _Job
+
+    service = JevService(_repo(tmp_path, monkeypatch), lambda: None)
+    running = _Job("topics", None, ("3",), 1.0, 0.1)  # type: ignore[arg-type]
+    running.number = 7
+    service._job = running
+
+    assert service._last_finished() == (None, None)
+    running.finished_at = "2026-09-27T12:00:00+00:00"
+    assert service._last_finished() == ("2026-09-27T12:00:00+00:00", 7)
 
 
 def test_a_refusal_is_the_servers_own_error_not_a_picks_one():

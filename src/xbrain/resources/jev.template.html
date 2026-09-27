@@ -3214,7 +3214,8 @@ let PANEL = null;
 let ESTIMATES = 0;
 /** The button that opened the panel: focus goes back to it when the panel closes. */
 let opener = null;
-/** The last finished job whose files this page's data includes (`/api/job`'s `finished_at`). */
+/** The last finished job whose files this page's data includes, by its `number` (`/api/job`'s):
+    its `finished_at` is a time to the second, and two jobs can end in the same one. */
 let seenFinish = null;
 /** Consecutive failed looks at `/api/job` by the idle watch. */
 let watchFailures = 0;
@@ -3704,7 +3705,7 @@ function showEnd(job) {
 async function finished(job) {
   following = false;
   asking = null;
-  seenFinish = job.finished_at;
+  seenFinish = job.number;
   showEnd(job);
   await reloadData();
   showAskResults(job);
@@ -3723,7 +3724,7 @@ function showAskResults(job) {
 /** Another tab's job ended while this page was idle: new data, and — when it did not end
     cleanly (the cap, a failure, answers unsaved or unlogged) — the panel saying how. */
 async function endedElsewhere(job) {
-  seenFinish = job.finished_at;
+  seenFinish = job.number;
   if (!endedCleanly(job)) {
     const P = panel();
     asking = null;
@@ -3785,7 +3786,7 @@ function watch(delay) {
         // `following` again: asked before this page confirmed a job and answered after, the
         // answer is about the job `poll` already has — neither followed twice nor reloaded.
         if (!following && job.state === 'running') resume(job);
-        else if (!following && job.finished_at && job.finished_at !== seenFinish) await endedElsewhere(job);
+        else if (!following && job.finished_at && job.number !== seenFinish) await endedElsewhere(job);
         watchFailures = 0;
         if (watchLostShown) watchFound();
       } catch (err) {
@@ -3801,7 +3802,7 @@ function watch(delay) {
 /** Serve mode at load: the toolbar's control, and the watch — whose first look, right away,
     picks up a job already running. */
 function bootServe() {
-  seenFinish = DATA.serve.finished_at || null;
+  seenFinish = DATA.serve.finished_job || null;
   renderNextControl();
   watch(0);
 }

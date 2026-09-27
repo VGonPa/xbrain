@@ -1049,7 +1049,7 @@ code:
    under the lock needs a new estimate; a 409 because a job is already running spends
    nothing.
 3. **Progress** (`GET /api/job`): `state` (`running`, then `done`, `interrupted` or
-   `error`), `done` of `total`, `answered`, `failed_calls`, `tokens`, `usd` spent,
+   `error`), the job's `number` (1, 2, … per server), `done` of `total`, `answered`, `failed_calls`, `tokens`, `usd` spent,
    `tokens_unknown`, `unpriced_providers` and `charged_at_estimate` (answers charged the
    mean because they could not be priced), then the `outcome` — `ok` saved (and their
    `ids`), `failed` with the first `failures`, `unsaved`, whether the pass was `logged` —
@@ -1108,8 +1108,11 @@ code:
 
 Every estimate and job view carries its `kind` (`topics` or `ask`): the server has ONE job
 slot for both, and both take the pass lock. The page's data is `GET /api/data`
-(the same blob the page embeds); its `serve.finished_at` is the last job whose files that data
-already includes, which is how an idle tab knows a job ended since.
+(the same blob the page embeds); its `serve.finished_job` is the `number` of the last job whose
+files that data already includes (with its `serve.finished_at`), which is how an idle tab knows
+a job ended since: every job view carries its `number` (1, 2, … per server). The time alone
+could not say it: it is to the second, and two jobs can end in the same one (a free ask right
+after another).
 
 **What stops a job from spending more than you meant:**
 

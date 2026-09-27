@@ -187,6 +187,10 @@ class _Job:
     outcome: dict[str, Any] | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    #: Which job of this server it is (1, 2, …): what tells one job's end from another's.
+    #: `finished_at` is a time to the second, and two jobs can end in the same one (a free ask
+    #: right after another): an idle tab that compared times missed the second end.
+    number: int = 0
 
     def planned(self, state: dict[str, str]) -> float:
         """What this post was planned to cost: its own price when the kind knows it, else the
@@ -226,6 +230,7 @@ class _Job:
             "max_usd": self.max_usd,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "number": self.number,
             **self.extra,
         }
         for key in ("reason", "error", "backup", "log_error", "outcome"):
@@ -718,6 +723,8 @@ class JevService:
         #: current or last one. One for the whole server, whatever the kind.
         self._starting: _Job | None = None
         self._job: _Job | None = None
+        #: How many jobs this server has numbered (`_Job.number`).
+        self._numbered = 0
         self._closing = False
         #: The per-kind part of the money path; the slot, the lock and the cap are shared.
         self._kinds: dict[str, _PassKind[Any, Any]] = {
@@ -753,7 +760,7 @@ class JevService:
             if self._cache is not None and self._cache[0] == signature:
                 return self._cache
             # Read BEFORE the files: a job that had finished by now wrote them before this.
-            finished_at = self._last_finished_at()
+            finished_at, finished_job = self._last_finished()
             jev = self._pairs()
             if self._media is None:
                 self._media = collect_jev_media(
@@ -766,8 +773,10 @@ class JevService:
                 "token": self.token,
                 "max_usd": self.cfg.jev_serve_max_usd,
                 # The last job whose files this data already includes: an idle tab whose
-                # `/api/job` reports another `finished_at` has older data and reloads it.
+                # `/api/job` reports a finished job of another `number` has older data and
+                # reloads it (`finished_at`, to the second, cannot tell two ends apart).
                 "finished_at": finished_at,
+                "finished_job": finished_job,
             }
             self._cache = (signature, blob, jev)
             return self._cache
@@ -787,13 +796,16 @@ class JevService:
             self._pairs_cache = (signature, jev)
             return jev
 
-    def _last_finished_at(self) -> str | None:
+    def _last_finished(self) -> tuple[str | None, int | None]:
+        """The last job's `finished_at` and `number`; `(None, None)` while none has ended."""
         with self._state:
             job = self._job
         if job is None:
-            return None
+            return None, None
         with job.lock:
-            return job.finished_at
+            if job.finished_at is None:
+                return None, None
+            return job.finished_at, job.number
 
     def blob(self) -> dict[str, Any]:
         """The page's data, as `/api/data` sends it and the page embeds it."""
@@ -911,6 +923,8 @@ class JevService:
             # A query every candidate already answers asks nothing: no reservation to make.
             per_post = confirm.usd / len(confirm.ids) if confirm.ids else 0.0
             job = _Job(kind, pick, confirm.ids, self.cfg.jev_serve_max_usd, per_post)
+            self._numbered += 1
+            job.number = self._numbered
             job.extra = self._kinds[kind].view(pick)
             job.confirmed = confirm.priced
             self._starting = job

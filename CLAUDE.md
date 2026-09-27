@@ -711,7 +711,8 @@ generates an Obsidian wiki.
   in the template's `/* serve */` section, behind `SERVED()` — `blob.serve` is null in the
   static file; `force` is never pre-ticked, «Parar» is `POST /api/job/cancel` (soft stop,
   reason `cancelado`), a job that did not end cleanly un-hides the panel, and an idle page
-  watches `/api/job` against `blob.serve.finished_at`). A paid pass holds
+  watches `/api/job`'s `number` against `blob.serve.finished_job` — never `finished_at`, a
+  time to the second that two jobs can share). A paid pass holds
   `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
   `run_topics`/`run_ask` require the `PassLock` handle — so the terminal and the server never
   lose each other's records; `jev topics` and `jev ask` refused by it exit 75. `jev ask "<query>"` (`jev/ask.py`)

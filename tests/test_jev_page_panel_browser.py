@@ -485,13 +485,18 @@ _FREE_ELSEWHERE_PROBE = (
 
 @pytest.fixture(scope="module")
 def free_elsewhere(tmp_path_factory) -> dict[str, Any]:
-    """An ask answered before the page opened, then asked again from another tab: free."""
+    """An ask answered before the page opened, then asked again from another tab: free — and
+    both end in the same second (the clock is pinned), as a free ask right after another does:
+    the page must still see that the second one ended (CI failed on this, twice)."""
     from tests.test_jev_serve_ask import _Asker
 
     return _served_dump(
         tmp_path_factory.mktemp("free-elsewhere"),
         _FREE_ELSEWHERE_PROBE,
         client=_Asker(),
+        patch=lambda mp: mp.setattr(
+            "xbrain.jev.service._now_iso", lambda: "2026-09-27T12:00:00+00:00"
+        ),
         before_dump=lambda service, port: _http_job(service, port, "ask", _FREE),
     )
 
