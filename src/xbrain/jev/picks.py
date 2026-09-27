@@ -1,19 +1,24 @@
-"""What a request to `xbrain jev serve` may ask the topics pass about: a `TopicsPick`.
+"""What a request to `xbrain jev serve` may ask a pass about: a `TopicsPick` or an `AskPick`.
 
 A pick names posts the way the page does — some ids, a topic, the next N without a current
 answer, the posts behind a pair (`post_sets` `cx` / `px` / `pd`) or a confidence band — plus
 whether current answers are re-asked (`force`). It is parsed here, strictly, and resolved to
 post ids from the page's own blob, so a pick means exactly the posts the page lists under it.
-Named for the TOPICS pass: a future «preguntar» ask (PRs 11–13) brings its own pick type and
-its own routes (`/api/<kind>/…`); the server's job slot and the pass lock are shared.
+
+The «Preguntar» ask (`/api/ask/…`) names its posts another way: a query, the pre-filters of
+`xbrain jev ask` and a limit (`AskPick`, `parse_ask`). The server's job slot and the pass lock
+are shared by both kinds.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
+from xbrain.jev.ask import AskFilters
+from xbrain.jev.questions import normalize_query
 from xbrain.models import Topic
 
 #: Posts one pick may name by id. The page never needs more; the corpus is ~2.6k posts.
@@ -148,3 +153,99 @@ def pick_ids(pick: TopicsPick, blob: dict[str, Any], vocab: list[Topic]) -> list
         return _topic_posts(pick.value, blob, vocab)
     kind, key = pick.value if pick.kind == "pair" else ("bands", pick.value)
     return _set_posts(blob["post_sets"], kind, key, "cruce" if pick.kind == "pair" else "banda")
+
+
+# --------------------------------------------------------------------------- the ask's pick
+
+#: The longest query a request may send, in characters (after normalising). A query is a
+#: sentence or two; the bound keeps a pasted document from being sent with every post.
+MAX_QUERY_CHARS = 2000
+#: The fields an ask body may carry: the query, `xbrain jev ask`'s pre-filters and its limit.
+ASK_FIELDS = ("query", "topic", "since", "until", "author", "only_evaluated", "limit")
+
+
+@dataclass(frozen=True)
+class AskPick:
+    """One «preguntar» request: the query as filed (`normalize_query`), the pre-filters and
+    the limit — `xbrain jev ask QUERY [--topic] [--since] [--until] [--author]
+    [--only-evaluated] [--limit]`. Frozen and comparable, so a confirmation is bound to
+    exactly the query and filters it priced."""
+
+    query: str
+    filters: AskFilters
+    limit: int | None
+
+    def as_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"query": self.query, **self.filters.as_json()}
+        if self.limit is not None:
+            out["limit"] = self.limit
+        return out
+
+
+def _optional_text(body: dict[str, Any], key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise refuse(f"`{key}` debe ser texto no vacío")
+    return value.strip()
+
+
+def _day(body: dict[str, Any], key: str) -> date | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, str):
+            raise ValueError(value)
+        return date.fromisoformat(value)
+    except ValueError:
+        raise refuse(f"`{key}` debe ser un día AAAA-MM-DD") from None
+
+
+def _query(value: Any) -> str:
+    if not isinstance(value, str):
+        raise refuse("falta `query`: la pregunta, como texto")
+    try:
+        text = normalize_query(value)
+    except ValueError as exc:
+        raise refuse(str(exc)) from exc
+    if len(text) > MAX_QUERY_CHARS:
+        raise refuse(f"la consulta pasa de {MAX_QUERY_CHARS} caracteres")
+    return text
+
+
+def _limit(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise refuse("`limit` debe ser un entero >= 1")
+    return value
+
+
+def parse_ask(body: Any) -> AskPick:
+    """The ask a request body names — a query, optional filters, an optional limit — or a 400.
+
+    The same checks `xbrain jev ask` makes on its options, plus two a page needs: a day range
+    that runs backwards is refused (it selects nothing, and looks like «no post answers»), and
+    a query longer than `MAX_QUERY_CHARS` is refused (it would travel with every post)."""
+    if not isinstance(body, dict):
+        raise refuse("el cuerpo debe ser un objeto JSON")
+    unknown = sorted(set(body) - set(ASK_FIELDS))
+    if unknown:
+        raise refuse(f"campos desconocidos: {', '.join(unknown)}")
+    query = _query(body.get("query"))
+    since, until = _day(body, "since"), _day(body, "until")
+    if since is not None and until is not None and since > until:
+        raise refuse("`since` es posterior a `until`: ese intervalo no tiene ningún día")
+    only_evaluated = body.get("only_evaluated", False)
+    if not isinstance(only_evaluated, bool):
+        raise refuse("`only_evaluated` debe ser true o false")
+    filters = AskFilters(
+        topic=_optional_text(body, "topic"),
+        since=since,
+        until=until,
+        author=_optional_text(body, "author"),
+        only_evaluated=only_evaluated,
+    )
+    return AskPick(query=query, filters=filters, limit=_limit(body.get("limit")))

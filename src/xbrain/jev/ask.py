@@ -155,6 +155,19 @@ class AskFilters:
         """Whether applying these filters needs the topics side-car (`load_jev_pairs`)."""
         return self.topic is not None or self.only_evaluated
 
+    @classmethod
+    def from_json(cls, stored: dict[str, str | bool]) -> AskFilters:
+        """The filters `as_json` wrote — how the history's entry is asked again."""
+        since, until = stored.get("since"), stored.get("until")
+        topic, author = stored.get("topic"), stored.get("author")
+        return cls(
+            topic=topic if isinstance(topic, str) else None,
+            since=date.fromisoformat(since) if isinstance(since, str) else None,
+            until=date.fromisoformat(until) if isinstance(until, str) else None,
+            author=author if isinstance(author, str) else None,
+            only_evaluated=stored.get("only_evaluated") is True,
+        )
+
     def as_json(self) -> dict[str, str | bool]:
         """The filters that are set, as the history stores them."""
         out: dict[str, str | bool] = {}
@@ -280,15 +293,32 @@ class AskEstimate:
     usd: float
 
 
-def chars_per_token(records: Iterable[AskAssessment]) -> float:
+@dataclass(frozen=True)
+class TokenRatio:
+    """Characters per input token, and how many paid answers it was measured on (0: the
+    default, `DEFAULT_CHARS_PER_TOKEN`)."""
+
+    value: float
+    measured: int
+
+
+def token_ratio(records: Iterable[AskAssessment]) -> TokenRatio:
     """Characters per input token, measured on paid ask answers that reported their usage;
     `DEFAULT_CHARS_PER_TOKEN` (low on purpose) until one exists."""
-    chars = tokens = 0
+    chars = tokens = measured = 0
     for record in records:
         if record.input_tokens:
             chars += record.prompt_chars
             tokens += record.input_tokens
-    return chars / tokens if tokens else DEFAULT_CHARS_PER_TOKEN
+            measured += 1
+    if not tokens:
+        return TokenRatio(DEFAULT_CHARS_PER_TOKEN, 0)
+    return TokenRatio(chars / tokens, measured)
+
+
+def chars_per_token(records: Iterable[AskAssessment]) -> float:
+    """`token_ratio`'s value: what an estimate divides the characters it will send by."""
+    return token_ratio(records).value
 
 
 def estimate_ask(
@@ -338,8 +368,10 @@ def ask_results(
     current: list[tuple[Item, AskAssessment]] = []
     for item in candidates:
         record = records.get(item.id)
+        if record is None:
+            continue
         state, _ = build_topic_state(item, char_limit)
-        if record is not None and _is_current(record, state[STATE_KEY], query):
+        if _is_current(record, state[STATE_KEY], query):
             current.append((item, record))
     ranked = sorted(
         ((item, record) for item, record in current if record.probability >= threshold),

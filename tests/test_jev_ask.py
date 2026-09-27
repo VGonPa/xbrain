@@ -795,3 +795,166 @@ def test_cli_ctrl_c_keeps_what_was_paid_and_exits_130(cfg: Config, monkeypatch):
     assert list(load_asks(_ask_path(cfg, query), query)) == ["1"]
     [line] = load_runs(cfg.jev_runs_path)
     assert (line.kind, line.interrupted, line.ok) == ("ask", True, 1)
+
+
+# --------------------------------------------------------------------------- the page's view
+
+
+def test_filters_round_trip_through_the_history_json():
+    from datetime import date
+
+    every = AskFilters(
+        topic="ai-coding",
+        since=date(2026, 9, 1),
+        until=date(2026, 9, 22),
+        author="@alice",
+        only_evaluated=True,
+    )
+
+    assert AskFilters.from_json(every.as_json()) == every
+    assert AskFilters.from_json({}) == AskFilters()
+
+
+def test_the_token_ratio_says_how_many_paid_answers_it_rests_on(cfg: Config):
+    from xbrain.jev.ask import token_ratio
+
+    assert token_ratio([]) == jev_ask.TokenRatio(DEFAULT_CHARS_PER_TOKEN, 0)
+    query, _, outcome = _run(cfg, _ByText(input_tokens=50))
+    unknown = outcome.assessed[0].model_copy(update={"input_tokens": None})
+
+    ratio = token_ratio([*outcome.assessed, unknown])
+
+    assert ratio.measured == 3
+    assert ratio.value == sum(a.prompt_chars for a in outcome.assessed) / 150
+
+
+def test_ask_bill_sums_only_this_querys_ask_passes(cfg: Config):
+    from xbrain.jev.report import ask_bill
+
+    query, _, _ = _run(cfg, _ByText(provider="typesafe", input_tokens=100))
+    _run(cfg, _ByText(provider="typesafe", input_tokens=7), query_text="otra pregunta")
+    runs = load_runs(cfg.jev_runs_path)
+
+    bill = ask_bill(runs, query.sha)
+
+    assert (bill["runs"], bill["requests"], bill["input_tokens"]) == (1, 3, 300)
+    assert bill["cost_usd"] == tokens_cost_usd(300, "typesafe")
+    assert ask_bill(runs, "0" * 64)["runs"] == 0
+
+
+def _history(cfg: Config, query: AskQuery, **filters) -> None:
+    record_ask(cfg, query, filters=AskFilters(**filters), evaluated=0, results=0, threshold=0.85)
+
+
+def _asks(cfg: Config) -> dict:
+    from xbrain.jev.dashboard import asks_view, load_saved_asks
+
+    saved, error = load_saved_asks(cfg)
+    return asks_view(
+        saved, load_jev_pairs(cfg), load_runs(cfg.jev_runs_path), char_limit=100_000, error=error
+    )
+
+
+def test_the_page_lists_each_query_with_its_current_results_best_first(cfg: Config):
+    query, _, _ = _run(cfg, _ByText(provider="typesafe"))
+    _history(cfg, query)
+
+    [row] = _asks(cfg)["history"]
+
+    assert (row["sha"], row["query"], row["times"], row["answered"]) == (query.sha, QUERY, 1, 3)
+    assert [(r["id"], r["p"]) for r in row["results"]] == [("1", 0.95), ("3", 0.95)]
+    assert row["cost"]["cost_usd"] == tokens_cost_usd(300, "typesafe")
+    assert "error" not in row
+
+
+def test_the_page_keeps_what_jev_read_once_per_result_post(cfg: Config):
+    query, _, _ = _run(cfg, _ByText())
+    _history(cfg, query)
+    other, _, _ = _run(cfg, _ByText(), query_text="hooks otra vez")
+    _history(cfg, other)
+
+    view = _asks(cfg)
+
+    assert sorted(view["surfaces"]) == ["1", "3"]
+    assert view["surfaces"]["1"][0]["chars"] == len(load_store(cfg.items_path)["1"].text)
+
+
+def test_a_changed_post_is_not_a_result_on_the_page(cfg: Config):
+    query, _, _ = _run(cfg, _ByText())
+    _history(cfg, query)
+    store = load_store(cfg.items_path)
+    store["3"].text = "Hooks in Claude Code, a thread (edited)"
+    save_store(store, cfg.items_path)
+
+    [row] = _asks(cfg)["history"]
+
+    assert [r["id"] for r in row["results"]] == ["1"] and row["answered"] == 2
+
+
+def test_the_page_applies_the_filters_the_query_was_asked_with(cfg: Config):
+    query, _, _ = _run(cfg, _ByText())
+    _history(cfg, query, author="bob")
+
+    [row] = _asks(cfg)["history"]
+
+    assert (row["results"], row["answered"], row["filters"]) == ([], 1, {"author": "bob"})
+
+
+def test_the_last_query_asked_is_listed_first(cfg: Config):
+    first, second = AskQuery.of("primera"), AskQuery.of("segunda")
+    record_ask(cfg, second, filters=AskFilters(), evaluated=0, results=0, threshold=0.85, now=DT)
+    record_ask(
+        cfg,
+        first,
+        filters=AskFilters(),
+        evaluated=0,
+        results=0,
+        threshold=0.85,
+        now=DT + timedelta(hours=1),
+    )
+
+    assert [row["query"] for row in _asks(cfg)["history"]] == ["primera", "segunda"]
+
+
+def test_an_unreadable_query_file_costs_its_row_never_the_page(cfg: Config):
+    query, _, _ = _run(cfg, _ByText())
+    _history(cfg, query)
+    fine = AskQuery.of("otra")
+    _history(cfg, fine)
+    _ask_path(cfg, query).write_text("{", encoding="utf-8")
+
+    rows = {row["query"]: row for row in _asks(cfg)["history"]}
+
+    assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["results"] == []
+    assert "error" not in rows["otra"]
+
+
+def test_a_history_entry_whose_topic_left_the_vocabulary_says_so(cfg: Config):
+    query, _, _ = _run(cfg, _ByText())
+    _history(cfg, query, topic="ai-coding")
+    store = load_store(cfg.items_path)
+    for item in store.values():
+        assert item.enriched is not None
+        item.enriched.topics, item.enriched.primary_topic = ["startups"], "startups"
+    save_store(store, cfg.items_path)
+    save_vocab([VOCAB[1]], cfg.vocab_path)
+
+    [row] = _asks(cfg)["history"]
+
+    assert "topic desconocido" in row["error"]
+
+
+def test_an_unreadable_history_is_the_tabs_error(cfg: Config):
+    path = cfg.jev_asks_dir / "index.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("[]", encoding="utf-8")
+
+    view = _asks(cfg)
+
+    assert view["history"] == [] and "ilegible" in view["error"]
+
+
+def test_a_page_built_without_asks_has_an_empty_tab():
+    from xbrain.jev.dashboard import NO_ASKS
+
+    assert NO_ASKS == {"history": [], "surfaces": {}, "error": None}

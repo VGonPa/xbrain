@@ -1,14 +1,20 @@
 """What `xbrain jev serve` does, without HTTP: the page's data, estimates, and the ONE job.
 
-THE MONEY PATH is estimate → confirm → one job, per kind (`topics` today; the «preguntar» ask
-of PRs 11–13 adds its own kind). ONE JOB SLOT for the whole server, whatever the kind, and
+THE MONEY PATH is estimate → confirm → one job, per kind: `topics` (`jev topics`) and `ask`
+(`jev ask`, the «Preguntar» tab). ONE JOB SLOT for the whole server, whatever the kind, and
 every paid pass takes the pass lock (`jev.lock`), so the page and a terminal never run two
-passes over one side-car at once.
+passes over one side-car at once. A kind (`_TopicsKind`, `_AskKind`) says only how its body
+is parsed, what it selects and costs, and which pass it runs; everything below is shared.
 
-* `estimate(kind, body)`: the pick (`jev.picks`) resolved to posts from the blob the page is
-  showing, `assess.select_items` over them (the `--dry-run` answer), priced by
-  `report.topics_pass_estimate` over the blob's `cost.per_post` — the one mean the cost strip
-  and the Configuración tab show. Under `[jev].serve_max_usd` (at most equal) it mints a
+* `estimate(kind, body)`: the pick (`jev.picks`) resolved to posts and priced.
+  - topics: resolved from the blob the page is showing, `assess.select_items` over them (the
+    `--dry-run` answer), priced by `report.topics_pass_estimate` over the blob's
+    `cost.per_post` — the one mean the cost strip and the Configuración tab show;
+  - ask: `jev ask`'s own pre-filters and funnel (`ask.filter_posts`, `ask.select_ask_items`)
+    priced by `ask.estimate_ask` at the measured characters per token. A query every
+    candidate already answers selects nothing and costs nothing: it may still run, to be
+    counted in the history — the job asks nobody and builds no client.
+  Under `[jev].serve_max_usd` (at most equal) it mints a
   single-use confirmation, bound to the kind and the pick AS ASKED, that expires after
   `CONFIRM_TTL_S`. With no priced mean there is nothing to check the cap against, so no
   confirmation: fail-closed.
@@ -17,7 +23,8 @@ passes over one side-car at once.
   pick. Otherwise the job thread takes the pass lock, re-reads, re-selects and RE-PRICES, and
   refuses (409, before any client exists and before any backup) if the posts moved or the
   price went over the cap. Only a job that passed all that is published in the slot.
-* The job runs `run.run_topics` — the terminal's pass — through `_Metered`, which makes the
+* The job runs `run.run_topics` or `run.run_ask` — the terminal's pass — through `_Metered`,
+  which makes the
   cap a HARD bound by reservation: before each call it reserves that post's expected cost (the
   estimate's mean, or this job's own priced mean when higher) and does not send when spent +
   reserved + the next reservation would pass the cap. An answer replaces its reservation with
@@ -26,7 +33,9 @@ passes over one side-car at once.
   cost above their reservation.
 * Every stop from here is SOFT (`run_topics(cancel=…)`) — the cap, the server stopping, and
   the page's «Parar» (`cancel_job`, reason `cancelado`): nothing queued is sent, every call
-  in flight is waited for, banked, saved and logged. Counters freeze when the job ends.
+  in flight is waited for, banked, saved and logged. Counters freeze when the job ends. An
+  ask that ended (done or stopped softly) is recorded in the query history, under the lock,
+  so what it paid for can be reopened; one that failed is not.
 """
 
 from __future__ import annotations
@@ -39,9 +48,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from xbrain.config import Config
+from xbrain.jev.ask import (
+    AskQuery,
+    ask_results,
+    estimate_ask,
+    filter_posts,
+    record_ask,
+    select_ask_items,
+    token_ratio,
+)
 from xbrain.jev.assess import Selection, select_items
 from xbrain.jev.client import CallSkipped, JevClient, JevError, JevResult, Question
 from xbrain.jev.dashboard import (
@@ -52,15 +70,25 @@ from xbrain.jev.dashboard import (
 )
 from xbrain.jev.defaults import tokens_cost_usd, unpriced
 from xbrain.jev.load import JevPairs, load_jev_pairs
-from xbrain.jev.lock import pass_lock
-from xbrain.jev.picks import ServeError, TopicsPick, parse_pick, pick_ids, refuse
+from xbrain.jev.lock import PassLock, pass_lock
+from xbrain.jev.picks import (
+    AskPick,
+    ServeError,
+    TopicsPick,
+    parse_ask,
+    parse_pick,
+    pick_ids,
+    refuse,
+)
 from xbrain.jev.report import report_paths, topics_pass_estimate
-from xbrain.jev.run import RunOutcome, run_topics
+from xbrain.jev.run import RunOutcome, run_ask, run_topics
+from xbrain.jev.store import ASK_INDEX, load_all_asks, load_asks
 
 logger = logging.getLogger(__name__)
 
-#: The kind of pass this server can run today. Routes are `/api/<kind>/estimate|evaluate`.
+#: The kinds of pass this server runs. Routes are `/api/<kind>/estimate|evaluate`.
 KIND_TOPICS = "topics"
+KIND_ASK = "ask"
 #: What the server calls itself in the pass lock, for the message another pass gets.
 LOCK_HOLDER = "xbrain jev serve"
 #: Confirmations kept at once; the oldest is dropped past this (each is single-use anyway).
@@ -93,7 +121,7 @@ class _Confirm:
     """What one estimate priced, for the one `evaluate` that may spend it."""
 
     kind: str
-    pick: TopicsPick
+    pick: TopicsPick | AskPick
     ids: tuple[str, ...]
     usd: float
     minted_at: float
@@ -104,11 +132,13 @@ class _Job:
     """One background pass and everything the page polls about it. Guarded by `lock`."""
 
     kind: str
-    pick: TopicsPick
+    pick: TopicsPick | AskPick
     ids: tuple[str, ...]
     max_usd: float
     #: The reservation per post: the confirmed estimate's mean (re-priced under the lock).
     per_post_usd: float
+    #: What a kind adds to the view (the ask's `query_sha`).
+    extra: dict[str, Any] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     cancel: threading.Event = field(default_factory=threading.Event)
     ready: threading.Event = field(default_factory=threading.Event)
@@ -171,6 +201,7 @@ class _Job:
             "max_usd": self.max_usd,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            **self.extra,
         }
         for key in ("reason", "error", "backup", "log_error", "outcome"):
             value = getattr(self, key)
@@ -267,8 +298,9 @@ def _reason(job: _Job) -> str:
     return "servidor parado" if job.stopped else "cancelado"
 
 
-def _finish(job: _Job, outcome: RunOutcome) -> None:
-    """Freeze the job with its outcome. A reason only when something was actually cut off."""
+def _finish(job: _Job, outcome: RunOutcome, extra: dict[str, Any]) -> None:
+    """Freeze the job with its outcome (plus what its kind adds: the ask's results). A reason
+    only when something was actually cut off."""
     logged = outcome.logged
     with job.lock:
         job.state = "interrupted" if outcome.interrupted else "done"
@@ -282,6 +314,7 @@ def _finish(job: _Job, outcome: RunOutcome) -> None:
             "unsaved": logged.unsaved if logged is not None else 0,
             "stored": outcome.stored,
             "logged": logged is not None,
+            **extra,
         }
         job.terminal = True
     if outcome.interrupted:
@@ -298,6 +331,237 @@ def _fail(job: _Job, message: str) -> None:
         job.state, job.error, job.finished_at = "error", message, _now_iso()
         job.terminal = True
     logger.error("el trabajo de Jev falló: %s", message)
+
+
+@dataclass(frozen=True)
+class _Priced:
+    """What one pick selects today and what it would cost — the estimate's answer and the job's
+    re-check under the lock alike. `reply` is what the kind adds to the estimate's reply;
+    `context` is what its pass needs (the ask's query, candidates and file in memory)."""
+
+    selection: Selection
+    ids: tuple[str, ...]
+    tokens: int | None
+    usd: float | None
+    reply: dict[str, Any]
+    context: Any = None
+
+
+def _cap_refusal(usd: float, cap: float, command: str) -> str | None:
+    if not over_cap(usd, cap):
+        return None
+    return (
+        f"la estimación (~{usd:.4f} $) pasa del tope por trabajo "
+        f"([jev].serve_max_usd = {cap} $): elige menos posts, o sube el tope en "
+        f"config.toml, o lánzalo desde la terminal con `{command}`"
+    )
+
+
+class _PassKind(Protocol):
+    """One kind of paid pass the server runs: how its body is parsed, what it selects and
+    costs, why it may not run, and the pass itself — nothing else differs between kinds."""
+
+    def parse(self, body: Any) -> TopicsPick | AskPick: ...
+
+    def price(self, cfg: Config, pick: Any, blob: dict[str, Any], jev: JevPairs) -> _Priced: ...
+
+    def refusal(self, cfg: Config, priced: _Priced) -> str | None: ...
+
+    def view(self, pick: Any) -> dict[str, Any]: ...
+
+    def run(
+        self,
+        cfg: Config,
+        job: _Job,
+        priced: _Priced,
+        jev: JevPairs,
+        make_client: Callable[[], JevClient],
+        lock: PassLock,
+    ) -> tuple[RunOutcome, dict[str, Any]]: ...
+
+
+def _hooks(job: _Job) -> dict[str, Any]:
+    """The pass's progress and run-log hooks, into the job view."""
+    return {
+        "on_progress": lambda done, total: _set(job, done=done),
+        "on_logged": lambda path, line, error: _log_line(job, path, line, error),
+        "cancel": job.cancel,
+    }
+
+
+class _TopicsKind:
+    """`xbrain jev topics` from the page: a `TopicsPick` over the blob's posts."""
+
+    def parse(self, body: Any) -> TopicsPick:
+        return parse_pick(body)
+
+    def price(self, cfg: Config, pick: TopicsPick, blob: dict[str, Any], jev: JevPairs) -> _Priced:
+        selection = _select_topics(cfg, pick, blob, jev)
+        per_post = blob["cost"]["per_post"]
+        ids = tuple(item.id for item in selection.items)
+        priced = topics_pass_estimate(per_post, len(ids))
+        return _Priced(
+            selection,
+            ids,
+            priced["tokens"],
+            priced["usd"],
+            {"forced": selection.forced, "per_post": {"n": per_post["n"], "of": per_post["of"]}},
+        )
+
+    def refusal(self, cfg: Config, priced: _Priced) -> str | None:
+        selection = priced.selection
+        if not priced.ids:
+            return (
+                f"nada que evaluar: {selection.skipped_current} vigentes, "
+                f"{selection.skipped_no_evidence} sin evidencia (volver a evaluar las vigentes pide "
+                "`force`: la casilla «Volver a evaluar también…» de la página)"
+            )
+        if priced.usd is None:
+            return (
+                "no hay coste medio con el que estimar (ninguna evaluación vigente con tokens y "
+                "tarifa), así que el tope no se puede comprobar: haz una primera pasada pequeña "
+                "desde la terminal, `xbrain jev topics --limit 5`"
+            )
+        return _cap_refusal(priced.usd, cfg.jev_serve_max_usd, "xbrain jev topics")
+
+    def view(self, pick: TopicsPick) -> dict[str, Any]:
+        return {}
+
+    def run(
+        self,
+        cfg: Config,
+        job: _Job,
+        priced: _Priced,
+        jev: JevPairs,
+        make_client: Callable[[], JevClient],
+        lock: PassLock,
+    ) -> tuple[RunOutcome, dict[str, Any]]:
+        outcome = run_topics(
+            cfg,
+            priced.selection,
+            dict(jev.assessments),
+            jev.vocab,
+            lambda: _Metered(make_client(), job),
+            lock=lock,
+            on_backup=lambda path: _set(job, backup=str(path)),
+            **_hooks(job),
+        )
+        return outcome, {}
+
+
+def _select_topics(cfg: Config, pick: TopicsPick, blob: dict[str, Any], jev: JevPairs) -> Selection:
+    """`assess.select_items` over the posts `pick` names — the `--dry-run` answer.
+
+    A named set that turns out EMPTY selects nothing: handing `ids=[]` down would mean
+    "every post" (`select_items`' own convention), a whole-corpus pass out of an empty topic.
+    """
+    ids = pick_ids(pick, blob, jev.vocab)
+    if ids is not None and not ids:
+        return Selection(items=(), skipped_current=0, skipped_no_evidence=0)
+    try:
+        return select_items(
+            jev.store,
+            jev.assessments,
+            jev.vocab,
+            ids=ids,
+            limit=pick.value if pick.kind == "unevaluated" else None,
+            force=pick.force,
+            fallback=cfg.jev_fallback_option,
+            char_limit=cfg.jev_state_char_limit,
+        )
+    except JevError as exc:
+        raise refuse(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class _AskContext:
+    query: AskQuery
+    candidates: list[Any]
+    records: dict[str, Any]
+
+
+class _AskKind:
+    """`xbrain jev ask` from the page: its query, pre-filters and limit (`AskPick`), its
+    funnel and its estimate — the command's own functions, at `[jev].threshold`."""
+
+    def parse(self, body: Any) -> AskPick:
+        return parse_ask(body)
+
+    def price(self, cfg: Config, pick: AskPick, blob: dict[str, Any], jev: JevPairs) -> _Priced:
+        query = AskQuery.of(pick.query)
+        candidates, dropped = filter_posts(
+            jev.store, pick.filters, jev=jev, threshold=cfg.jev_threshold
+        )
+        records = load_asks(cfg.jev_asks_dir / f"{query.sha}.json", query)
+        char_limit = cfg.jev_state_char_limit
+        selection = select_ask_items(
+            candidates, records, query, char_limit=char_limit, limit=pick.limit
+        )
+        ratio = token_ratio(load_all_asks(cfg.jev_asks_dir))
+        estimate = estimate_ask(
+            selection, query, char_limit=char_limit, chars_per_token=ratio.value
+        )
+        reply = {
+            "query_sha": query.sha,
+            "dropped": dropped,
+            "candidates": len(candidates),
+            "chars": estimate.chars,
+            "chars_per_token": {"value": ratio.value, "measured": ratio.measured},
+        }
+        ids = tuple(item.id for item in selection.items)
+        context = _AskContext(query, candidates, records)
+        return _Priced(selection, ids, estimate.tokens, estimate.usd, reply, context)
+
+    def refusal(self, cfg: Config, priced: _Priced) -> str | None:
+        selection = priced.selection
+        if not priced.ids and not selection.skipped_current:
+            return (
+                f"ningún post que preguntar: los filtros dejan {priced.reply['candidates']} "
+                f"posts y {selection.skipped_no_evidence} no tienen evidencia"
+            )
+        return _cap_refusal(priced.usd or 0.0, cfg.jev_serve_max_usd, "xbrain jev ask")
+
+    def view(self, pick: AskPick) -> dict[str, Any]:
+        return {"query_sha": AskQuery.of(pick.query).sha}
+
+    def run(
+        self,
+        cfg: Config,
+        job: _Job,
+        priced: _Priced,
+        jev: JevPairs,
+        make_client: Callable[[], JevClient],
+        lock: PassLock,
+    ) -> tuple[RunOutcome, dict[str, Any]]:
+        """The ask's pass, then — still under the lock — its results and the history line.
+        With nothing to ask (every answer current) no client is built and nothing is logged."""
+        context: _AskContext = priced.context
+        outcome = run_ask(
+            cfg,
+            priced.selection,
+            context.query,
+            context.records,
+            lambda: _Metered(make_client(), job),
+            lock=lock,
+            **_hooks(job),
+        )
+        pick: AskPick = job.pick  # type: ignore[assignment]
+        found = ask_results(
+            context.candidates,
+            context.records,
+            context.query,
+            char_limit=cfg.jev_state_char_limit,
+            threshold=cfg.jev_threshold,
+        )
+        record_ask(
+            cfg,
+            context.query,
+            filters=pick.filters,
+            evaluated=found.answered,
+            results=len(found.ranked),
+            threshold=cfg.jev_threshold,
+        )
+        return outcome, {"results": len(found.ranked), "answered": found.answered}
 
 
 def _signature(paths: list[Path]) -> tuple[tuple[int, int] | None, ...]:
@@ -354,7 +618,8 @@ class JevService:
         self._starting: _Job | None = None
         self._job: _Job | None = None
         self._closing = False
-        self._runners: dict[str, Callable[[_Job], None]] = {KIND_TOPICS: self._run_topics}
+        #: The per-kind part of the money path; the slot, the lock and the cap are shared.
+        self._kinds: dict[str, _PassKind] = {KIND_TOPICS: _TopicsKind(), KIND_ASK: _AskKind()}
 
     # ------------------------------------------------------------------ the page's data
 
@@ -367,6 +632,10 @@ class JevService:
             cfg.jev_runs_path,
             *report_paths(cfg.jev_dir),
             cfg.jev_page_path,
+            # The query history and every query's answers (a terminal's Ctrl-C writes the
+            # answers without the history).
+            cfg.jev_asks_dir / ASK_INDEX,
+            *sorted(cfg.jev_asks_dir.glob("*.json")),
         ]
 
     def _built(self) -> tuple[Any, dict[str, Any], JevPairs]:
@@ -430,70 +699,58 @@ class JevService:
 
     # ------------------------------------------------------------------ picks and prices
 
-    def _select(self, pick: TopicsPick, blob: dict[str, Any], jev: JevPairs) -> Selection:
-        """`assess.select_items` over the posts `pick` names — the `--dry-run` answer.
+    def asks(self) -> dict[str, Any]:
+        """The «Preguntar» history with each query's results, as `/api/asks` sends it: the
+        blob's `asks`, so the static page and the server never disagree. Costs nothing."""
+        return self.blob()["asks"]
 
-        A named set that turns out EMPTY selects nothing: handing `ids=[]` down would mean
-        "every post" (`select_items`' own convention), a whole-corpus pass out of an empty topic.
-        """
-        ids = pick_ids(pick, blob, jev.vocab)
-        if ids is not None and not ids:
-            return Selection(items=(), skipped_current=0, skipped_no_evidence=0)
-        try:
-            return select_items(
-                jev.store,
-                jev.assessments,
-                jev.vocab,
-                ids=ids,
-                limit=pick.value if pick.kind == "unevaluated" else None,
-                force=pick.force,
-                fallback=self.cfg.jev_fallback_option,
-                char_limit=self.cfg.jev_state_char_limit,
-            )
-        except JevError as exc:
-            raise refuse(str(exc)) from exc
+    def ask(self, sha: str) -> dict[str, Any]:
+        """One query of the history, with its results; 404 for a query never asked."""
+        for row in self.asks()["history"]:
+            if row["sha"] == sha:
+                return row
+        raise ServeError(404, "esa consulta no está en el historial")
 
-    def _kind(self, kind: str) -> Callable[[_Job], None]:
-        runner = self._runners.get(kind)
-        if runner is None:
+    # ------------------------------------------------------------------ picks and prices
+
+    def _kind(self, kind: str) -> _PassKind:
+        found = self._kinds.get(kind)
+        if found is None:
             raise ServeError(404, f"no hay pasadas de tipo «{kind}»")
-        return runner
+        return found
 
     def estimate(self, kind: str, body: Any) -> dict[str, Any]:
-        """How many posts `body`'s pick would ask, what that would cost by the page's mean,
-        and — when it may run — the single-use confirmation `evaluate` needs."""
-        self._kind(kind)
-        pick = parse_pick(body)
+        """How many posts `body`'s pick would ask, what that would cost, and — when it may
+        run — the single-use confirmation `evaluate` needs."""
+        pass_kind = self._kind(kind)
+        pick = pass_kind.parse(body)
         with self._state:
             if self._closing:
                 raise ServeError(503, "el servidor se está parando")
         _, blob, jev = self._built()
-        selection = self._select(pick, blob, jev)
-        per_post = blob["cost"]["per_post"]
-        ids = tuple(item.id for item in selection.items)
-        priced = topics_pass_estimate(per_post, len(ids))
-        refusal = self._refusal(len(ids), priced["usd"], selection)
+        priced = pass_kind.price(self.cfg, pick, blob, jev)
+        refusal = pass_kind.refusal(self.cfg, priced)
         confirm_token = None
         if refusal is None:
             confirm_token = secrets.token_urlsafe(16)
-            confirm = _Confirm(kind, pick, ids, priced["usd"], _monotonic())
+            confirm = _Confirm(kind, pick, priced.ids, priced.usd or 0.0, _monotonic())
             with self._state:
                 self._confirms[confirm_token] = confirm
                 while len(self._confirms) > _CONFIRMS_KEPT:
                     self._confirms.pop(next(iter(self._confirms)))
+        selection = priced.selection
         return {
             "kind": kind,
             "pick": pick.as_json(),
-            "ids": list(ids),
-            "posts": len(ids),
+            "ids": list(priced.ids),
+            "posts": len(priced.ids),
             "skipped_current": selection.skipped_current,
             "skipped_no_evidence": selection.skipped_no_evidence,
-            "forced": selection.forced,
             "remaining": selection.remaining,
-            "tokens": priced["tokens"],
-            "usd": priced["usd"],
+            **priced.reply,
+            "tokens": priced.tokens,
+            "usd": priced.usd,
             "estimate": True,
-            "per_post": {"n": per_post["n"], "of": per_post["of"]},
             "max_usd": self.cfg.jev_serve_max_usd,
             "allowed": refusal is None,
             "refusal": refusal,
@@ -501,32 +758,9 @@ class JevService:
             "expires_in_s": CONFIRM_TTL_S if confirm_token else None,
         }
 
-    def _refusal(self, posts: int, usd: float | None, selection: Selection) -> str | None:
-        """Why this pick may not run from the server, or `None` when it may."""
-        if not posts:
-            return (
-                f"nada que evaluar: {selection.skipped_current} vigentes, "
-                f"{selection.skipped_no_evidence} sin evidencia (volver a evaluar las vigentes pide "
-                "`force`: la casilla «Volver a evaluar también…» de la página)"
-            )
-        if usd is None:
-            return (
-                "no hay coste medio con el que estimar (ninguna evaluación vigente con tokens y "
-                "tarifa), así que el tope no se puede comprobar: haz una primera pasada pequeña "
-                "desde la terminal, `xbrain jev topics --limit 5`"
-            )
-        cap = self.cfg.jev_serve_max_usd
-        if over_cap(usd, cap):
-            return (
-                f"la estimación (~{usd:.4f} $) pasa del tope por trabajo "
-                f"([jev].serve_max_usd = {cap} $): elige menos posts, o sube el tope en "
-                "config.toml, o lánzalo desde la terminal con `xbrain jev topics`"
-            )
-        return None
-
     # ------------------------------------------------------------------ the job slot
 
-    def _claim(self, kind: str, token: str, pick: TopicsPick) -> tuple[_Job, _Confirm]:
+    def _claim(self, kind: str, token: str, pick: TopicsPick | AskPick) -> tuple[_Job, _Confirm]:
         """Under the state lock: the slot is free, the server is not stopping, and `token` is
         a live confirmation of exactly this pick — then the confirmation is spent and the job
         is the one being started. A refusal here spends nothing."""
@@ -545,21 +779,23 @@ class JevService:
             del self._confirms[token]
             if _monotonic() - confirm.minted_at > CONFIRM_TTL_S:
                 raise ServeError(409, "la confirmación caducó: vuelve a estimar")
-            per_post = confirm.usd / len(confirm.ids)
+            # A query every candidate already answers asks nothing: no reservation to make.
+            per_post = confirm.usd / len(confirm.ids) if confirm.ids else 0.0
             job = _Job(kind, pick, confirm.ids, self.cfg.jev_serve_max_usd, per_post)
+            job.extra = self._kinds[kind].view(pick)
             self._starting = job
             return job, confirm
 
     def evaluate(self, kind: str, body: Any) -> dict[str, Any]:
         """Start the job an estimate confirmed. Returns once it holds the lock and has checked
         the pick is still the posts and the price confirmed; 409/503 otherwise."""
-        runner = self._kind(kind)
+        pass_kind = self._kind(kind)
         if not isinstance(body, dict) or not isinstance(body.get("confirm_token"), str):
             raise refuse("falta confirm_token: pide antes una estimación")
         body = dict(body)
         token = body.pop("confirm_token")
-        job, confirm = self._claim(kind, token, parse_pick(body))
-        job.thread = threading.Thread(target=runner, args=(job,), name=f"jev-serve-{kind}")
+        job, confirm = self._claim(kind, token, pass_kind.parse(body))
+        job.thread = threading.Thread(target=self._run, args=(job,), name=f"jev-serve-{kind}")
         try:
             job.thread.start()
         except BaseException as exc:
@@ -576,49 +812,42 @@ class JevService:
             raise ServeError(job.refusal_status, job.refusal)
         return job.view()
 
-    def _recheck(self, job: _Job, blob: dict[str, Any], jev: JevPairs) -> Selection | None:
+    def _recheck(self, job: _Job, blob: dict[str, Any], jev: JevPairs) -> _Priced | None:
         """Under the lock, before anything is written: still running, still the same posts,
-        still under the cap at today's mean. `None` (and `job.refusal`) when not."""
+        still under the cap at today's price. `None` (and `job.refusal`) when not."""
         if job.cancel.is_set():
             job.refusal, job.refusal_status = "el servidor se está parando", 503
             return None
-        selection = self._select(job.pick, blob, jev)
-        if tuple(item.id for item in selection.items) != job.ids:
+        priced = self._kinds[job.kind].price(self.cfg, job.pick, blob, jev)
+        if priced.ids != job.ids:
             job.refusal = (
                 "la selección cambió desde la estimación (otra pasada o un cambio en los "
                 "datos): vuelve a estimar"
             )
             return None
-        usd = topics_pass_estimate(blob["cost"]["per_post"], len(job.ids))["usd"]
+        usd = priced.usd
         if usd is None or over_cap(usd, job.max_usd):
             job.refusal = "el precio estimado cambió y ya no cabe en el tope: vuelve a estimar"
             return None
-        job.per_post_usd = max(job.per_post_usd, usd / len(job.ids))
-        return selection
+        if job.ids:
+            job.per_post_usd = max(job.per_post_usd, usd / len(job.ids))
+        return priced
 
-    def _run_topics(self, job: _Job) -> None:
-        """The topics job's thread: lock, reload, re-check, run the ONE loop, record the end."""
+    def _run(self, job: _Job) -> None:
+        """The job's thread, for every kind: lock, reload, re-check, run the kind's ONE loop,
+        record the end."""
         try:
             with pass_lock(self.cfg.jev_lock_path, LOCK_HOLDER) as lock:
                 _, blob, jev = self._built()
-                selection = self._recheck(job, blob, jev)
-                if selection is None:
+                priced = self._recheck(job, blob, jev)
+                if priced is None:
                     return
                 _set(job, state="running", total=len(job.ids), started_at=_now_iso())
                 job.ready.set()
-                outcome = run_topics(
-                    self.cfg,
-                    selection,
-                    dict(jev.assessments),
-                    jev.vocab,
-                    lambda: _Metered(self._make_client(), job),
-                    lock=lock,
-                    on_backup=lambda path: _set(job, backup=str(path)),
-                    on_progress=lambda done, total: _set(job, done=done),
-                    on_logged=lambda path, line, error: _log_line(job, path, line, error),
-                    cancel=job.cancel,
+                outcome, extra = self._kinds[job.kind].run(
+                    self.cfg, job, priced, jev, self._make_client, lock
                 )
-            _finish(job, outcome)
+            _finish(job, outcome, extra)
         except Exception as exc:
             message = str(exc) if isinstance(exc, (JevError, ServeError)) else repr(exc)
             if not job.ready.is_set():

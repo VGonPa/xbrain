@@ -916,6 +916,15 @@ def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment])
     }
 
 
+def ask_bill(runs: Sequence[JevRun], query_sha: str) -> dict[str, Any]:
+    """What one «preguntar» query has cost: the logged ask passes with its `query_sha`,
+    summed and priced now like every other pass (`_run_row`, `_history_total`). An answer
+    whose pass was never logged is not in it — the same stance as the topics total."""
+    return _history_total(
+        [_run_row(run) for run in runs if run.kind == "ask" and run.query_sha == query_sha]
+    )
+
+
 def history_fragment(history: dict[str, Any]) -> str:
     """`N pasadas · M peticiones · <the shared cost sentence>`, plus what the log never saw.
 
