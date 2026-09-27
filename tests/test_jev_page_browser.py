@@ -47,6 +47,11 @@ from xbrain.jev.dashboard import compute_jev_dashboard_data
 from xbrain.jev.models import PrimaryChoice
 from xbrain.models import Author, Topic
 
+#: Every page test runs with no network: each host but localhost resolves to NOTFOUND, so a
+#: test can never pass (or hang) on what X's embed or a font server sent — X's messages are
+#: handed to the page by the probe instead (tests/test_jev_page_embed_browser.py).
+_NO_NETWORK = "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+
 _REQUIRED = os.environ.get("XBRAIN_REQUIRE_CHROME", "").strip() not in ("", "0", "false", "False")
 _MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -234,6 +239,7 @@ def _dump(url: str, budget_ms: int = 8000) -> dict[str, Any]:
             "--headless=new",
             "--disable-gpu",
             "--no-sandbox",
+            _NO_NETWORK,
             f"--virtual-time-budget={budget_ms}",
             "--dump-dom",
             url,
@@ -2216,6 +2222,7 @@ def _dump_served(server: Any, url: str) -> dict[str, Any]:
             "--headless=new",
             "--disable-gpu",
             "--no-sandbox",
+            _NO_NETWORK,
             "--virtual-time-budget=900000",
             "--dump-dom",
             url,
