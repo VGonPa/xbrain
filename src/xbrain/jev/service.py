@@ -45,10 +45,10 @@ import secrets
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Generic, Protocol, TypeVar
 
 from xbrain.config import Config
 from xbrain.jev.ask import (
@@ -71,6 +71,7 @@ from xbrain.jev.dashboard import (
 from xbrain.jev.defaults import DEFAULT_PROVIDER, tokens_cost_usd, unpriced
 from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.lock import PassLock, pass_lock
+from xbrain.jev.models import AskIndex
 from xbrain.jev.questions import STATE_KEY
 from xbrain.jev.picks import (
     AskPick,
@@ -126,7 +127,7 @@ class _Confirm:
     ids: tuple[str, ...]
     usd: float
     minted_at: float
-    priced: _Priced | None = None
+    priced: _Priced[Any] | None = None
 
 
 @dataclass
@@ -357,18 +358,23 @@ def _fail(job: _Job, message: str) -> None:
     logger.error("el trabajo de Jev falló: %s", message)
 
 
+#: A kind's pick (`TopicsPick`, `AskPick`) and what its pass carries from estimate to run.
+Pk = TypeVar("Pk")
+C = TypeVar("C")
+
+
 @dataclass(frozen=True)
-class _Priced:
+class _Priced(Generic[C]):
     """What one pick selects today and what it would cost — the estimate's answer and the job's
     re-check under the lock alike. `reply` is what the kind adds to the estimate's reply;
-    `context` is what its pass needs (the ask's query, candidates and file in memory)."""
+    `context` is what its pass needs (`None` for topics; the ask's `AskPlan`)."""
 
     selection: Selection
     ids: tuple[str, ...]
     tokens: int | None
     usd: float | None
     reply: dict[str, Any]
-    context: Any = None
+    context: C
 
 
 def _cap_refusal(usd: float, cap: float, command: str) -> str | None:
@@ -381,25 +387,27 @@ def _cap_refusal(usd: float, cap: float, command: str) -> str | None:
     )
 
 
-class _PassKind(Protocol):
+class _PassKind(Protocol[Pk, C]):
     """One kind of paid pass the server runs: how its body is parsed, what it selects and
     costs, why it may not run, and the pass itself — nothing else differs between kinds."""
 
-    def parse(self, body: Any) -> TopicsPick | AskPick: ...
+    def parse(self, body: Any) -> Pk: ...
 
-    def price(self, cfg: Config, pick: Any, blob: dict[str, Any], jev: JevPairs) -> _Priced: ...
+    def price(self, cfg: Config, pick: Pk, blob: dict[str, Any], jev: JevPairs) -> _Priced[C]: ...
 
-    def refusal(self, cfg: Config, priced: _Priced) -> str | None: ...
+    def refusal(self, cfg: Config, priced: _Priced[C]) -> str | None: ...
 
-    def view(self, pick: Any) -> dict[str, Any]: ...
+    def view(self, pick: Pk) -> dict[str, Any]: ...
 
-    def same(self, confirmed: _Priced, now: _Priced) -> bool: ...
+    def same(self, confirmed: _Priced[C], now: _Priced[C]) -> bool: ...
+
+    def slim(self, priced: _Priced[C]) -> _Priced[C]: ...
 
     def run(
         self,
         cfg: Config,
         job: _Job,
-        priced: _Priced,
+        priced: _Priced[C],
         jev: JevPairs,
         make_client: Callable[[], JevClient],
         lock: PassLock,
@@ -421,7 +429,9 @@ class _TopicsKind:
     def parse(self, body: Any) -> TopicsPick:
         return parse_pick(body)
 
-    def price(self, cfg: Config, pick: TopicsPick, blob: dict[str, Any], jev: JevPairs) -> _Priced:
+    def price(
+        self, cfg: Config, pick: TopicsPick, blob: dict[str, Any], jev: JevPairs
+    ) -> _Priced[None]:
         selection = _select_topics(cfg, pick, blob, jev)
         per_post = blob["cost"]["per_post"]
         ids = tuple(item.id for item in selection.items)
@@ -432,9 +442,10 @@ class _TopicsKind:
             priced["tokens"],
             priced["usd"],
             {"forced": selection.forced, "per_post": {"n": per_post["n"], "of": per_post["of"]}},
+            None,
         )
 
-    def refusal(self, cfg: Config, priced: _Priced) -> str | None:
+    def refusal(self, cfg: Config, priced: _Priced[None]) -> str | None:
         selection = priced.selection
         if not priced.ids:
             return (
@@ -453,14 +464,17 @@ class _TopicsKind:
     def view(self, pick: TopicsPick) -> dict[str, Any]:
         return {}
 
-    def same(self, confirmed: _Priced, now: _Priced) -> bool:
+    def same(self, confirmed: _Priced[None], now: _Priced[None]) -> bool:
         return confirmed.ids == now.ids
+
+    def slim(self, priced: _Priced[None]) -> _Priced[None]:
+        return priced
 
     def run(
         self,
         cfg: Config,
         job: _Job,
-        priced: _Priced,
+        priced: _Priced[None],
         jev: JevPairs,
         make_client: Callable[[], JevClient],
         lock: PassLock,
@@ -511,7 +525,9 @@ class _AskKind:
     def parse(self, body: Any) -> AskPick:
         return parse_ask(body)
 
-    def price(self, cfg: Config, pick: AskPick, blob: dict[str, Any], jev: JevPairs) -> _Priced:
+    def price(
+        self, cfg: Config, pick: AskPick, blob: dict[str, Any], jev: JevPairs
+    ) -> _Priced[AskPlan]:
         plan = plan_ask(cfg, AskQuery.of(pick.query), pick.filters, pick.limit, jev=jev)
         estimate, model = plan.estimate, plan.estimate.model
         reply = {
@@ -530,7 +546,7 @@ class _AskKind:
         ids = tuple(item.id for item in plan.selection.items)
         return _Priced(plan.selection, ids, estimate.tokens, estimate.usd, reply, plan)
 
-    def refusal(self, cfg: Config, priced: _Priced) -> str | None:
+    def refusal(self, cfg: Config, priced: _Priced[AskPlan]) -> str | None:
         selection = priced.selection
         if not priced.ids and not selection.skipped_current:
             return (
@@ -544,14 +560,22 @@ class _AskKind:
     def view(self, pick: AskPick) -> dict[str, Any]:
         return {"query_sha": AskQuery.of(pick.query).sha}
 
-    def same(self, confirmed: _Priced, now: _Priced) -> bool:
+    def same(self, confirmed: _Priced[AskPlan], now: _Priced[AskPlan]) -> bool:
         return same_selection(confirmed.context, now.context)
+
+    def slim(self, priced: _Priced[AskPlan]) -> _Priced[AskPlan]:
+        """What a confirmation keeps: the plan's selection and estimate, for `same` — not
+        the query's answers, every candidate's state or the history (32 of them live as long
+        as the server)."""
+        plan: AskPlan = priced.context
+        light = replace(plan, candidates=(), records={}, states={}, history=AskIndex(), similar=())
+        return replace(priced, context=light)
 
     def run(
         self,
         cfg: Config,
         job: _Job,
-        priced: _Priced,
+        priced: _Priced[AskPlan],
         jev: JevPairs,
         make_client: Callable[[], JevClient],
         lock: PassLock,
@@ -594,6 +618,20 @@ def _post_price(plan: AskPlan) -> Callable[[dict[str, str]], float]:
     total = sum(raw(len(plan.states[item.id]) + question) for item in plan.selection.items)
     scale = plan.estimate.usd / total if total else 1.0
     return lambda state: raw(len(state[STATE_KEY]) + question) * scale
+
+
+def _result_surfaces(row: dict[str, Any], blob: dict[str, Any]) -> dict[str, Any]:
+    """What Jev read for each result of `row`: the card's own Jev block when it has one, else
+    the tab's `asks.surfaces` (the blob sends each only once)."""
+    cards = {card["id"]: card for card in blob["posts"]}
+    out: dict[str, Any] = {}
+    for result in row["results"]:
+        card = cards.get(result["id"])
+        jev = card.get("jev") if card else None
+        out[result["id"]] = (
+            jev["surfaces"] if jev else blob["asks"]["surfaces"].get(result["id"], [])
+        )
+    return out
 
 
 def _signature(paths: list[Path]) -> tuple[tuple[int, int] | None, ...]:
@@ -651,7 +689,10 @@ class JevService:
         self._job: _Job | None = None
         self._closing = False
         #: The per-kind part of the money path; the slot, the lock and the cap are shared.
-        self._kinds: dict[str, _PassKind] = {KIND_TOPICS: _TopicsKind(), KIND_ASK: _AskKind()}
+        self._kinds: dict[str, _PassKind[Any, Any]] = {
+            KIND_TOPICS: _TopicsKind(),
+            KIND_ASK: _AskKind(),
+        }
 
     # ------------------------------------------------------------------ the page's data
 
@@ -738,14 +779,15 @@ class JevService:
 
     def ask(self, sha: str) -> dict[str, Any]:
         """One query of the history, with its results; 404 for a query never asked."""
-        for row in self.asks()["history"]:
+        blob = self.blob()
+        for row in blob["asks"]["history"]:
             if row["sha"] == sha:
-                return row
+                return {**row, "surfaces": _result_surfaces(row, blob)}
         raise ServeError(404, "esa consulta no está en el historial")
 
     # ------------------------------------------------------------------ picks and prices
 
-    def _kind(self, kind: str) -> _PassKind:
+    def _kind(self, kind: str) -> _PassKind[Any, Any]:
         found = self._kinds.get(kind)
         if found is None:
             raise ServeError(404, f"no hay pasadas de tipo «{kind}»")
@@ -765,7 +807,9 @@ class JevService:
         confirm_token = None
         if refusal is None:
             confirm_token = secrets.token_urlsafe(16)
-            confirm = _Confirm(kind, pick, priced.ids, priced.usd or 0.0, _monotonic(), priced)
+            confirm = _Confirm(
+                kind, pick, priced.ids, priced.usd or 0.0, _monotonic(), pass_kind.slim(priced)
+            )
             with self._state:
                 self._confirms[confirm_token] = confirm
                 while len(self._confirms) > _CONFIRMS_KEPT:
@@ -845,7 +889,7 @@ class JevService:
             raise ServeError(job.refusal_status, job.refusal)
         return job.view()
 
-    def _recheck(self, job: _Job, blob: dict[str, Any], jev: JevPairs) -> _Priced | None:
+    def _recheck(self, job: _Job, blob: dict[str, Any], jev: JevPairs) -> _Priced[Any] | None:
         """Under the lock, before anything is written: still running, still the same posts,
         still under the cap at today's price. `None` (and `job.refusal`) when not."""
         if job.cancel.is_set():

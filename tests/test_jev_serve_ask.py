@@ -439,7 +439,7 @@ def test_the_history_and_one_querys_results_are_the_blob_the_page_carries(served
 
     assert status == 200
     assert history == blob["asks"]
-    assert one == blob["asks"]["history"][0]
+    assert {k: v for k, v in one.items() if k != "surfaces"} == blob["asks"]["history"][0]
     assert one["sha"] == query.sha and one["query"] == query.text
     assert (
         [(r["id"], r["p"]) for r in one["results"]]
@@ -589,6 +589,7 @@ def test_an_ask_without_a_price_is_refused():
         None,
         None,
         {"candidates": 1},
+        None,
     )
 
     refusal = _AskKind().refusal(None, priced)  # type: ignore[arg-type]
@@ -632,3 +633,70 @@ def test_a_long_post_first_does_not_stop_an_ask_its_estimate_fits(tmp_path: Path
     assert s.client.asked[0] == "1"
     assert job["state"] == "done" and "reason" not in job, job
     assert job["outcome"]["ok"] == 5 and job["usd"] <= cap
+
+
+def test_a_confirmation_keeps_what_the_recheck_compares_not_the_whole_plan(served: _AskServed):
+    """Up to 32 confirmations live as long as the server: each keeps the selection, never the
+    query's answers, every candidate's state or the history."""
+    served.ask_run({"query": QUERY, "limit": 1})
+    estimate = served.ask_estimate({"query": QUERY})
+
+    confirm = served.service._confirms[estimate["confirm_token"]]
+    plan = confirm.priced.context
+    assert [item.id for item in plan.selection.items] == estimate["ids"]
+    assert (plan.records, plan.states, plan.candidates, plan.history.queries) == ({}, {}, (), {})
+
+
+def test_one_query_carries_what_jev_read_for_each_of_its_results(served: _AskServed):
+    served.ask_run({"query": QUERY})
+
+    _, one, _ = served.request("GET", f"/api/ask/{AskQuery.of(QUERY).sha}")
+    _, blob, _ = served.request("GET", "/api/data")
+
+    cards = {card["id"]: card for card in blob["posts"]}
+    assert sorted(one["surfaces"]) == sorted(r["id"] for r in one["results"])
+    for post, surfaces in one["surfaces"].items():
+        card = cards[post]
+        expected = card["jev"]["surfaces"] if card["jev"] else blob["asks"]["surfaces"][post]
+        assert surfaces == expected
+    assert any(cards[p]["jev"] for p in one["surfaces"]) and any(
+        not cards[p]["jev"] for p in one["surfaces"]
+    )
+
+
+@pytest.mark.parametrize("path", ["/api/ask/estimate", "/api/ask/evaluate"])
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        {"token": False},
+        {"origin": "http://evil.example"},
+        {"origin": None},
+        {"headers": {"Host": "evil.example:1"}},
+    ],
+)
+def test_the_ask_posts_have_the_same_guards_as_topics(
+    served: _AskServed, path: str, refusal: dict[str, Any]
+):
+    status, error, _ = served.request("POST", path, {"query": QUERY}, **refusal)
+
+    assert status == 403 and error["error"]
+    assert served.built == 0
+
+
+@pytest.mark.parametrize("path", ["/api/ask/estimate", "/api/ask/evaluate"])
+def test_an_oversized_ask_body_is_refused_unread(served: _AskServed, path: str):
+    status, _, _ = served.request("POST", path, raw=b"{" + b" " * 70_000 + b"}")
+
+    assert status == 413
+
+
+@pytest.mark.parametrize("path", ["/api/asks", "/api/ask/" + "a" * 64])
+@pytest.mark.parametrize(
+    "refusal", [{"headers": {"Host": "evil.example:1"}}, {"origin": "http://evil.example"}]
+)
+def test_what_was_asked_is_only_read_by_this_page(
+    served: _AskServed, path: str, refusal: dict[str, Any]
+):
+    status, _, _ = served.request("GET", path, **refusal)
+
+    assert status == 403

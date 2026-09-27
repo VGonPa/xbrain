@@ -464,6 +464,8 @@ def test_finish_records_the_history_when_an_interrupted_pass_banked_something(cf
         encoding="utf-8",
     )
     cfg = load_config(cfg.repo_root)
+    # One worker: the race this test holds shut is about the one worker running ahead.
+    assert cfg.jev_concurrency == 1
     cancel = threading.Event()
 
     def _stop_after_first(done: int, total: int) -> None:
