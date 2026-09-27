@@ -3257,20 +3257,20 @@ def jev_asks_cmd(
         _reprint_ask(
             cfg,
             _pick_saved(entries, which),
-            AskFilters(
-                topics=tuple(topic or ()),
-                since=since.date() if since else None,
-                until=until.date() if until else None,
-                author=author,
-            ),
+            _ask_filters(topic, since, until, author, False),
             minimum,
             _ask_shown(cfg, minimum or 0.0, top, show_all),
         )
         return
     if refining:
         raise ValueError("refinar necesita una consulta: `xbrain jev asks 1 --min 0.5`")
+    _list_asks(cfg, entries)
+
+
+def _list_asks(cfg: Config, entries: list[AskHistoryEntry]) -> None:
+    """`jev asks` with no query: every query, newest first, its last use and its cost."""
     by_query = ask_cost_by_query(load_runs(cfg.jev_runs_path))
-    if not history.queries:
+    if not entries:
         typer.echo(f"sin consultas en {cfg.jev_asks_dir}")
         return
     for entry in entries:

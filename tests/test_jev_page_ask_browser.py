@@ -897,7 +897,7 @@ def test_static_refining_filters_the_saved_answers_like_python(victor_static):
     [
         ({"min": "0.5", "top": "7"}, {"minimum": 0.5}),
         (
-            {"t": "startups", "since": "2026-05-20", "until": "2026-06-10"},
+            {"t": "startups", "since": "2026-05-20", "until": "2026-06-10", "top": "900"},
             {
                 "topics": ("startups",),
                 "since": datetime(2026, 5, 20).date(),
@@ -905,7 +905,7 @@ def test_static_refining_filters_the_saved_answers_like_python(victor_static):
             },
         ),
         (
-            {"t": "agentic-engineering,startups", "author": "@SomeOne", "min": "0.3"},
+            {"t": "agentic-engineering,startups", "author": "@SomeOne", "min": "0.3", "top": "900"},
             {"topics": ("agentic-engineering", "startups"), "author": "@SomeOne", "minimum": 0.3},
         ),
         ({"author": "nadie"}, {"author": "nadie"}),
@@ -913,7 +913,8 @@ def test_static_refining_filters_the_saved_answers_like_python(victor_static):
 )
 def test_a_refined_view_opened_fresh_from_its_url_is_pythons_refine(tmp_path, params, refine):
     """The refine state lives in the hash: a bookmark (or a reload) shows the same list, and
-    that list is `ask.refine_results`'."""
+    that list is `ask.refine_results`'. Two cases draw every kept answer (`top=900`), so the
+    whole list is compared — a minimum or a day edge cannot hide below the first 20."""
     from urllib.parse import urlencode
 
     page, _, cfg = _victor_page(tmp_path, _VICTOR_READ)
