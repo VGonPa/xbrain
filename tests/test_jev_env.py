@@ -148,7 +148,9 @@ def test_the_dry_run_key_line_says_whether_a_key_is_configured(tmp_path: Path):
     same lookup a real run makes."""
     from xbrain.jev.env import dry_run_key_line
 
-    assert dry_run_key_line(tmp_path, {"TYPESAFE_API_KEY": "ts-1"}) == (
+    environ = {"TYPESAFE_API_KEY": "ts-1"}  # pragma: allowlist secret
+
+    assert dry_run_key_line(tmp_path, environ) == (
         "--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: configurada"
     )
     assert dry_run_key_line(tmp_path, {}) == (
