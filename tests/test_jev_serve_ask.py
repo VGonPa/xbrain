@@ -659,6 +659,8 @@ def test_one_query_carries_what_jev_read_for_each_of_its_results(served: _AskSer
         card = cards[post]
         expected = card["jev"]["surfaces"] if card["jev"] else blob["asks"]["surfaces"][post]
         assert surfaces == expected
+    # Sent once: a post whose card has a Jev block is not repeated in the tab's surfaces.
+    assert not set(blob["asks"]["surfaces"]) & {p for p in cards if cards[p]["jev"]}
     assert any(cards[p]["jev"] for p in one["surfaces"]) and any(
         not cards[p]["jev"] for p in one["surfaces"]
     )
