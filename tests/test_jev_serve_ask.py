@@ -464,3 +464,20 @@ def test_the_data_follows_an_ask_a_terminal_made(served: _AskServed):
     _, history, _ = served.request("GET", "/api/asks")
 
     assert [h["sha"] for h in history["history"]] == [query.sha]
+
+
+def test_the_results_follow_a_querys_answers_file_even_without_the_history(served: _AskServed):
+    """A terminal `jev ask` stopped by Ctrl-C writes the answers and not the history: the
+    served results must still come from the file as it is now."""
+    from xbrain.jev.store import save_asks
+
+    served.ask_run({"query": QUERY})
+    query = AskQuery.of(QUERY)
+    path = served.cfg.jev_asks_dir / f"{query.sha}.json"
+    records = load_asks(path, query)
+    records["3"] = records["3"].model_copy(update={"probability": 0.1})
+    save_asks(query, records, path)
+
+    _, one, _ = served.request("GET", f"/api/ask/{query.sha}")
+
+    assert [r["id"] for r in one["results"]] == ["1"]
