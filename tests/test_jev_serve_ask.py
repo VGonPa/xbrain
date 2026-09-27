@@ -733,3 +733,32 @@ def test_answers_dearer_than_planned_raise_the_next_reservations(tmp_path: Path,
     assert (job["state"], job["reason"]) == ("interrupted", "tope")
     assert job["outcome"]["ok"] == 2
     assert job["usd"] <= cap
+
+
+def test_a_posts_planned_price_is_the_cost_models_tokens_at_the_one_price(
+    tmp_path: Path, monkeypatch
+):
+    """The reservation counts tokens by `CostModel.tokens` (the formula the estimate uses) and
+    prices them through `tokens_cost_usd` — never a copy of either."""
+    from xbrain.jev import service
+    from xbrain.jev.ask import question_chars
+    from xbrain.jev.questions import STATE_KEY
+
+    cfg = _repo(tmp_path, monkeypatch)
+    plan = _plan(cfg)
+    priced: list[float] = []
+
+    def _recording(tokens: float, provider: str) -> float:
+        priced.append(tokens)
+        return tokens_cost_usd(tokens, provider)
+
+    monkeypatch.setattr(service, "tokens_cost_usd", _recording)
+    price = service._post_price(plan)
+    item = plan.selection.items[0]
+    state = plan.states[item.id]
+    priced.clear()
+
+    price({STATE_KEY: state})
+
+    chars = len(state) + question_chars(plan.query.questions)
+    assert priced == [plan.estimate.model.tokens(chars)]

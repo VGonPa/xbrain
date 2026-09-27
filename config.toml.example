@@ -154,7 +154,9 @@ command = "parakeet-mlx"
 #   article with its metadata: the common case does not paginate.
 
 [jev]
-# Jev (TypeSafe AI) topic assessment — `xbrain jev topics|report|dashboard|serve`. See docs/jev.md.
+# Jev (TypeSafe AI): a second opinion on topics, and asking the corpus a question —
+# `xbrain jev topics|report|dashboard|serve|ask|asks`. See docs/jev.md.
+# `jev topics`, `jev ask` and a `jev serve` job spend money; the rest only read.
 # Key: TYPESAFE_API_KEY in the environment or in <repo>/.env (see .env.example).
 # Model alias; "jev-latest" follows TypeSafe's updates. Each stored assessment
 # records the concrete model version the API answered with.
@@ -182,16 +184,21 @@ concurrency = 8
 # sends, so this setting is not the cost lever; the vocabulary size is. 100k chars is
 # ~25k tokens. Assessments record the pre-cut length and `truncated`. See docs/jev.md.
 state_char_limit = 100000
-# The most ONE job started through `xbrain jev serve`'s API may cost, in USD. The estimate
-# (/api/topics/estimate) is the mean cost of the answers already paid for × the posts; a job
-# whose estimate is above the cap is refused. While it runs, each post's expected cost is
-# reserved before it is sent, and no post is sent that would pass the cap; the bill passes it
-# only by what the posts in flight cost above that mean. `xbrain jev topics` has no cap.
+# The most ONE job started through `xbrain jev serve`'s API may cost, in USD — a topics job
+# or an ask from the Preguntar tab alike. The estimate is, for topics (/api/topics/estimate),
+# the mean cost of the answers already paid for × the posts; for an ask (/api/ask/estimate),
+# `jev ask`'s own estimate. A job whose estimate is above the cap is refused. While it runs,
+# each post's expected cost is reserved before it is sent (topics: that mean; an ask: the
+# post's own planned price), and no post is sent that would pass the cap; the bill passes it
+# only by what the posts in flight cost above their reservation. `xbrain jev topics` in the
+# terminal has no cap; `xbrain jev ask` has the confirmation below.
 serve_max_usd = 1.0
 # `xbrain jev ask "<query>"` asks before spending when its estimate is above this, in USD
 # (`--yes` answers for you). The estimate is posts × tokens per call + characters ÷ characters
 # per token, fitted on paid ask answers (prior: 1,000 and 4.0). A query over the whole corpus
 # is ESTIMATED at ~0.18 $ (docs/jev.md, from the 2026-09-22 corpus figures).
 ask_max_usd = 0.25
-# Output: <data_dir>/jev/topics.json — a side-car, NOT part of the store and NOT snapshotted.
-# It costs money to regenerate and has no undo; see docs/jev.md.
+# Output, all under <data_dir>/jev/: topics.json (the assessments), asks/ (each query's
+# answers + index.json, the history), runs.jsonl (one line per pass that sent a request).
+# Side-cars, NOT part of the store and NOT snapshotted: they cost money to regenerate and
+# have no undo beyond the .bak a --force pass writes; see docs/jev.md.

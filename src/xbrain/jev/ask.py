@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, overload
 
 from pydantic import ValidationError
 
@@ -290,9 +290,9 @@ def _by_author(item: Item, author: str | None) -> bool:
     return author is None or item.author.handle.casefold() == author.lstrip("@").casefold()
 
 
-#: How a filter the corpus cannot apply is refused (`filter_posts`): the page tells it from
-#: any other failure by this prefix.
-FILTER_REFUSAL = "topic desconocido"
+class JevFilterRefused(JevError):
+    """A filter the corpus cannot apply (`filter_posts`): a `topic` nobody uses. Its own type,
+    so the page tells it from any other failure without reading the message."""
 
 
 def _refuse_unusable(store: dict[str, Item], filters: AskFilters, jev: JevPairs | None) -> None:
@@ -300,7 +300,9 @@ def _refuse_unusable(store: dict[str, Item], filters: AskFilters, jev: JevPairs 
     if filters.needs_jev and jev is None:
         raise ValueError("filter_posts: --topic y --only-evaluated necesitan las evaluaciones")
     if filters.topic is not None and filters.topic not in _known_topics(store, jev):
-        raise JevError(f"{FILTER_REFUSAL}: {filters.topic!r} (ni en el vocabulario ni en enrich)")
+        raise JevFilterRefused(
+            f"topic desconocido: {filters.topic!r} (ni en el vocabulario ni en enrich)"
+        )
 
 
 def filter_posts(
@@ -370,6 +372,12 @@ class CostModel:
     measured: bool
     answers: int
 
+    def tokens(self, chars: int, posts: int = 1) -> float:
+        """The input tokens `posts` calls sending `chars` characters in all are billed: THE
+        formula, for the estimate (`estimate_ask`) and each post's planned price (the
+        server's reservation) alike. Unrounded: the caller rounds when it reports."""
+        return posts * self.per_call + chars / self.chars_per_token
+
 
 _PRIOR = CostModel(
     per_call=float(DEFAULT_ASK_TOKENS_PER_CALL),
@@ -418,7 +426,7 @@ class AskEstimate:
 def estimate_ask(prompt_chars: Sequence[int], model: CostModel) -> AskEstimate:
     """The estimate for posts whose calls will send `prompt_chars` characters each."""
     chars = sum(prompt_chars)
-    tokens = round(len(prompt_chars) * model.per_call + chars / model.chars_per_token)
+    tokens = round(model.tokens(chars, posts=len(prompt_chars)))
     return AskEstimate(
         posts=len(prompt_chars),
         chars=chars,
@@ -461,28 +469,6 @@ def _rank(
         key=lambda pair: (-pair[1].probability, pair[0].id),
     )
     return AskResults(ranked=tuple(ranked), answered=len(current))
-
-
-def ask_results(
-    candidates: Sequence[Item],
-    records: dict[str, AskAssessment],
-    query: AskQuery,
-    *,
-    char_limit: int,
-    threshold: float,
-) -> AskResults:
-    """The candidates whose CURRENT answer is at or above `threshold`, by probability then id.
-
-    A stale answer (the post's evidence moved since) is not a result: it answered another
-    post. Candidates, not the whole file: the filters of THIS use decide what is shown.
-    """
-    return _rank(
-        candidates,
-        records,
-        query,
-        lambda item: build_topic_state(item, char_limit)[0][STATE_KEY],
-        threshold,
-    )
 
 
 def saved_results(
@@ -572,7 +558,17 @@ def _unseen(stored: AskFile, entry: AskHistoryEntry | None) -> list[AskAssessmen
     ]
 
 
-def load_history(cfg: Config) -> AskIndex:
+@overload
+def load_history(cfg: Config) -> AskIndex: ...
+
+
+@overload
+def load_history(cfg: Config, *, skip_unreadable: Literal[True]) -> tuple[AskIndex, list[str]]: ...
+
+
+def load_history(
+    cfg: Config, *, skip_unreadable: bool = False
+) -> AskIndex | tuple[AskIndex, list[str]]:
     """`asks/index.json`, with what it lost put back from the answer files.
 
     `finish_ask` writes the history AFTER the pass saved the query's file, so a file NEWER
@@ -587,25 +583,35 @@ def load_history(cfg: Config) -> AskIndex:
 
     An entry missing from a NEWER index (removed by hand) is rebuilt too, but its answers are
     not re-counted. A file that cannot be read is refused and named as another query's
-    (`store.load_ask_file`). Nothing is written here: the next `finish_ask` saves it, under
-    the lock.
+    (`store.load_ask_file`) — unless `skip_unreadable`: the page's read, which leaves that
+    file out and returns `(index, skipped)`, why each file left out could not be read, so one
+    broken file never blanks the tab. An unreadable `index.json` is refused either way.
+    Nothing is written here: the next `finish_ask` saves it, under the lock.
     """
     path = cfg.jev_asks_dir / ASK_INDEX
     index = load_ask_index(path)
     written = _mtime(path)
     queries = dict(index.queries)
     calibration = index.calibration
+    skipped: list[str] = []
     for file in ask_files(cfg.jev_asks_dir):
         entry = queries.get(file.stem)
         newer = _newer(file, written)
         if entry is not None and not newer:
             continue
-        stored = load_ask_file(file)
+        try:
+            stored = load_ask_file(file)
+        except JevError as exc:
+            if not skip_unreadable:
+                raise
+            skipped.append(str(exc))
+            continue
         if newer:
             calibration = _calibrate(calibration, _unseen(stored, entry))
         if entry is None:
             queries[file.stem] = _rebuilt_entry(stored, file.stem, cfg.jev_threshold)
-    return AskIndex(queries=queries, calibration=calibration)
+    history = AskIndex(queries=queries, calibration=calibration)
+    return (history, skipped) if skip_unreadable else history
 
 
 # --------------------------------------------------------------------------- plan / finish

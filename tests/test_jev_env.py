@@ -141,3 +141,18 @@ def test_a_utf8_bom_is_tolerated(tmp_path: Path):
 def test_a_near_miss_key_name_is_not_matched(tmp_path: Path, line: str):
     _write_dotenv(tmp_path, f"{line}\n")
     assert typesafe_api_key(tmp_path, {}) is None
+
+
+def test_the_dry_run_key_line_says_whether_a_key_is_configured(tmp_path: Path):
+    """ONE line for every `--dry-run` (`jev topics`, `jev ask`): the key is reported from the
+    same lookup a real run makes."""
+    from xbrain.jev.env import dry_run_key_line
+
+    environ = {"TYPESAFE_API_KEY": "ts-1"}  # pragma: allowlist secret
+
+    assert dry_run_key_line(tmp_path, environ) == (
+        "--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: configurada"
+    )
+    assert dry_run_key_line(tmp_path, {}) == (
+        "--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: NO configurada"
+    )

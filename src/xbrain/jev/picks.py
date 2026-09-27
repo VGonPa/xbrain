@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from xbrain.jev.ask import AskFilters
+from xbrain.jev.errors import refuse
 from xbrain.jev.questions import normalize_query
 from xbrain.models import Topic
 
@@ -26,20 +27,6 @@ MAX_IDS = 5000
 PICK_KINDS = ("ids", "topic", "unevaluated", "pair", "band")
 #: `post_sets` keys a pair may name: topic confusion, primary confusion, primary agreement.
 PAIR_KINDS = ("cx", "px", "pd")
-
-
-class ServeError(Exception):
-    """A request refused with an HTTP status and a Spanish message for the page."""
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
-def refuse(message: str) -> ServeError:
-    """A 400: the request itself is wrong."""
-    return ServeError(400, message)
 
 
 @dataclass(frozen=True)

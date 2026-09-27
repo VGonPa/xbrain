@@ -18,7 +18,7 @@ NOTHING HERE RE-IMPLEMENTS A NUMBER.
 * What Jev read is `assess.state_surfaces`: the state `build_topic_state` sends, split back
   into its evidence surfaces — the same order and the same cut.
 * What was asked («Preguntar», `asks`) is the query history (`data/jev/asks/index.json`), each
-  query's results recomputed now by `ask.ask_results` over its own filters and threshold, and
+  query's results recomputed now by `ask.saved_results` over its own filters and threshold, and
   its cost `report.ask_cost_by_query` — so the static page shows what the server's `/api/asks` does.
 
 PURE, EXCEPT ONE FUNCTION. `compute_jev_dashboard_data` touches no disk: which media files
@@ -47,10 +47,9 @@ from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.executors.api import quoted_source
 from xbrain.generate import VAULT_MEDIA_SUBDIR
 from xbrain.jev.ask import (
-    FILTER_REFUSAL,
+    JevFilterRefused,
     AskFilters,
     AskQuery,
-    _rebuilt_entry,
     load_history,
     saved_results,
 )
@@ -68,7 +67,7 @@ from xbrain.jev.assess import (
 from xbrain.jev.client import ChoiceQuestion, JevError, NoulQuestion, Question
 from xbrain.jev.defaults import INPUT_USD_PER_MTOK, JEV_DEFAULTS, unpriced
 from xbrain.jev.load import JevPairs, load_jev_pairs
-from xbrain.jev.models import AskAssessment, AskHistoryEntry, AskIndex, JevRun, TopicAssessment
+from xbrain.jev.models import AskAssessment, AskHistoryEntry, JevRun, TopicAssessment
 from xbrain.jev.report import (
     ItemComparison,
     ask_cost,
@@ -86,10 +85,6 @@ from xbrain.jev.report import (
 )
 from xbrain.jev.questions import STATE_KEY, build_topic_questions
 from xbrain.jev.store import (
-    ASK_INDEX,
-    ask_files,
-    load_ask_file,
-    load_ask_index,
     load_asks,
     load_runs,
 )
@@ -870,12 +865,11 @@ def _ask_row(saved: SavedAsk, page: _AskPage) -> dict[str, Any]:
         return row
     try:
         row["results"], row["answered"] = _ask_results(saved, page)
+    except JevFilterRefused as exc:
+        # A filter the corpus no longer supports (a topic removed from the vocabulary).
+        row["error"] = f"El filtro con el que se preguntó ya no aplica: {exc}"
     except JevError as exc:
-        if str(exc).startswith(FILTER_REFUSAL):
-            # A filter the corpus no longer supports (a topic removed from the vocabulary).
-            row["error"] = f"El filtro con el que se preguntó ya no aplica: {exc}"
-        else:
-            row["error"] = f"No se pudieron calcular los resultados de esta consulta: {exc}"
+        row["error"] = f"No se pudieron calcular los resultados de esta consulta: {exc}"
     except ValueError as exc:
         row["error"] = f"No se pudieron leer los filtros de esta consulta: {exc}"
     return row
@@ -912,20 +906,13 @@ def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:
     from its answer file, so paid answers are never hidden), and each query's answers. A query
     whose file cannot be read costs its own row; a history that cannot be read is the tab's
     `error`."""
-    error: str | None = None
     try:
-        index = load_history(cfg)
+        # An answer file it cannot read costs the page only that query: `load_history` leaves
+        # it out and names it; every other lost query is rebuilt, its answers calibrated.
+        index, skipped = load_history(cfg, skip_unreadable=True)
     except JevError as exc:
-        # An answer file it cannot read stops `load_history`'s rebuild, not the page: the
-        # stored index, plus every lost query whose file CAN be read; only the unreadable
-        # files are left out, and named.
-        try:
-            index, skipped = _rebuilt_skipping_unreadable(cfg)
-        except JevError as stored:
-            return [], str(stored)
-        error = str(exc) + (
-            " · faltan en la lista, por ilegibles: " + "; ".join(skipped) if skipped else ""
-        )
+        return [], str(exc)
+    error = "Faltan en la lista, por ilegibles: " + "; ".join(skipped) if skipped else None
     saved: list[SavedAsk] = []
     for entry in index.queries.values():
         try:
@@ -940,22 +927,6 @@ def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:
         else:
             saved.append(SavedAsk(entry, records))
     return saved, error
-
-
-def _rebuilt_skipping_unreadable(cfg: Config) -> tuple[AskIndex, list[str]]:
-    """`ask.load_history`'s rebuild, one file at a time: the stored index plus an entry for
-    every lost query whose answer file reads (`rebuilt`), and why each other file did not."""
-    index = load_ask_index(cfg.jev_asks_dir / ASK_INDEX)
-    queries = dict(index.queries)
-    skipped: list[str] = []
-    for path in ask_files(cfg.jev_asks_dir):
-        if path.stem in queries:
-            continue
-        try:
-            queries[path.stem] = _rebuilt_entry(load_ask_file(path), path.stem, cfg.jev_threshold)
-        except JevError as exc:
-            skipped.append(str(exc))
-    return AskIndex(queries=queries, calibration=index.calibration), skipped
 
 
 def ask_page_data(

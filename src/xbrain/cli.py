@@ -76,7 +76,7 @@ from xbrain.jev.defaults import (
     plural,
     unpriced_providers,
 )
-from xbrain.jev.env import typesafe_api_key
+from xbrain.jev.env import dry_run_key_line, typesafe_api_key
 from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.report import (
     ask_cost,
@@ -91,9 +91,9 @@ from xbrain.jev.report import (
     write_reports,
 )
 from xbrain.jev.lock import PassLock, PassLockBusy, pass_lock
-from xbrain.jev.run import RunOutcome, run_ask, run_topics
+from xbrain.jev.run import FAILURES_SHOWN, RunOutcome, run_ask, run_topics
 from xbrain.jev.serve import make_server, serve_until_interrupted
-from xbrain.jev.service import JevService
+from xbrain.jev.service import JevService, over_cap
 from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -2696,13 +2696,6 @@ jev_app = typer.Typer(
 )
 app.add_typer(jev_app, name="jev")
 
-#: Failures echoed in full before the rest are summarised. This is the PARTIAL-failure path:
-#: a run where NOTHING succeeded never gets here, because `run_assessments` raises instead of
-#: returning an empty `RunResult`. The case that hurts is a provider rate-limiting or timing
-#: out across most of a large batch while some answers still land — one line each would bury
-#: the summary printed above them.
-_JEV_FAILURES_SHOWN = 10
-
 
 def _jev_client(cfg: Config) -> JevClient:
     """The TypeSafe client for this run — the seam tests monkeypatch.
@@ -2810,10 +2803,10 @@ def _echo_jev_outcome(
         f"{_jev_cost_line(result.assessed)} · "
         f"{'modelo' if len(models) == 1 else 'modelos'} {', '.join(models)} → {topics_path}"
     )
-    for item_id, reason in result.failed[:_JEV_FAILURES_SHOWN]:
+    for item_id, reason in result.failed[:FAILURES_SHOWN]:
         typer.echo(f"  FALLO {item_id}: {reason}", err=True)
-    if len(result.failed) > _JEV_FAILURES_SHOWN:
-        remaining = len(result.failed) - _JEV_FAILURES_SHOWN
+    if len(result.failed) > FAILURES_SHOWN:
+        remaining = len(result.failed) - FAILURES_SHOWN
         # The eleventh failure of eleven is "1 fallo más", not "1 fallos más".
         typer.echo(f"  … y {plural(remaining, 'fallo', 'fallos')} más", err=True)
 
@@ -2924,11 +2917,7 @@ def _jev_topics_pass(
     )
     typer.echo(_jev_selection_line(selection, len(assessments)))
     if dry_run:
-        # `--dry-run` returns before `_jev_client`, so it validates neither the key nor the
-        # SDK import. Reporting the key here is what stops a green dry-run from being
-        # followed by a real run that dies on the first thing it checks.
-        configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
-        typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
+        typer.echo(dry_run_key_line(cfg.repo_root))
         return None
     if not selection.items or lock is None:
         return None
@@ -3011,8 +3000,7 @@ def jev_ask_cmd(
     plan = plan_ask(cfg, ask_query, filters, limit)
     _echo_ask_plan(plan)
     if dry_run:
-        configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
-        typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
+        typer.echo(dry_run_key_line(cfg.repo_root))
         return
     confirmed = bool(plan.selection.items) and (
         yes or _confirm_ask_cost(plan.estimate.usd, cfg.jev_ask_max_usd)
@@ -3107,6 +3095,25 @@ def _confirm_ask_cost(usd: float, cap: float) -> bool:
     return True
 
 
+def _refuse_a_price_not_agreed(
+    cfg: Config, before: AskPlan, plan: AskPlan, *, yes: bool, confirmed: bool
+) -> None:
+    """Refuse the plan made under the lock when its price is not the one agreed: a prompted
+    yes agreed to the estimate it showed, never to whatever the lock finds; with no prompt
+    (under the cap) it must still be under `[jev].ask_max_usd`. `--yes` agreed to spend."""
+    if confirmed and not yes and over_cap(plan.estimate.usd, before.estimate.usd):
+        raise JevError(
+            f"la estimación subió de ~{before.estimate.usd:.4f} $ confirmados a "
+            f"~{plan.estimate.usd:.4f} $: no se ha preguntado nada; vuelve a lanzar la consulta"
+        )
+    if plan.selection.items and not (yes or confirmed) and plan.estimate.usd > cfg.jev_ask_max_usd:
+        raise JevError(
+            f"la estimación subió a ~{plan.estimate.usd:.4f} $, por encima de "
+            f"[jev].ask_max_usd = {cfg.jev_ask_max_usd} $: no se ha preguntado nada; "
+            "vuelve a lanzar la consulta"
+        )
+
+
 def _jev_ask_locked(
     cfg: Config,
     before: AskPlan,
@@ -3119,19 +3126,18 @@ def _jev_ask_locked(
     limit: int | None,
 ) -> RunOutcome[Any] | None:
     """Under the lock: plan AGAIN, refuse if the posts or the price moved since the estimate,
-    ask, record and print. `None` when nothing needed asking."""
+    ask, record and print. `None` when nothing needed asking.
+
+    The price is held to what was agreed: a prompted yes (`confirmed` without `--yes`) to the
+    estimate it showed; no prompt (under the cap) to `[jev].ask_max_usd`. `--yes` agreed to
+    spend without asking."""
     plan = plan_ask(cfg, before.query, before.filters, limit)
     if not same_selection(before, plan):
         raise JevError(
             "la selección cambió desde la estimación (otra pasada o un cambio en los datos): "
             "no se ha preguntado nada; vuelve a lanzar la consulta"
         )
-    if plan.selection.items and not (yes or confirmed) and plan.estimate.usd > cfg.jev_ask_max_usd:
-        raise JevError(
-            f"la estimación subió a ~{plan.estimate.usd:.4f} $, por encima de "
-            f"[jev].ask_max_usd = {cfg.jev_ask_max_usd} $: no se ha preguntado nada; "
-            "vuelve a lanzar la consulta"
-        )
+    _refuse_a_price_not_agreed(cfg, before, plan, yes=yes, confirmed=confirmed)
     outcome = _jev_ask_run(cfg, plan, lock) if plan.selection.items else None
     results = finish_ask(cfg, plan, outcome, threshold=threshold)
     if outcome is not None and outcome.interrupted:
@@ -3434,13 +3440,15 @@ def jev_serve_cmd(
 ) -> None:
     r"""Sirve la página de Jev en 127.0.0.1, en vivo, con una API local para evaluar.
 
-    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local
-    (POST /api/topics/estimate → /api/topics/evaluate) para pedir a Jev unos posts, un topic,
-    los N siguientes sin evaluar, los posts de un cruce o de una banda: primero una
-    estimación (posts y $), después la confirmación, y un único trabajo en segundo plano que
-    corre la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Cada
-    trabajo tiene un tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para:
-    deja que el trabajo guarde lo pagado y sale con 130.
+    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local para dos
+    clases de trabajo. Topics (POST /api/topics/estimate → /api/topics/evaluate): pedir a Jev
+    unos posts, un topic, los N siguientes sin evaluar, los posts de un cruce o de una banda;
+    la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Preguntar
+    (la pestaña Preguntar, POST /api/ask/estimate → /api/ask/evaluate): una consulta al
+    corpus, la misma que `xbrain jev ask`. Siempre primero una estimación (posts y $),
+    después la confirmación, y un único trabajo en segundo plano. Cada trabajo gasta, con un
+    tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para: deja que el
+    trabajo guarde lo pagado y sale con 130.
     """
     cfg = _config()
     service = JevService(cfg, lambda: _jev_client(cfg))
@@ -3466,6 +3474,13 @@ def jev_serve_cmd(
         raise typer.Exit(code=code)
 
 
+#: What a finished job saved, per kind: a topics pass evaluations, an ask answers.
+_LAST_JOB_SAVED = {
+    "topics": ("evaluación guardada", "evaluaciones guardadas"),
+    "ask": ("respuesta guardada", "respuestas guardadas"),
+}
+
+
 def _echo_last_job(job: dict[str, Any]) -> None:
     """The last job the server ran, in the terminal, like `jev topics` ends: what it saved,
     what it could not, the backup, and a run-log line that has to be appended by hand."""
@@ -3476,8 +3491,9 @@ def _echo_last_job(job: dict[str, Any]) -> None:
     if job.get("reason"):
         line += f" ({job['reason']})"
     if outcome:
+        saved = _LAST_JOB_SAVED[job.get("kind", "topics")]
         line += (
-            f" · {plural(outcome['ok'], 'evaluación guardada', 'evaluaciones guardadas')}"
+            f" · {plural(outcome['ok'], *saved)}"
             f" · {plural(outcome['failed'], 'fallida', 'fallidas')}"
         )
         if outcome["unsaved"]:

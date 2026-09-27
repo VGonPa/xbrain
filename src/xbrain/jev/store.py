@@ -67,8 +67,9 @@ def load_assessments(path: Path) -> dict[str, TopicAssessment]:
     report "0 evaluaciones guardadas" over a full side-car and re-ask, and re-pay for, the
     whole corpus, then overwrite whatever was still readable with only the new records.
 
-    Every way the file can be unusable — unparseable JSON, a top level that is not an
-    object, a record this build's validator refuses — raises `JevError` naming the PATH.
+    Every way the file can be unusable — bytes that are not UTF-8, unparseable JSON, a top
+    level that is not an object, a record this build's validator refuses — raises `JevError`
+    naming the PATH.
     `jev topics` loads three files back to back (`items.json`, `vocab.yaml`, the side-car),
     and a bare `Expecting value: line 1 column 1` sends the operator to none of them.
     """
@@ -79,7 +80,7 @@ def load_assessments(path: Path) -> dict[str, TopicAssessment]:
         if not isinstance(raw, dict):
             raise JevError(f"{path}: side-car ilegible (el nivel superior no es un objeto JSON)")
         return {item_id: TopicAssessment.model_validate(data) for item_id, data in raw.items()}
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
         raise JevError(f"{path}: side-car ilegible ({exc})") from exc
 
 
@@ -113,8 +114,12 @@ def load_runs(path: Path) -> list[JevRun]:
     """
     if not path.exists():
         return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise JevError(f"{path}: registro de pasadas ilegible ({exc})") from exc
     runs: list[JevRun] = []
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -181,7 +186,7 @@ def load_asks(path: Path, query: AskQuery) -> dict[str, AskAssessment]:
         return {}
     try:
         stored = AskFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except ValidationError as exc:
+    except (UnicodeDecodeError, ValidationError) as exc:
         raise JevError(f"{path}: consulta guardada ilegible ({exc})") from exc
     if stored.query != query.text:
         raise JevError(
@@ -211,7 +216,7 @@ def load_ask_file(path: Path) -> AskFile:
     fix is to take this file out of the way, not to repair the query they typed."""
     try:
         return AskFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except ValidationError as exc:
+    except (UnicodeDecodeError, ValidationError) as exc:
         raise JevError(
             f"{path}: consulta guardada ilegible (otra consulta; sácalo de {path.parent}/ "
             f"y vuelve a lanzar): {exc}"
@@ -227,7 +232,7 @@ def load_ask_index(path: Path) -> AskIndex:
         return AskIndex()
     try:
         return AskIndex.model_validate_json(path.read_text(encoding="utf-8"))
-    except ValidationError as exc:
+    except (UnicodeDecodeError, ValidationError) as exc:
         raise JevError(f"{path}: historial de consultas ilegible ({exc})") from exc
 
 

@@ -109,7 +109,7 @@ def input_tokens_total(assessments: Iterable[Billed]) -> tuple[int, int]:
     return counted, unknown
 
 
-def tokens_cost_usd(tokens: int, provider: str) -> float:
+def tokens_cost_usd(tokens: float, provider: str) -> float:
     """Estimated USD for `tokens` input tokens answered by `provider` — THE price formula.
 
     Every bill in the package goes through here: a stored assessment (`input_cost_usd`) and a

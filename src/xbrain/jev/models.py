@@ -149,9 +149,10 @@ class JevRun(BaseModel):
       are invisible here, so they are not counted.
     * `ok` — answers kept (banked into the side-car).
     * `failed` — calls that raised, plus answers xbrain refused (a malformed answer set).
-    * `unsaved` — only on an interrupted pass: answers that came back but were never
-      drained into the side-car before Ctrl-C landed (a refused answer that was not yet
-      drained lands here too — it was not kept either way). Billed, not kept, not failed.
+    * `unsaved` — answers that came back and never reached the disk: on an interrupted pass,
+      those not drained into the side-car before Ctrl-C landed (a refused answer that was not
+      yet drained lands here too — it was not kept either way); on any pass, those whose
+      final save failed (a full disk). Billed, not kept, not failed.
     * `requests - ok - failed - unsaved` — on an interrupted pass, calls still in flight.
       A worker that dequeues its item AFTER Ctrl-C can still send a call the log never sees;
       SIGTERM or a kill logs nothing at all. Both show up in `report.run_history` as
@@ -207,12 +208,10 @@ class JevRun(BaseModel):
             raise ValueError(
                 f"ok + failed + unsaved ({came_back}) exceeds requests ({self.requests})"
             )
-        if not self.interrupted and self.unsaved:
-            raise ValueError("unsaved answers exist only on an interrupted pass")
         if not self.interrupted and came_back != self.requests:
             raise ValueError(
                 f"a pass that was not interrupted accounts for every request: "
-                f"ok + failed = {self.ok + self.failed}, requests = {self.requests}"
+                f"ok + failed + unsaved = {came_back}, requests = {self.requests}"
             )
         if sum(self.input_tokens_by_provider.values()) != self.input_tokens:
             raise ValueError(

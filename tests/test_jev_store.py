@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from xbrain.jev import store
+from xbrain.jev.ask import AskQuery
 from xbrain.jev.client import JevError
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
 from xbrain.jev.store import load_assessments, save_assessments
@@ -109,3 +111,24 @@ def test_a_sidecar_that_is_not_a_json_object_is_an_operator_error(tmp_path: Path
     with pytest.raises(JevError) as excinfo:
         load_assessments(path)
     assert str(path) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "load",
+    [
+        pytest.param(store.load_assessments, id="topics"),
+        pytest.param(store.load_runs, id="runs"),
+        pytest.param(lambda path: store.load_asks(path, AskQuery.of("q")), id="asks"),
+        pytest.param(store.load_ask_file, id="ask-file"),
+        pytest.param(store.load_ask_index, id="index"),
+    ],
+)
+def test_a_file_that_is_not_utf8_is_refused_naming_its_path(tmp_path: Path, load):
+    """Bytes that are not UTF-8 (a copy through a Latin-1 tool, a truncated write) are one
+    more way a paid file cannot be read: a `JevError` naming the path, never a bare
+    `UnicodeDecodeError` that says nothing about which file."""
+    path = tmp_path / "broken.json"
+    path.write_bytes(b'{"q": "caf\xe9"}\n')
+
+    with pytest.raises(JevError, match="broken.json"):
+        load(path)

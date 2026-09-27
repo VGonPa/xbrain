@@ -26,7 +26,6 @@ from xbrain.jev import ask as jev_ask
 from xbrain.jev.ask import (
     AskFilters,
     AskQuery,
-    ask_results,
     assess_post,
     cost_model,
     filter_posts,
@@ -34,6 +33,7 @@ from xbrain.jev.ask import (
     load_history,
     plan_ask,
     same_selection,
+    saved_results,
     select_ask_items,
 )
 from xbrain.jev.assess import assess_topics, build_topic_state, topic_contract
@@ -771,6 +771,11 @@ def test_after_one_paid_query_the_next_estimate_is_the_real_bill(cfg: Config):
 # --------------------------------------------------------------------------- results
 
 
+def _sent(item: Item) -> str:
+    """A post's state as a call sends it at the default cut."""
+    return build_topic_state(item, 100_000)[0]["post"]
+
+
 def test_results_are_the_current_answers_over_the_threshold_best_first(cfg: Config):
     plan, _, _ = _run(cfg, _ByText())
     store = load_store(cfg.items_path)
@@ -779,8 +784,15 @@ def test_results_are_the_current_answers_over_the_threshold_best_first(cfg: Conf
     records["3"] = records["3"].model_copy(update={"probability": 0.97})
     store["1"] = store["1"].model_copy(update={"text": "Claude Code hooks, v2"})
 
-    results = ask_results(
-        list(store.values()), records, plan.query, char_limit=100_000, threshold=0.9
+    results = saved_results(
+        store,
+        None,
+        plan.query,
+        AskFilters(),
+        records,
+        topic_threshold=0.85,
+        threshold=0.9,
+        state_text=_sent,
     )
 
     assert [(item.id, record.probability) for item, record in results.ranked] == [("3", 0.97)]
@@ -793,8 +805,17 @@ def test_results_rank_ties_by_post_id(cfg: Config):
     records = load_asks(_ask_path(cfg, plan.query), plan.query)
 
     # Candidates in REVERSE id order: the tie is broken by id, not by the order asked.
-    candidates = list(reversed(store.values()))
-    results = ask_results(candidates, records, plan.query, char_limit=100_000, threshold=0.5)
+    candidates = dict(reversed(store.items()))
+    results = saved_results(
+        candidates,
+        None,
+        plan.query,
+        AskFilters(),
+        records,
+        topic_threshold=0.85,
+        threshold=0.5,
+        state_text=_sent,
+    )
 
     assert [item.id for item, _ in results.ranked] == ["1", "3"]
 
@@ -1497,3 +1518,90 @@ def test_a_results_failure_that_is_not_a_filter_refusal_says_so_plainly(cfg: Con
     [row] = _asks(cfg)["history"]
 
     assert row["error"] == "No se pudieron calcular los resultados de esta consulta: algo distinto"
+
+
+# --------------------------------------------------------------------------- final review fixes
+
+
+def test_load_history_skipping_unreadable_rebuilds_the_rest_and_folds_their_calibration(
+    cfg: Config,
+):
+    """The page's tolerant read is `load_history`'s own rebuild: an unreadable file is named
+    in `skipped`, every readable lost query is rebuilt AND its paid answers are folded into the
+    calibration, exactly as the strict read would."""
+    good, _, _ = _run(cfg, _ByText())
+    bad, _, _ = _run(cfg, _ByText(), query_text="otra")
+    (cfg.jev_asks_dir / ASK_INDEX).unlink()
+    _ask_path(cfg, bad.query).write_text("{", encoding="utf-8")
+
+    index, skipped = load_history(cfg, skip_unreadable=True)
+
+    assert list(index.queries) == [good.query.sha] and index.queries[good.query.sha].rebuilt
+    assert index.calibration.answers == 3
+    assert len(skipped) == 1 and f"{bad.query.sha}.json" in skipped[0]
+    with pytest.raises(JevError, match="ilegible"):
+        load_history(cfg)
+
+
+def test_an_unknown_topic_is_refused_by_its_own_type(cfg: Config):
+    from xbrain.jev.ask import JevFilterRefused
+
+    store = load_store(cfg.items_path)
+
+    with pytest.raises(JevFilterRefused) as refused:
+        filter_posts(store, AskFilters(topic="nadie"), jev=load_jev_pairs(cfg), threshold=0.85)
+
+    assert isinstance(refused.value, JevError)
+
+
+def test_a_failure_whose_text_looks_like_a_filter_refusal_is_not_one(cfg: Config, monkeypatch):
+    """The page tells a refused filter by its TYPE, never by the error's wording."""
+    from xbrain.jev import dashboard
+
+    _run(cfg, _ByText())
+
+    def _broken(*args, **kwargs):
+        raise JevError("topic desconocido: parece un filtro, pero no lo es")
+
+    monkeypatch.setattr(dashboard, "saved_results", _broken)
+
+    [row] = _asks(cfg)["history"]
+
+    assert row["error"].startswith("No se pudieron calcular los resultados de esta consulta:")
+
+
+def test_the_cost_model_counts_tokens_once_for_every_caller():
+    """`tokens = posts × per_call + chars / chars_per_token`, in one method; the estimate
+    rounds that same number."""
+    from xbrain.jev.ask import CostModel, estimate_ask
+
+    model = CostModel(per_call=1000.0, chars_per_token=4.0, measured=True, answers=5)
+
+    assert model.tokens(400) == 1100.0
+    assert model.tokens(400, posts=3) == 3100.0
+    assert estimate_ask([150, 250, 1], model).tokens == round(model.tokens(401, posts=3))
+
+
+def test_cli_refuses_a_confirmed_ask_whose_price_rose_under_the_lock(cfg: Config, monkeypatch):
+    """Over the cap the user agreed to ONE price. If the plan made again under the lock costs
+    more than that, nothing is asked: the yes was for the estimate shown, not for any price."""
+    from dataclasses import replace
+
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    plans: list[object] = []
+    real = cli.plan_ask
+
+    def _dearer_under_the_lock(*args, **kwargs):
+        plan = real(*args, **kwargs)
+        plans.append(plan)
+        usd = cfg.jev_ask_max_usd * (2 if len(plans) == 1 else 3)
+        return replace(plan, estimate=replace(plan.estimate, usd=usd))
+
+    monkeypatch.setattr(cli, "plan_ask", _dearer_under_the_lock)
+
+    result = runner.invoke(app, ["jev", "ask", QUERY], input="y\n")
+
+    assert result.exit_code == 1, result.output
+    assert "¿Preguntar igualmente?" in result.output
+    assert "la estimación subió" in result.output and "confirmad" in result.output
+    assert not cfg.jev_runs_path.exists()

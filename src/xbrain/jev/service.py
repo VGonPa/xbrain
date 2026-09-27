@@ -78,17 +78,16 @@ from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.lock import PassLock, pass_lock
 from xbrain.jev.models import AskIndex
 from xbrain.jev.questions import STATE_KEY
+from xbrain.jev.errors import ServeError, refuse
 from xbrain.jev.picks import (
     AskPick,
-    ServeError,
     TopicsPick,
     parse_ask,
     parse_pick,
     pick_ids,
-    refuse,
 )
 from xbrain.jev.report import report_paths, topics_pass_estimate
-from xbrain.jev.run import RunOutcome, run_ask, run_topics
+from xbrain.jev.run import FAILURES_SHOWN, RunOutcome, run_ask, run_topics
 from xbrain.jev.store import ASK_INDEX
 
 logger = logging.getLogger(__name__)
@@ -102,8 +101,6 @@ LOCK_HOLDER = "xbrain jev serve"
 _CONFIRMS_KEPT = 32
 #: A confirmation older than this is refused: the price it was minted at may have moved.
 CONFIRM_TTL_S = 600
-#: Failures listed in a finished job's outcome, like the CLI's `_JEV_FAILURES_SHOWN`.
-_FAILURES_SHOWN = 10
 #: Float room at the cap: `n × mean` summed call by call must not refuse the n-th post the
 #: estimate allowed at exactly the cap.
 _CAP_ROOM = 1e-9
@@ -337,7 +334,7 @@ def _finish(job: _Job, outcome: RunOutcome, extra: dict[str, Any]) -> None:
             "ok": len(outcome.assessed),
             "ids": [a.item_id for a in outcome.assessed],
             "failed": len(outcome.failed),
-            "failures": [list(failure) for failure in outcome.failed[:_FAILURES_SHOWN]],
+            "failures": [list(failure) for failure in outcome.failed[:FAILURES_SHOWN]],
             "unsaved": logged.unsaved if logged is not None else 0,
             "stored": outcome.stored,
             "logged": logged is not None,
@@ -615,10 +612,9 @@ def _post_price(plan: AskPlan) -> Callable[[dict[str, str]], float]:
     estimate confirmed, so a job at exactly the cap is never refused its last post."""
     model = plan.estimate.model
     question = question_chars(plan.query.questions)
-    per_token = tokens_cost_usd(1_000_000, DEFAULT_PROVIDER) / 1e6
 
     def raw(chars: int) -> float:
-        return (model.per_call + chars / model.chars_per_token) * per_token
+        return tokens_cost_usd(model.tokens(chars), DEFAULT_PROVIDER)
 
     total = sum(raw(len(plan.states[item.id]) + question) for item in plan.selection.items)
     scale = plan.estimate.usd / total if total else 1.0
@@ -765,15 +761,6 @@ class JevService:
             if self._html is None or self._html[0] != signature:
                 self._html = (signature, render_jev_dashboard_html(blob))
             return self._html[1]
-
-    def cards(self, ids: list[str]) -> list[dict[str, Any]]:
-        """Card bodies by id, in the order asked; a 404 naming the ids the corpus lacks. The
-        by-id refresh for result lists (the «preguntar» results of PR 12)."""
-        by_id = {card["id"]: card for card in self.blob()["posts"]}
-        missing = [item_id for item_id in ids if item_id not in by_id]
-        if missing:
-            raise ServeError(404, f"posts desconocidos: {', '.join(missing)}")
-        return [by_id[item_id] for item_id in ids]
 
     # ------------------------------------------------------------------ picks and prices
 
