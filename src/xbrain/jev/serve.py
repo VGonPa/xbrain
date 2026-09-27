@@ -12,7 +12,7 @@ estimate, the confirmation, the one job and its cap); this module routes and gua
 * files are served only from `<output_dir>/_media/`, only images and videos, and nothing
   outside that folder however the path is spelled.
 
-Routes: `/` (the page), `/api/data` (its blob), `/api/cards?ids=` (cards by id), `/api/job`
+Routes: `/` (the page), `/api/data` (its blob), `/api/job`
 (the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, per
 kind of pass (`topics`, `ask`) `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate`,
 and what was asked: `/api/asks` (the query history with each query's results) and
@@ -33,11 +33,11 @@ import re
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 from xbrain.generate import VAULT_MEDIA_SUBDIR
 from xbrain.jev.client import JevError
-from xbrain.jev.picks import ServeError, refuse
+from xbrain.jev.errors import ServeError, refuse
 from xbrain.jev.service import JevService
 
 logger = logging.getLogger(__name__)
@@ -165,16 +165,13 @@ class _Handler(BaseHTTPRequestHandler):
         elif url.path.startswith(f"/{VAULT_MEDIA_SUBDIR}/"):
             self._media(url.path)
         else:
-            self._json(200, self._get_json(url.path, url.query))
+            self._json(200, self._get_json(url.path))
 
-    def _get_json(self, path: str, query: str) -> Any:
-        """The read-only JSON routes: the blob, cards by id, the job, and what was asked."""
+    def _get_json(self, path: str) -> Any:
+        """The read-only JSON routes: the blob, the job, and what was asked."""
         service = self.server.service
         if path == "/api/data":
             return service.blob()
-        if path == "/api/cards":
-            ids = [i for raw in parse_qs(query).get("ids", []) for i in raw.split(",") if i]
-            return {"cards": service.cards(ids)}
         if path == "/api/job":
             return service.job_view()
         if path == "/api/asks":

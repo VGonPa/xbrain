@@ -577,3 +577,13 @@ def test_a_cancelled_pass_books_refused_answers_as_failed_not_unsaved(cfg: Confi
     run = _only_run(cfg)
     assert outcome.interrupted is True
     assert (run.requests, run.ok, run.failed, run.unsaved) == (1, 0, 1, 0)
+
+
+def test_the_failures_listed_are_capped_by_one_constant():
+    """The terminal and a served job's outcome list the same number of failures: one
+    constant (`run.FAILURES_SHOWN`), not a copy per caller."""
+    from xbrain import cli
+    from xbrain.jev import run, service
+
+    assert run.FAILURES_SHOWN == 10
+    assert not hasattr(cli, "_JEV_FAILURES_SHOWN") and not hasattr(service, "_FAILURES_SHOWN")

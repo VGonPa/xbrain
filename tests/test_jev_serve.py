@@ -264,16 +264,11 @@ def test_api_data_is_the_same_blob_the_page_carries(served: _Served):
     assert blob == page_blob
 
 
-def test_api_cards_returns_card_bodies_by_id_in_the_order_asked(served: _Served):
-    _, blob, _ = served.request("GET", "/api/data")
-    by_id = {p["id"]: p for p in blob["posts"]}
+def test_there_is_no_by_id_card_route(served: _Served):
+    """The page reloads its whole blob after a job; a by-id card lookup had no caller."""
+    status, error, _ = served.request("GET", "/api/cards?ids=1")
 
-    status, cards, _ = served.request("GET", "/api/cards?ids=3,1")
-
-    assert status == 200
-    assert cards == {"cards": [by_id["3"], by_id["1"]]}
-    status, error, _ = served.request("GET", "/api/cards?ids=1,nope")
-    assert status == 404 and "nope" in error["error"]
+    assert status == 404 and error == {"error": "no existe"}
 
 
 def test_the_data_follows_the_files_a_terminal_pass_writes(served: _Served):
@@ -1012,7 +1007,7 @@ def test_a_refused_job_leaves_the_slot_idle_and_the_next_one_runs(served: _Serve
 def test_a_thread_that_cannot_start_gives_the_confirmation_back(served: _Served, monkeypatch):
     """Called on the service, not over HTTP: patching `Thread.start` would stop the HTTP
     server's own request threads too."""
-    from xbrain.jev.picks import ServeError
+    from xbrain.jev.errors import ServeError
 
     service = served.service
     estimate = service.estimate("topics", {"ids": ["3"]})
@@ -1422,3 +1417,17 @@ def test_the_blob_names_the_last_finished_job_its_data_already_includes(served: 
     assert job["finished_at"] is not None
     assert after["serve"]["finished_at"] == job["finished_at"]
     assert next(p for p in after["posts"] if p["id"] == "3")["status"] == "compared"
+
+
+def test_a_refusal_is_the_servers_own_error_not_a_picks_one():
+    """`ServeError`/`refuse` are how the whole server refuses (routes, service, picks), so
+    they live in `jev.errors`, which imports nothing of the server."""
+    from xbrain.jev import errors
+
+    refusal = errors.refuse("mal")
+
+    assert errors.ServeError.__module__ == "xbrain.jev.errors"
+    assert isinstance(refusal, errors.ServeError) and (refusal.status, refusal.message) == (
+        400,
+        "mal",
+    )

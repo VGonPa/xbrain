@@ -26,7 +26,7 @@ from tests.test_jev_page_browser import (
     _requires_chrome,
     _served_dump,
 )
-from xbrain.jev.picks import ServeError
+from xbrain.jev.errors import ServeError
 
 # --------------------------------------------------------------------------- the probe's deadline
 

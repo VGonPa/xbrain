@@ -76,7 +76,7 @@ from xbrain.jev.defaults import (
     plural,
     unpriced_providers,
 )
-from xbrain.jev.env import typesafe_api_key
+from xbrain.jev.env import dry_run_key_line, typesafe_api_key
 from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.report import (
     ask_cost,
@@ -91,7 +91,7 @@ from xbrain.jev.report import (
     write_reports,
 )
 from xbrain.jev.lock import PassLock, PassLockBusy, pass_lock
-from xbrain.jev.run import RunOutcome, run_ask, run_topics
+from xbrain.jev.run import FAILURES_SHOWN, RunOutcome, run_ask, run_topics
 from xbrain.jev.serve import make_server, serve_until_interrupted
 from xbrain.jev.service import JevService
 from xbrain.jev.store import load_assessments, load_runs
@@ -2701,7 +2701,6 @@ app.add_typer(jev_app, name="jev")
 #: returning an empty `RunResult`. The case that hurts is a provider rate-limiting or timing
 #: out across most of a large batch while some answers still land — one line each would bury
 #: the summary printed above them.
-_JEV_FAILURES_SHOWN = 10
 
 
 def _jev_client(cfg: Config) -> JevClient:
@@ -2810,10 +2809,10 @@ def _echo_jev_outcome(
         f"{_jev_cost_line(result.assessed)} · "
         f"{'modelo' if len(models) == 1 else 'modelos'} {', '.join(models)} → {topics_path}"
     )
-    for item_id, reason in result.failed[:_JEV_FAILURES_SHOWN]:
+    for item_id, reason in result.failed[:FAILURES_SHOWN]:
         typer.echo(f"  FALLO {item_id}: {reason}", err=True)
-    if len(result.failed) > _JEV_FAILURES_SHOWN:
-        remaining = len(result.failed) - _JEV_FAILURES_SHOWN
+    if len(result.failed) > FAILURES_SHOWN:
+        remaining = len(result.failed) - FAILURES_SHOWN
         # The eleventh failure of eleven is "1 fallo más", not "1 fallos más".
         typer.echo(f"  … y {plural(remaining, 'fallo', 'fallos')} más", err=True)
 
@@ -2924,11 +2923,7 @@ def _jev_topics_pass(
     )
     typer.echo(_jev_selection_line(selection, len(assessments)))
     if dry_run:
-        # `--dry-run` returns before `_jev_client`, so it validates neither the key nor the
-        # SDK import. Reporting the key here is what stops a green dry-run from being
-        # followed by a real run that dies on the first thing it checks.
-        configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
-        typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
+        typer.echo(dry_run_key_line(cfg.repo_root))
         return None
     if not selection.items or lock is None:
         return None
@@ -3011,8 +3006,7 @@ def jev_ask_cmd(
     plan = plan_ask(cfg, ask_query, filters, limit)
     _echo_ask_plan(plan)
     if dry_run:
-        configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
-        typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
+        typer.echo(dry_run_key_line(cfg.repo_root))
         return
     confirmed = bool(plan.selection.items) and (
         yes or _confirm_ask_cost(plan.estimate.usd, cfg.jev_ask_max_usd)

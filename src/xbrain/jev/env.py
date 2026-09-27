@@ -77,3 +77,14 @@ def typesafe_api_key(repo_root: Path, environ: Mapping[str, str] | None = None) 
         if _EXPORT.sub("", key.strip()).strip() == ENV_VAR:
             found = _value_from(raw)
     return found
+
+
+def dry_run_key_line(repo_root: Path, environ: Mapping[str, str] | None = None) -> str:
+    """What every `--dry-run` (`jev topics`, `jev ask`) says about the key.
+
+    A dry run returns before any client is made, so it checks neither the key nor the SDK
+    import. Naming the key here is what stops a green dry run from being followed by a real
+    run that dies on the first thing it checks.
+    """
+    configured = "configurada" if typesafe_api_key(repo_root, environ) else "NO configurada"
+    return f"--dry-run: no se llama a Jev · clave {ENV_VAR}: {configured}"

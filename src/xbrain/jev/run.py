@@ -54,6 +54,9 @@ logger = logging.getLogger(__name__)
 #: rewrite of the side-car per N items — the repo's standard bargain for paid batch work
 #: (`media`, `describe` and `refetch` all write between units rather than at the end).
 CHECKPOINT_EVERY = 25
+#: Failures a pass's end lists by post (the terminal's summary and a served job's outcome
+#: alike); the rest are counted.
+FAILURES_SHOWN = 10
 
 
 @dataclass(frozen=True)
