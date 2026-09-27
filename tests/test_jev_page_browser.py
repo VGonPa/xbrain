@@ -1908,7 +1908,11 @@ const sWait = async (cond, what) => {
     if (now - start > 30000) throw new Error('nunca: ' + what + ' · ' + JSON.stringify(sPanel()));
   }
 };
-const sStep = async (name, fn) => { try { sOut[name] = await fn(); } catch (e) { sOut[name] = 'ERROR ' + e.message; } };
+const sPost = (path, body) => sFetch0.call(window, path, {method: 'POST', body: body}).catch(() => null);
+const sStep = async (name, fn) => {
+  await sPost('/probe-step', name);
+  try { sOut[name] = await fn(); } catch (e) { sOut[name] = 'ERROR ' + e.message; }
+};
 const sCard = id => sId('post-' + id);
 const sButtons = (root) => (root ? [...root.querySelectorAll('button.evalb')].filter(seen).map(b => b.textContent) : []);
 const sPress = (root, text) => [...root.querySelectorAll('button.evalb')].find(b => seen(b) && b.textContent === text).click();
@@ -1943,8 +1947,10 @@ const sRefresh0 = refresh;
 refresh = function (blob) { sRefresh0(blob); sRefreshed++; };
 let sEstimates = 0, sLastEstimate = null;
 const sFetch0 = window.fetch;
+let sPosts = 0;
 window.fetch = function (u, init) {
   const p = sFetch0.call(window, u, init);
+  if (init && init.method === 'POST') sPosts++;
   if (String(u).includes('/estimate')) {
     p.then(r => r.clone().json()).then(j => { sLastEstimate = j; sEstimates++; }, () => { sEstimates++; });
   }
@@ -1969,11 +1975,14 @@ const sQuery = async (n) => {
   sPress(sId('ask-form'), 'Estimar lo que cuesta');
   await sWait(() => sPanel().go, 'la estimación');
 };
+// The output goes to the test server, which ends Chrome as soon as it has it: `--dump-dom`
+// alone waits for the virtual-time budget to drain, which a hung page never lets happen.
 const sDone = () => {
   const pre = document.createElement('pre');
   pre.id = 'probe';
   pre.textContent = JSON.stringify(sOut);
   document.body.appendChild(pre);
+  sPost('/probe-done', pre.textContent);
 };
 """
 )
@@ -2137,6 +2146,7 @@ def _served_dump(
 
         service = _Probed(cfg, make_client or (lambda: client))
         server = make_server(service, 0)
+        server.RequestHandlerClass = _probe_handler()
         thread = threading.Thread(
             target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
         )
@@ -2145,7 +2155,7 @@ def _served_dump(
             port = server.server_address[1]
             if before_dump is not None:
                 before_dump(service, port)
-            seen = _dump(f"http://127.0.0.1:{port}/#posts?f=all", budget_ms=900000)
+            seen = _dump_served(server, f"http://127.0.0.1:{port}/#posts?f=all")
             service.wait(15)
             seen["job"] = JevService.job_view(service)
         finally:
@@ -2155,6 +2165,73 @@ def _served_dump(
         return seen
     finally:
         monkeypatch.undo()
+
+
+#: Real seconds a served probe may take before Chrome is ended and the last step is named.
+_SERVED_DEADLINE_S = 110
+
+
+def _probe_handler() -> Any:
+    """The server's handler, plus two POST routes only a probe uses: `/probe-step` (the step
+    now running) and `/probe-done` (the output). Both land on the server object."""
+    from xbrain.jev.serve import _Handler
+
+    class _ProbeHandler(_Handler):
+        def do_POST(self) -> None:  # noqa: N802 — the stdlib's name
+            if self.path not in ("/probe-step", "/probe-done"):
+                super().do_POST()
+                return
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+            if self.path == "/probe-step":
+                self.server.probe_step = body  # type: ignore[attr-defined]
+            else:
+                self.server.probe_out = body  # type: ignore[attr-defined]
+            self.send_response(204)
+            self.end_headers()
+
+    return _ProbeHandler
+
+
+def _dump_served(server: Any, url: str) -> dict[str, Any]:
+    """Chrome on `url` until the probe POSTs its output (then Chrome is ended), or until
+    `_SERVED_DEADLINE_S` — a failure that names the step the probe was in."""
+    assert CHROME is not None
+    server.probe_out = server.probe_step = None
+    chrome = subprocess.Popen(  # nosec B603 - fixed argv, a local server this test made
+        [
+            CHROME,
+            "--headless=new",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--virtual-time-budget=900000",
+            "--dump-dom",
+            url,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + _SERVED_DEADLINE_S
+    try:
+        while server.probe_out is None and chrome.poll() is None:
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"el probe no terminó en {_SERVED_DEADLINE_S} s; último paso: "
+                    f"{server.probe_step!r}"
+                )
+            time.sleep(0.05)
+    finally:
+        if chrome.poll() is None:
+            chrome.kill()
+        stdout, stderr = chrome.communicate()
+    if server.probe_out is not None:
+        return json.loads(server.probe_out)
+    found = re.search(r'<pre id="probe">(.*?)</pre>', stdout, re.S)
+    assert found, (
+        f"la página no escribió el probe (rc={chrome.returncode}, último paso: "
+        f"{server.probe_step!r}): {stderr[-800:]}"
+    )
+    return json.loads(html.unescape(found.group(1)))
 
 
 def _stale_post_2(cfg: Any) -> None:

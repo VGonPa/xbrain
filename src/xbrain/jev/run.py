@@ -524,7 +524,11 @@ def run_pass(
         for record in result.assessed:
             records[record.item_id] = record
         _call_hook("on_summary", on_summary, result)
-        _save_side_car(save, path, paid=len(result.assessed))
+        # Nothing banked and no file yet: saving would CREATE an empty side-car — for an ask, a
+        # file `ask.load_history` rebuilds into a query nobody's use recorded. Ctrl-C's path
+        # skips it the same way.
+        if result.assessed or path.exists():
+            _save_side_car(save, path, paid=len(result.assessed))
         failed = result.failed
     finally:
         # EVERY exit path of a pass that sent something lands here: success, a partial

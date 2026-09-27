@@ -150,53 +150,76 @@ _ELSEWHERE_PROBE = (
 )
 
 
-def _failed_elsewhere(service: Any, port: int) -> None:
-    """Another tab ran a job that failed (no key) — after this page's data was built, and
-    without writing a file, so the data the page loads is still the one from before it."""
+#: An ask over the posts with a topics answer (1 and 2): asked twice, the second is free.
+_FREE = {"query": "hooks", "only_evaluated": True}
+#: What each kind of job asks when another tab launches it.
+_BODIES = {"topics": {"ids": ["3"]}, "ask": {"query": "hooks", "limit": 1}}
+
+
+def _http_job(service: Any, port: int, kind: str, body: dict[str, Any]) -> None:
+    """Estimate and confirm a job over HTTP, as another tab would, and wait for its end."""
     import http.client
     import json
 
     from xbrain.jev.serve import TOKEN_HEADER
 
-    service.blob()
     headers = {
         "Content-Type": "application/json",
         TOKEN_HEADER: service.token,
         "Origin": f"http://127.0.0.1:{port}",
     }
     replies: list[dict[str, Any]] = []
-    for path in ("/api/topics/estimate", "/api/topics/evaluate"):
-        body: dict[str, Any] = {"ids": ["3"]}
+    for action in ("estimate", "evaluate"):
+        sent = dict(body)
         if replies:
-            body["confirm_token"] = replies[-1]["confirm_token"]
+            sent["confirm_token"] = replies[-1]["confirm_token"]
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-        conn.request("POST", path, body=json.dumps(body), headers=headers)
+        conn.request("POST", f"/api/{kind}/{action}", body=json.dumps(sent), headers=headers)
         replies.append(json.loads(conn.getresponse().read()))
         conn.close()
     service.wait(10)
-    assert service.job_view()["state"] == "error", service.job_view()
 
 
-@pytest.fixture(scope="module")
-def elsewhere(tmp_path_factory) -> dict[str, Any]:
+def _failed_elsewhere(kind: str) -> Any:
+    """Another tab ran a job of `kind` that failed (no key) — after this page's data was built,
+    and without writing a file, so the data the page loads is still the one from before it."""
+
+    def before(service: Any, port: int) -> None:
+        service.blob()
+        _http_job(service, port, kind, _BODIES[kind])
+        assert service.job_view()["state"] == "error", service.job_view()
+
+    return before
+
+
+@pytest.fixture(scope="module", params=["topics", "ask"])
+def elsewhere(request, tmp_path_factory) -> dict[str, Any]:
     from xbrain.jev.client import JevError
 
     def _no_key() -> Any:
         raise JevError("TYPESAFE_API_KEY no encontrada")
 
-    return _served_dump(
-        tmp_path_factory.mktemp("elsewhere"),
+    seen = _served_dump(
+        tmp_path_factory.mktemp("elsewhere-" + request.param),
         _ELSEWHERE_PROBE,
         make_client=_no_key,
-        before_dump=_failed_elsewhere,
+        before_dump=_failed_elsewhere(request.param),
     )
+    seen["kind"] = request.param
+    return seen
 
 
 @_requires_chrome
 def test_a_job_that_failed_in_another_tab_opens_the_panel_here(elsewhere):
     panel = elsewhere["opened"]
 
-    assert panel["title"] == "Una evaluación de topics lanzada en otra pestaña"
+    assert (
+        panel["title"]
+        == {
+            "topics": "Una evaluación de topics lanzada en otra pestaña",
+            "ask": "Una pregunta lanzada en otra pestaña",
+        }[elsewhere["kind"]]
+    )
     assert panel["error"] == "El trabajo falló: TYPESAFE_API_KEY no encontrada"
     assert panel["close"] == "Cerrar" and panel["stop"] is None and panel["go"] is None
 
@@ -394,3 +417,173 @@ def test_a_confirm_refused_because_another_job_runs_follows_that_job(follow_409)
     assert followed["after"]["progress"].startswith("1 evaluación guardada")
     assert followed["card4"] == ["Re-evaluar"]
     assert follow_409["asked"] == ["4"]
+
+
+# --------------------------------------------------------------------------- a clean end elsewhere
+
+_FREE_ELSEWHERE_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('free', async () => {
+    await sWait(() => seen(sCard('3')), 'la página');
+    const h = {'Content-Type': 'application/json', 'X-Xbrain-Token': DATA.serve.token};
+    const body = {query: 'hooks', only_evaluated: true};
+    const e = await (await sFetch0('/api/ask/estimate', {method: 'POST', headers: h, body: JSON.stringify(body)})).json();
+    await sFetch0('/api/ask/evaluate', {method: 'POST', headers: h,
+      body: JSON.stringify(Object.assign({}, body, {confirm_token: e.confirm_token}))});
+    await sWait(() => sRefreshed > 0, 'la recarga');
+    for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
+    return Object.assign(sPanel(), {posts: e.posts, usd: e.usd});
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def free_elsewhere(tmp_path_factory) -> dict[str, Any]:
+    """An ask answered before the page opened, then asked again from another tab: free."""
+    from tests.test_jev_serve_ask import _Asker
+
+    return _served_dump(
+        tmp_path_factory.mktemp("free-elsewhere"),
+        _FREE_ELSEWHERE_PROBE,
+        client=_Asker(),
+        before_dump=lambda service, port: _http_job(service, port, "ask", _FREE),
+    )
+
+
+@_requires_chrome
+def test_a_free_ask_in_another_tab_reloads_here_without_opening_the_panel(free_elsewhere):
+    seen = free_elsewhere["free"]
+
+    assert (seen["posts"], seen["usd"]) == (0, 0.0)
+    assert seen["shown"] is False
+    job = free_elsewhere["job"]
+    assert (job["kind"], job["outcome"]["sent"], job["outcome"]["recorded"]) == ("ask", 0, True)
+
+
+# --------------------------------------------------------------------------- nothing kept
+
+_NOTHING_KEPT_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('stopped', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')), 'el formulario');
+    await sQuery(1);
+    sId('ask-go').click();
+    await sWait(() => sPanel().stop !== null, 'el trabajo');
+    sPress(sId('jobp'), 'Parar (se guarda lo ya pagado)');
+    await sWait(() => sRefreshed > 0, 'el final');
+    for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
+    return Object.assign(sPanel(), {hash: location.hash,
+      head: txt(sId('ask-head')), history: [...document.querySelectorAll('#ask-history li')].filter(seen).length});
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def nothing_kept(tmp_path_factory) -> dict[str, Any]:
+    """A query already in the history; then an ask whose one call waits for «Parar» and fails:
+    interrupted, nothing kept, nothing recorded."""
+    import threading
+
+    from tests.test_jev_serve_ask import _Asker
+    from xbrain.jev.client import JevError
+    from xbrain.jev.service import JevService
+
+    stopped = threading.Event()
+
+    class _Stoppable(JevService):
+        def cancel_job(self) -> dict[str, Any]:
+            view = super().cancel_job()
+            stopped.set()
+            return view
+
+    class _FailsOnceStopped(_Asker):
+        failing = False
+
+        def ask(self, state, questions):
+            if self.failing:
+                assert stopped.wait(60)
+                raise JevError("respuesta ilegible")
+            return super().ask(state, questions)
+
+    client = _FailsOnceStopped()
+
+    def before(service: Any, port: int) -> None:
+        _http_job(service, port, "ask", {"query": "una pregunta anterior", "limit": 2})
+        client.failing = True
+
+    return _served_dump(
+        tmp_path_factory.mktemp("nothing-kept"),
+        _NOTHING_KEPT_PROBE,
+        client=client,
+        base=_Stoppable,
+        before_dump=before,
+    )
+
+
+@_requires_chrome
+def test_an_ask_that_kept_nothing_stays_on_the_tab_and_says_it_was_not_recorded(nothing_kept):
+    seen = nothing_kept["stopped"]
+    job = nothing_kept["job"]
+
+    assert (job["state"], job["outcome"]["ok"], job["outcome"]["recorded"]) == (
+        "interrupted",
+        0,
+        False,
+    )
+    assert "no quedó en el historial: no se guardó ninguna respuesta" in seen["progress"]
+    # No jump to a query the history does not have; the tab still shows the one it has.
+    assert seen["hash"] == "#ask"
+    assert seen["head"].startswith("«una pregunta anterior»") and seen["history"] == 1
+
+
+# --------------------------------------------------------------------------- an idle page, lost
+
+_IDLE_LOST_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('lost', async () => {
+    await sWait(() => sPanel().shown, 'el aviso de que se perdió el servidor');
+    return sPanel();
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def idle_lost(tmp_path_factory) -> dict[str, Any]:
+    from tests.test_jev_serve import _Recorder
+    from xbrain.jev.service import JevService
+
+    class _Down(JevService):
+        def job_view(self) -> dict[str, Any]:
+            raise RuntimeError("se cayó")
+
+    seen = _served_dump(
+        tmp_path_factory.mktemp("idle-lost"), _IDLE_LOST_PROBE, client=_Recorder(), base=_Down
+    )
+    return seen
+
+
+@_requires_chrome
+def test_an_idle_page_says_when_it_lost_the_server(idle_lost):
+    panel = idle_lost["lost"]
+
+    assert panel["error"].startswith("Se perdió el contacto con el servidor")
+    assert panel["reload"] == "Recargar la página"

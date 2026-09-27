@@ -11,6 +11,7 @@ the assertions then reject).
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,7 +24,6 @@ from tests.test_jev_page_browser import (
     _SERVE_JS,
     _dump,
     _ended,
-    _nf,
     _need_chrome,
     _page,
     _page_saw,
@@ -31,7 +31,7 @@ from tests.test_jev_page_browser import (
     _served_dump,
     _start_job,
 )
-from tests.test_jev_serve_ask import PROBS, QUERY, _Asker, ranked
+from tests.test_jev_serve_ask import PROBS, QUERY, _Asker, _PerChar, ranked
 from xbrain.config import Config
 from xbrain.jev.ask import AskFilters, AskQuery, finish_ask, plan_ask
 from xbrain.jev.lock import pass_lock
@@ -145,7 +145,11 @@ def _static_page(root: Path, probe: str) -> tuple[Path, dict[str, str]]:
         data = build_page_data(cfg, now=DT)
         costs = ask_cost_by_query(load_runs(cfg.jev_runs_path))
         shas.update(
-            {f"cost:{name}": _usd4(costs[sha]["cost_usd"]) for name, sha in list(shas.items())}
+            {
+                f"cost:{name}": _usd4(costs[sha]["cost_usd"])
+                for name, sha in list(shas.items())
+                if sha in costs
+            }
         )
     finally:
         monkeypatch.undo()
@@ -266,8 +270,10 @@ def test_static_a_query_url_opened_fresh_shows_that_query(tmp_path):
 
     assert _probs(hooks["results"]) == _shown(ranked())
     assert hooks["history"][1]["current"] is True
-    # A sha the history does not have opens the last query asked, never an empty tab.
-    assert unknown["head"].startswith(f"«{SEED_QUERY}»")
+    # A sha the history does not have is said so: never another query's results.
+    assert unknown["head"] is None and unknown["results"] == []
+    assert unknown["empty"] == "Esta consulta no está en el historial."
+    assert not any(h["current"] for h in unknown["history"])
 
 
 # --------------------------------------------------------------------------- the served tab
@@ -308,13 +314,28 @@ const sQForm = (fields) => {
     await sWait(() => sPanel().go, 'la estimación gratis');
     const panel = sPanel();
     sId('ask-go').click();
+    await sWait(() => ['Ocultar', 'Cerrar'].includes(sPanel().close), 'el trabajo gratis');
+    sId('ask-cancel').click();  // «Ocultar»: a clean end leaves it hidden
+    const hidden = !sPanel().shown;
     await sWait(() => sRefreshed > r0, 'la consulta gratis');
-    return Object.assign(sQView(), {panel});
+    for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
+    return Object.assign(sQView(), {panel, hidden, after: sPanel()});
+  });
+  await sStep('reopen', async () => {
+    const posts0 = sPosts, r0 = sRefreshed;
+    location.hash = '#posts?f=all';
+    await sWait(() => seen(sCard('1')), 'Posts');
+    sId('ask-cancel').click();
+    document.querySelector('.tabs a[data-tab="ask"]').click();
+    await sWait(() => sQHistory().length === 1, 'el historial');
+    sQOpen('hooks');
+    await sWait(() => sQResults().length > 0, 'los resultados reabiertos');
+    return Object.assign(sQView(), {posts: sPosts - posts0, reloads: sRefreshed - r0});
   });
   await sStep('similar', async () => {
     sQForm({'ask-q': '¿cómo configuro hooks en claude code', 'ask-evaluated': true});
     await sWait(() => (sPanel().est || '').includes('casi igual'), 'la consulta parecida');
-    const panel = sPanel();
+    const panel = Object.assign(sPanel(), {estimate: sLastEstimate});
     sId('ask-cancel').click();
     return panel;
   });
@@ -340,7 +361,8 @@ const sQForm = (fields) => {
 
 @pytest.fixture(scope="module")
 def ask_served(tmp_path_factory) -> dict[str, Any]:
-    client = _Asker()
+    # Billed per character, so after the first use the cost model is a measured fit.
+    client = _PerChar()
     seen = _served_dump(tmp_path_factory.mktemp("ask-served"), _ASK_SERVE_PROBE, client=client)
     seen["asked"] = client.asked
     return seen
@@ -367,12 +389,51 @@ def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_ser
     assert e["pick"] == {"query": AskQuery.of(QUERY).text, "only_evaluated": True}
     assert estimate["force"] is None
     assert estimate["go_text"] == "Preguntar y pagar " + money
+    assert e["cost_model"] == {
+        "per_call": 1000.0,
+        "chars_per_token": 4.0,
+        "measured": False,
+        "answers": 0,
+    }
     assert estimate["est"] == (
-        f"2 posts por preguntar · 4 descartados por los filtros. Coste estimado: {money} "
-        f"(2 llamadas × {_nf(1000)} tokens fijos + {_nf(e['chars'])} caracteres a 4,00 por "
-        "token; sin medir todavía: la estimación de partida). Tope: 1,00 $. Al llegar se para; "
-        "lo que ya esté en vuelo termina y puede "
-        "pasarlo por poco (como mucho 1 post)."
+        f"2 posts por preguntar · 4 descartados por los filtros. {_cost_line(e)} Tope: 1,00 $. "
+        "Al llegar se para; lo que ya esté en vuelo termina y puede pasarlo por poco (como "
+        "mucho 1 post)."
+    )
+    assert "Aún sin preguntas pagadas: cifras de partida." in estimate["est"]
+
+
+@_requires_chrome
+def test_served_an_ask_estimate_after_paid_answers_says_the_fitted_figures(ask_served):
+    similar = ask_served["similar"]
+    e = similar["estimate"]
+
+    assert e["cost_model"]["measured"] is True and e["cost_model"]["answers"] == 2
+    assert _cost_line(e) in similar["est"]
+    assert "Cifras ajustadas con 2 respuestas ya pagadas." in similar["est"]
+
+
+def _cost_line(e: dict[str, Any]) -> str:
+    """The panel's cost sentence for the server's estimate `e`, in the page's own words."""
+    m = e["cost_model"]
+
+    def grouped(n: float) -> str:
+        # `Math.round`: halves go up (Python's `round` sends them to the even number).
+        return f"{math.floor(n + 0.5):,}".replace(",", ".")
+
+    per_token = f"{m['chars_per_token']:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+    money = f"~{e['usd']:.5f}".replace(".", ",") + " $"
+    posts = f"{e['posts']} post" + ("" if e["posts"] == 1 else "s")
+    fitted = (
+        f"Cifras ajustadas con {m['answers']} respuestas ya pagadas."
+        if m["measured"]
+        else "Aún sin preguntas pagadas: cifras de partida."
+    )
+    return (
+        f"Coste estimado: {money} — {posts} × ~{grouped(m['per_call'])} tokens por llamada, más "
+        f"el texto de los posts ({grouped(e['chars'])} caracteres ≈ "
+        f"{grouped(e['chars'] / m['chars_per_token'])} tokens, a {per_token} caracteres por "
+        f"token). {fitted}"
     )
 
 
@@ -401,6 +462,25 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
     assert sorted(ask_served["asked"]) == ["1", "2"]
     assert "2 veces" in again["history"][0]["text"]
     assert _probs(again["results"]) == _shown(ranked(posts="12"))
+    assert again["panel"]["est"].endswith(
+        "No se paga nada; se anota como una consulta más en el historial. Tope: 1,00 $. Al "
+        "llegar se para; lo que ya esté en vuelo termina y puede pasarlo por poco (como mucho "
+        "1 post)."
+    )
+    # Nothing was sent, so nothing to log: a clean end — no alarm, and the panel stays hidden.
+    assert again["hidden"] is True and again["after"]["shown"] is False
+    # The probe's last job is this free one.
+    job = ask_served["job"]
+    assert (job["state"], job["outcome"]["sent"], job["outcome"]["logged"]) == ("done", 0, False)
+
+
+@_requires_chrome
+def test_served_reopening_a_query_from_the_history_asks_the_server_nothing(ask_served):
+    reopen = ask_served["reopen"]
+
+    assert (reopen["posts"], reopen["reloads"]) == (0, 0)
+    assert reopen["hash"] == f"#ask?q={AskQuery.of(QUERY).sha}"
+    assert _probs(reopen["results"]) == _shown(ranked(posts="12"))
 
 
 @_requires_chrome

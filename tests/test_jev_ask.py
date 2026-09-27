@@ -498,6 +498,23 @@ def test_finish_records_nothing_when_an_interrupted_pass_banked_nothing(cfg: Con
     assert not (cfg.jev_asks_dir / ASK_INDEX).exists()
 
 
+def test_a_use_stopped_before_any_answer_writes_no_answers_file(cfg: Config):
+    """Nothing banked, nothing saved: an empty file would come back from `load_history` as a
+    «rebuilt» query nobody asked for, first in the Preguntar tab."""
+    cancel = threading.Event()
+
+    class _FailsOnceCancelled(_ByText):
+        def ask(self, state, questions):
+            cancel.set()
+            raise JevError("respuesta ilegible")
+
+    plan, outcome, results = _run(cfg, _FailsOnceCancelled(), cancel=cancel)
+
+    assert outcome.interrupted and outcome.assessed == () and results.recorded is False
+    assert not _ask_path(cfg, plan.query).exists()
+    assert load_history(cfg).queries == {}
+
+
 def test_a_query_whose_history_entry_was_lost_is_rebuilt_from_its_file(cfg: Config):
     plan, _, _ = _run(cfg, _ByText())
     (cfg.jev_asks_dir / ASK_INDEX).unlink()
