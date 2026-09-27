@@ -1122,6 +1122,44 @@ def test_the_article_cut_prefers_a_paragraph_then_a_sentence_then_a_word(text, e
     assert len(cut) <= 20
 
 
+def test_an_x_articles_body_of_exactly_the_cap_ships_whole_and_unmarked():
+    body = "a" * PAGE_ARTICLE_CHARS
+    article = _post(_data([_article_item(body)], {}), "1")["article"]
+
+    assert (article["text"], article["cut"]) == (body, False)
+    assert _cut_at_boundary(body + "b", PAGE_ARTICLE_CHARS).endswith("…")
+
+
+def test_an_x_articles_link_is_https_whatever_the_stored_scheme():
+    """«sigue en X» goes to X over https: a body fetched from `http://x.com/…` keeps its
+    path, not its scheme."""
+    item = _article_item("texto", url="http://x.com/i/article/9?s=20")
+
+    assert _post(_data([item], {}), "1")["article"]["url"] == "https://x.com/i/article/9?s=20"
+
+
+#: Graphemes of several code points, each put right across the hard cut.
+_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
+_FLAG = "\U0001f1ea\U0001f1f8"
+_THUMB = "\U0001f44d\U0001f3fd"
+_HEART = "\u2764\ufe0f"
+_ACUTE = "e\u0301"
+
+
+@pytest.mark.parametrize("grapheme", [_FAMILY, _FLAG, _THUMB, _HEART, _ACUTE])
+@pytest.mark.parametrize("offset", range(8))
+def test_a_hard_cut_never_splits_a_grapheme(grapheme, offset):
+    """No space to cut at: the hard cut steps back to the start of the grapheme it would
+    split (a ZWJ sequence, a flag's pair, a skin tone, a variation selector, an accent)."""
+    text = "x" * offset + grapheme * 60
+    cut = _cut_at_boundary(text, 40)
+
+    assert cut.endswith("…") and len(cut) <= 40
+    kept = cut[:-1]
+    assert text.startswith(kept)
+    assert kept[offset:] == grapheme * ((len(kept) - offset) // len(grapheme))
+
+
 def test_only_an_x_article_ships_a_body():
     """A post whose fetched link is another site's article keeps its link card and no body:
     the page's own share card is the rule there."""

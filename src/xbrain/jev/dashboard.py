@@ -38,6 +38,7 @@ ECharts. Nothing is fetched at runtime except the Google Fonts stylesheet.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -226,7 +227,38 @@ def _cut_at_boundary(text: str, width: int) -> str:
         at = max(head.rfind(end) for end in ends)
         if at >= floor:
             return head[: at + kept].rstrip() + CUT_MARK
-    return text[: width - 1] + "…"
+    return text[: _grapheme_start(text, width - 1)] + "…"
+
+
+#: Code points that belong to the grapheme before them: joiner, variation selectors, skin
+#: tones, emoji tag characters (combining marks are asked of `unicodedata`).
+_ZWJ = "\u200d"
+_EXTENDS = (("\ufe00", "\ufe0f"), ("\U0001f3fb", "\U0001f3ff"), ("\U000e0020", "\U000e007f"))
+_REGIONAL = ("\U0001f1e6", "\U0001f1ff")
+
+
+def _extends(char: str) -> bool:
+    return (
+        char == _ZWJ
+        or unicodedata.combining(char) > 0
+        or any(lo <= char <= hi for lo, hi in _EXTENDS)
+    )
+
+
+def _grapheme_start(text: str, at: int) -> int:
+    """`at`, moved back to where the grapheme it falls inside starts, so a hard cut there
+    keeps no half of one: not before a mark or a joiner that belongs to what precedes it, not
+    after a joiner, not between the two letters of a flag. Close enough to UAX #29 for a cut
+    that is only a fallback (the corpus has none)."""
+    while 0 < at < len(text) and (_extends(text[at]) or text[at - 1] == _ZWJ):
+        at -= 1
+    lo, hi = _REGIONAL
+    run = 0
+    while run < at and lo <= text[at - 1 - run] <= hi:
+        run += 1
+    if run % 2 and at < len(text) and lo <= text[at] <= hi:
+        at -= 1
+    return at
 
 
 def _cut(text: str, width: int) -> str:
@@ -391,7 +423,8 @@ def _article_body(item: Item) -> dict[str, Any] | None:
                 "text": text,
                 "cut": text != source.text,
                 "chars": len(source.text),
-                "url": source.url,
+                # «sigue en X» goes over https, whatever scheme the fetch stored.
+                "url": urlsplit(source.url)._replace(scheme="https").geturl(),
             }
     return None
 

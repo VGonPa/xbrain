@@ -61,9 +61,13 @@ QUIET = "1875225613952544936"
 ART = "1876000000000000001"
 
 
-#: The Article's body as fetched: longer than the page's cap, in paragraphs.
+#: The Article's body as fetched: longer than the page's cap, in paragraphs — the first one
+#: carrying markup, which is text from X and must stay text (the served page holds the token).
 ART_URL = "http://x.com/i/article/1909295899274039296"
-ART_BODY = "\n\n".join(f"Párrafo {n} del artículo, con su frase. " * 12 for n in range(8))
+ART_MARKUP = '<img src=x onerror="window.xPwned=1"><script>window.xPwned=2</script> &amp; <b>b</b>'
+ART_BODY = "\n\n".join(
+    [ART_MARKUP] + [f"Párrafo {n} del artículo, con su frase. " * 12 for n in range(8)]
+)
 
 
 def _fixture() -> dict[str, Any]:
@@ -178,6 +182,8 @@ const sCard = (id, root) => {
     article: txt(c.querySelector('.artb')),
     article_folded: !!(c.querySelector('.artb') && c.querySelector('.artb').classList.contains('clamp')),
     article_links: [...c.querySelectorAll('.artmore a')].map(a => [txt(a), a.getAttribute('href')]),
+    article_elements: c.querySelector('.artb') ? c.querySelectorAll('.artb *').length : null,
+    pwned: window.xPwned || null,
     note: txt(c.querySelector('.xnote')),
     toggle: txt(c.querySelector('.vtog')),
     jev: seen(c.querySelector('.jev')),
@@ -414,8 +420,11 @@ def test_an_x_article_opens_on_the_saved_copy_and_ver_en_x_shows_xs_view(embedde
     assert ART_BODY.startswith(art["article"][: -len(" …")])
     assert len(art["article"]) <= PAGE_ARTICLE_CHARS
     assert art["article_folded"] is True
+    # Its markup is text: shown as typed, no element made from it, nothing of it ran.
+    assert art["article"].startswith(ART_MARKUP)
+    assert (art["article_elements"], art["pwned"]) == (0, None)
     assert art["article_links"] == [
-        ["sigue en X ↗", ART_URL],
+        ["sigue en X ↗", ART_URL.replace("http://", "https://")],
         ["nota ↗", "obsidian://open?path=%2Fvault%2Fx%2Fa.md"],
     ]
     assert flipped["frame"]["src"] == _src(ART, _other(embedded["theme"]))
