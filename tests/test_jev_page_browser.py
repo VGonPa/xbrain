@@ -1959,10 +1959,15 @@ let sRefreshed = 0;
 const sRefresh0 = refresh;
 refresh = function (blob) { sRefresh0(blob); sRefreshed++; };
 let sEstimates = 0, sLastEstimate = null;
-const sFetch0 = window.fetch;
+const sFetchRaw = window.fetch;
+// The probe's own requests: one that fails at the network says which it was (a bare «Failed
+// to fetch» names nothing). The page's requests keep the browser's own error.
+const sFetch0 = (u, init) => sFetchRaw.call(window, u, init).catch((e) => {
+  throw new Error(e.message + ' (' + ((init && init.method) || 'GET') + ' ' + u + ')');
+});
 let sPosts = 0;
 window.fetch = function (u, init) {
-  const p = sFetch0.call(window, u, init);
+  const p = sFetchRaw.call(window, u, init);
   if (init && init.method === 'POST') sPosts++;
   if (String(u).includes('/estimate')) {
     p.then(r => r.clone().json()).then(j => { sLastEstimate = j; sEstimates++; }, () => { sEstimates++; });
@@ -2245,13 +2250,39 @@ def _dump_served(server: Any, url: str) -> dict[str, Any]:
             chrome.kill()
         stdout, stderr = chrome.communicate()
     if server.probe_out is not None:
-        return json.loads(server.probe_out)
-    found = re.search(r'<pre id="probe">(.*?)</pre>', stdout, re.S)
-    assert found, (
-        f"la página no escribió el probe (rc={chrome.returncode}, último paso: "
-        f"{server.probe_step!r}): {stderr[-800:]}"
+        seen = json.loads(server.probe_out)
+    else:
+        found = re.search(r'<pre id="probe">(.*?)</pre>', stdout, re.S)
+        assert found, (
+            f"la página no escribió el probe (rc={chrome.returncode}, último paso: "
+            f"{server.probe_step!r}): {stderr[-800:]}"
+        )
+        seen = json.loads(html.unescape(found.group(1)))
+    if any(_failed_step(v) for v in seen.values()):
+        # What Chrome said, for the step that failed (`_step` shows it).
+        seen[_CHROME_SAID] = f"{len(stderr)} caracteres; el final: {stderr[-3000:]}"
+    return seen
+
+
+#: The key `_dump_served` adds, when a step failed, with the end of Chrome's stderr.
+_CHROME_SAID = "chrome_stderr"
+
+
+def _failed_step(value: Any) -> bool:
+    """A probe step that threw: `sStep` stores it as the string `ERROR <message>`."""
+    return isinstance(value, str) and value.startswith("ERROR ")
+
+
+def _step(seen: dict[str, Any], name: str) -> Any:
+    """Step `name` of a served probe's output; a step that threw fails HERE, naming the step,
+    its error (the request, when a request failed) and what Chrome said — not later, as a
+    TypeError on a string indexed like the dict it should have been."""
+    assert name in seen, f"el probe no llegó al paso {name!r}: {sorted(seen)}"
+    value = seen[name]
+    assert not _failed_step(value), (
+        f"el paso {name!r} del probe falló: {value} · Chrome: {seen.get(_CHROME_SAID)}"
     )
-    return json.loads(html.unescape(found.group(1)))
+    return value
 
 
 def _stale_post_2(cfg: Any) -> None:

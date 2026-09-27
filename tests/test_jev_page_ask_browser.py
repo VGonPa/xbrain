@@ -30,6 +30,7 @@ from tests.test_jev_page_browser import (
     _requires_chrome,
     _served_dump,
     _start_job,
+    _step,
 )
 from tests.test_jev_serve_ask import PROBS, QUERY, _Asker, _PerChar, ranked
 from xbrain.config import Config
@@ -399,7 +400,7 @@ def ask_served(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_served_the_tab_offers_the_query_box_and_its_filters(ask_served):
-    empty = ask_served["empty"]
+    empty = _step(ask_served, "empty")
 
     assert empty["form"] is True and empty["launch"] is None
     assert empty["history"] == []
@@ -409,7 +410,7 @@ def test_served_the_tab_offers_the_query_box_and_its_filters(ask_served):
 
 @_requires_chrome
 def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_served):
-    estimate = ask_served["estimate"]
+    estimate = _step(ask_served, "estimate")
     e = estimate["estimate"]
     money = f"~{e['usd']:.5f}".replace(".", ",") + " $"
 
@@ -434,7 +435,7 @@ def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_ser
 
 @_requires_chrome
 def test_served_an_ask_estimate_after_paid_answers_says_the_fitted_figures(ask_served):
-    similar = ask_served["similar"]
+    similar = _step(ask_served, "similar")
     e = similar["estimate"]
 
     assert e["cost_model"]["measured"] is True and e["cost_model"]["answers"] == 2
@@ -468,7 +469,7 @@ def _cost_line(e: dict[str, Any]) -> str:
 
 @_requires_chrome
 def test_served_an_ask_job_ends_on_its_results_and_its_history(ask_served):
-    done = ask_served["done"]
+    done = _step(ask_served, "done")
     sha = AskQuery.of(QUERY).sha
 
     assert sorted(ask_served["asked"]) == ["1", "2"]
@@ -482,7 +483,7 @@ def test_served_an_ask_job_ends_on_its_results_and_its_history(ask_served):
 
 @_requires_chrome
 def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
-    again = ask_served["again"]
+    again = _step(ask_served, "again")
 
     assert again["panel"]["est"].startswith(
         "0 posts por preguntar · 2 ya respondidos (gratis) · 4 descartados por los filtros. "
@@ -508,7 +509,7 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
 
 @_requires_chrome
 def test_served_reopening_a_query_from_the_history_asks_the_server_nothing(ask_served):
-    reopen = ask_served["reopen"]
+    reopen = _step(ask_served, "reopen")
 
     assert (reopen["posts"], reopen["reloads"]) == (0, 0)
     assert reopen["hash"] == f"#ask?q={AskQuery.of(QUERY).sha}"
@@ -517,8 +518,9 @@ def test_served_reopening_a_query_from_the_history_asks_the_server_nothing(ask_s
 
 @_requires_chrome
 def test_served_a_query_asked_before_in_other_words_is_named(ask_served):
-    assert isinstance(ask_served["similar"], dict), ask_served["similar"]
-    est = ask_served["similar"]["est"]
+    similar = _step(ask_served, "similar")
+    assert isinstance(similar, dict), similar
+    est = similar["est"]
 
     assert (
         "Ya preguntaste algo casi igual (cambia solo en mayúsculas, puntuación o espacios, y se "
@@ -528,7 +530,7 @@ def test_served_a_query_asked_before_in_other_words_is_named(ask_served):
 
 @_requires_chrome
 def test_served_an_ask_with_nothing_to_ask_is_refused_before_confirm(ask_served):
-    refused = ask_served["refused"]
+    refused = _step(ask_served, "refused")
 
     assert refused["go"] is False
     assert refused["error"].startswith("No se puede preguntar: ningún post que preguntar")
@@ -536,7 +538,7 @@ def test_served_an_ask_with_nothing_to_ask_is_refused_before_confirm(ask_served)
 
 @_requires_chrome
 def test_served_a_blank_query_is_refused_by_the_server(ask_served):
-    blank = ask_served["blank"]
+    blank = _step(ask_served, "blank")
 
     assert blank["go"] is False
     assert blank["error"] == "No se puede preguntar: la consulta está vacía"
@@ -562,9 +564,9 @@ def ask_ended(tmp_path_factory):
 def test_served_an_ask_that_did_not_end_cleanly_is_shown_even_if_hidden(ask_ended, scenario):
     seen = ask_ended(scenario)
 
-    assert seen["estimate"]["title"].startswith("Preguntar: «"), seen
-    assert seen["run"]["hidden"] is True
-    assert seen["end"]["shown"] is True and seen["end"]["close"] == "Cerrar"
+    assert _step(seen, "estimate")["title"].startswith("Preguntar: «"), seen
+    assert _step(seen, "run")["hidden"] is True
+    assert _step(seen, "end")["shown"] is True and _step(seen, "end")["close"] == "Cerrar"
     assert seen["job"]["kind"] == "ask"
 
 
@@ -573,7 +575,7 @@ def test_served_an_ask_cut_by_the_cap_says_so_and_keeps_what_it_paid(ask_ended):
     seen = ask_ended("tope")
 
     assert (seen["job"]["state"], seen["job"]["reason"]) == ("interrupted", "tope")
-    assert seen["end"]["progress"].startswith(
+    assert _step(seen, "end")["progress"].startswith(
         "Interrumpido (se alcanzó el tope por trabajo): 1 respuesta guardada · 1 resultado · "
     )
 
@@ -586,11 +588,11 @@ def test_served_an_ask_whose_history_could_not_be_written_keeps_its_paid_answers
     job = seen["job"]
 
     assert job["state"] == "done" and job["outcome"]["recorded"] is False
-    assert seen["end"]["progress"].startswith("2 respuestas guardadas · ")
+    assert _step(seen, "end")["progress"].startswith("2 respuestas guardadas · ")
     assert (
         f"2 respuestas pagadas y guardadas en {job['outcome']['file']}; el historial no se pudo "
         "escribir: [Errno 28] No space left on device"
-    ) in seen["end"]["progress"]
+    ) in _step(seen, "end")["progress"]
 
 
 @_requires_chrome
@@ -598,7 +600,7 @@ def test_served_an_ask_that_failed_says_why(ask_ended):
     seen = ask_ended("error")
 
     assert seen["job"]["state"] == "error"
-    assert seen["end"]["error"] == "El trabajo falló: TYPESAFE_API_KEY no encontrada"
+    assert _step(seen, "end")["error"] == "El trabajo falló: TYPESAFE_API_KEY no encontrada"
 
 
 @_requires_chrome
@@ -627,7 +629,7 @@ def test_served_the_page_can_stop_an_ask_and_what_was_paid_is_kept(ask_ended):
     assert (seen["job"]["state"], seen["job"]["reason"]) == ("interrupted", "cancelado")
     kept = seen["job"]["outcome"]["ok"]
     assert 1 <= kept < 3
-    assert seen["end"]["progress"].startswith(
+    assert _step(seen, "end")["progress"].startswith(
         f"Interrumpido (lo paraste desde la página): {kept} respuesta"
     )
 
@@ -691,7 +693,7 @@ def ask_resumed(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed):
-    resumed, end = ask_resumed["resumed"], ask_resumed["end"]
+    resumed, end = _step(ask_resumed, "resumed"), _step(ask_resumed, "end")
 
     assert resumed["title"] == "Pregunta en curso"
     assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
@@ -1251,7 +1253,7 @@ def _victor_expected(tmp_path: Path):
 
 @_requires_chrome
 def test_served_the_tab_splits_what_is_asked_from_what_is_refined(victor_served):
-    form = victor_served["form"]
+    form = _step(victor_served, "form")
 
     assert form["form_title"] == "Qué posts preguntar"
     assert form["min"] is None  # the minimum is a free refine, never part of what is paid
@@ -1267,7 +1269,7 @@ def test_served_the_tab_splits_what_is_asked_from_what_is_refined(victor_served)
 
 @_requires_chrome
 def test_served_topics_are_a_multi_select_each_with_its_count(victor_served, tmp_path):
-    form = victor_served["form"]
+    form = _step(victor_served, "form")
     _, counts = _victor_expected(tmp_path)
     expected = counts(AskFilters())
 
@@ -1281,7 +1283,7 @@ def test_served_topics_are_a_multi_select_each_with_its_count(victor_served, tmp
 
 @_requires_chrome
 def test_served_the_counts_follow_the_other_filters_from_the_server(victor_served, tmp_path):
-    counts_step = victor_served["counts"]
+    counts_step = _step(victor_served, "counts")
     _, counts = _victor_expected(tmp_path)
     expected = counts(AskFilters(since=datetime(2026, 6, 1).date()))
 
@@ -1293,7 +1295,7 @@ def test_served_the_counts_follow_the_other_filters_from_the_server(victor_serve
 
 @_requires_chrome
 def test_served_new_data_asks_the_counts_again_for_the_filters_typed(victor_served, tmp_path):
-    step = victor_served["reload"]
+    step = _step(victor_served, "reload")
     _, counts = _victor_expected(tmp_path)
     expected = counts(AskFilters(since=datetime(2026, 6, 1).date()))
 
@@ -1303,7 +1305,7 @@ def test_served_new_data_asks_the_counts_again_for_the_filters_typed(victor_serv
 
 @_requires_chrome
 def test_served_a_count_the_server_refuses_says_why(victor_served):
-    step = victor_served["bad_counts"]
+    step = _step(victor_served, "bad_counts")
 
     assert "posterior" in step["error"] and "2026-06-10" in step["error"]
     assert all(t["count"] == "—" for t in step["topics"])
@@ -1311,7 +1313,7 @@ def test_served_a_count_the_server_refuses_says_why(victor_served):
 
 @_requires_chrome
 def test_served_ticking_a_second_topic_widens_the_estimate(victor_served, tmp_path):
-    one, two = victor_served["one"]["estimate"], victor_served["two"]["estimate"]
+    one, two = _step(victor_served, "one")["estimate"], _step(victor_served, "two")["estimate"]
     cfg, _ = _victor_expected(tmp_path)
     query = AskQuery.of("posts que explican cómo trabajar con agentes")
     plan_one = plan_ask(cfg, query, AskFilters(topics=("agentic-engineering",)), None)
@@ -1322,13 +1324,13 @@ def test_served_ticking_a_second_topic_widens_the_estimate(victor_served, tmp_pa
     assert (one["posts"], two["posts"]) == (plan_one.estimate.posts, plan_two.estimate.posts)
     assert (one["posts"], two["posts"]) == (156, 813)
     assert (one["usd"], two["usd"]) == (plan_one.estimate.usd, plan_two.estimate.usd)
-    assert victor_served["one"]["panel"]["est"].startswith("156 posts por preguntar")
-    assert victor_served["two"]["panel"]["est"].startswith("813 posts por preguntar")
+    assert _step(victor_served, "one")["panel"]["est"].startswith("156 posts por preguntar")
+    assert _step(victor_served, "two")["panel"]["est"].startswith("813 posts por preguntar")
 
 
 @_requires_chrome
 def test_served_refining_changes_the_list_with_no_request_and_no_client(victor_served, tmp_path):
-    step = victor_served["refine"]
+    step = _step(victor_served, "refine")
     cfg, _ = _victor_expected(tmp_path)
 
     assert len(step["more"]["results"]) == 40
@@ -1345,7 +1347,7 @@ def test_served_refining_changes_the_list_with_no_request_and_no_client(victor_s
 
 @_requires_chrome
 def test_served_reopening_a_query_from_the_history_costs_nothing_and_resets_refine(victor_served):
-    reopen = victor_served["reopen"]
+    reopen = _step(victor_served, "reopen")
 
     assert (reopen["posts"], reopen["reloads"]) == (0, 0)
     assert len(reopen["results"]) == 20
@@ -1374,4 +1376,4 @@ def test_served_the_explanation_says_the_configured_topic_bar(tmp_path):
     """The «(≥ …)» of the explanation is `[jev].threshold` from the blob, never a literal."""
     seen = _served_dump(tmp_path, _EXPLAIN_READ, client=_Asker(), jev="threshold = 0.9\n")
 
-    assert "Topic: posts que enrich o Jev (≥ 0,90) ponen en alguno" in seen["explain"]
+    assert "Topic: posts que enrich o Jev (≥ 0,90) ponen en alguno" in _step(seen, "explain")
