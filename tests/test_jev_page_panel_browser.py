@@ -433,6 +433,12 @@ _FREE_ELSEWHERE_PROBE = (
     const e = await (await sFetch0('/api/ask/estimate', {method: 'POST', headers: h, body: JSON.stringify(body)})).json();
     await sFetch0('/api/ask/evaluate', {method: 'POST', headers: h,
       body: JSON.stringify(Object.assign({}, body, {confirm_token: e.confirm_token}))});
+    for (let i = 0; i < 100; i++) {
+      if ((await (await sFetch0('/api/job')).json()).state !== 'running') break;
+    }
+    // Idle, on the page's own clock: a request always in flight (as `sWait`'s) holds Chrome's
+    // virtual time still, and the watch that must see this job runs on it.
+    await new Promise(r => setTimeout(r, 2 * WATCH_MS));
     await sWait(() => sRefreshed > 0, 'la recarga');
     for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
     return Object.assign(sPanel(), {posts: e.posts, usd: e.usd});
@@ -557,6 +563,8 @@ _IDLE_LOST_PROBE = (
     + r"""
 (async () => {
   await sStep('lost', async () => {
+    // Five failed looks, WATCH_MS apart, on the page's own clock (see the free-ask probe).
+    await new Promise(r => setTimeout(r, (RETRY_MS.length + 2) * WATCH_MS));
     await sWait(() => sPanel().shown, 'el aviso de que se perdió el servidor');
     return sPanel();
   });
