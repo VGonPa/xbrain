@@ -706,6 +706,9 @@ def compute_jev_dashboard_data(
         "fallback": fallback,
         "docs_url": DOCS_URL,
         "ask_command": ASK_COMMAND,
+        # `xbrain jev serve` sets this (its token and `[jev].serve_max_usd`); the file `jev
+        # dashboard` writes is not served, and its page keeps «copiar comando».
+        "serve": None,
         "surface_chars": PAGE_SURFACE_CHARS,
         "char_limit": char_limit,
         "notes_dir": notes_dir,

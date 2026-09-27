@@ -696,7 +696,11 @@ generates an Obsidian wiki.
   re-prices under the lock; `[jev].serve_max_usd` is a HARD bound by reservation — each post's
   expected cost reserved before sending, unpriced/None-token answers charged it, never $0;
   every stop is SOFT: in-flight calls are waited for, saved and logged; Host on every route,
-  Origin + token + JSON on every POST; Ctrl-C → 503, drain, exit 130). A paid pass holds
+  Origin + token + JSON on every POST; Ctrl-C → 503, drain, exit 130; the page's buttons live
+  in the template's `/* serve */` section, behind `SERVED()` — `blob.serve` is null in the
+  static file; `force` is never pre-ticked, «Parar» is `POST /api/job/cancel` (soft stop,
+  reason `cancelado`), a job that did not end cleanly un-hides the panel, and an idle page
+  watches `/api/job` against `blob.serve.finished_at`). A paid pass holds
   `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
   `run_topics` requires the `PassLock` handle — so the terminal and the server never lose
   each other's records; `jev topics` refused by it exits 75. `report` and `dashboard` re-read

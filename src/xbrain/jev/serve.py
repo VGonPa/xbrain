@@ -13,8 +13,8 @@ estimate, the confirmation, the one job and its cap); this module routes and gua
   outside that folder however the path is spelled.
 
 Routes: `/` (the page), `/api/data` (its blob), `/api/cards?ids=` (cards by id), `/api/job`
-(the one job), `/_media/…`, and per kind of pass `POST /api/<kind>/estimate` and
-`POST /api/<kind>/evaluate` (`topics` today).
+(the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, and per
+kind of pass `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate` (`topics` today).
 
 Bound to 127.0.0.1 only; there is no option to bind anything else. Ctrl-C stops accepting
 requests, stops the job softly (what is in flight is waited for, saved and logged) and exits
@@ -172,7 +172,13 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _post(self) -> None:
         self._guard(post=True)
-        route = _PASS_ROUTE.match(urlsplit(self.path).path)
+        path = urlsplit(self.path).path
+        if path == "/api/job/cancel":
+            if not isinstance(self._body(), (dict, type(None))):
+                raise refuse("el cuerpo debe ser un objeto JSON ({})")
+            self._json(200, self.server.service.cancel_job())
+            return
+        route = _PASS_ROUTE.match(path)
         if route is None:
             raise ServeError(404, "no existe")
         body = self._body()

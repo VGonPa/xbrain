@@ -2189,3 +2189,88 @@ def test_the_tab_describes_exactly_the_files_page_files_ships(tmp_path):
     assert described == {f["key"] for f in page_files(load_config(tmp_path))}
     assert "CONFIG_FILES[f.key] ||" not in config
     assert "if (!spec) throw new Error(" in config
+
+
+# --------------------------------------------------------------------------- serve mode (PR 10b)
+
+
+def test_the_static_blob_says_it_is_not_served():
+    """`serve` is null in the file `jev dashboard` writes: the page keeps «copiar comando».
+    The server sets it (`jev.serve`: token and cap) — tests/test_jev_serve.py."""
+    item = _item()
+
+    assert _data([item], {})["serve"] is None
+
+
+def _serve_code() -> str:
+    return _script_section(_resource("jev.template.html"), "/* serve */", "/* end serve */")
+
+
+def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_server():
+    serve = _serve_code()
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in serve, sink
+    # Relative URLs only, all in ONE table: the API is this page's own server. Each kind of
+    # pass has its routes (PR 12 adds one); the job slot is one for every kind.
+    assert (
+        "const API = {\n"
+        "  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},\n"
+        "  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',\n"
+        "};" in serve
+    )
+    assert re.findall(r"\bapi\('", serve) == []
+    assert sorted(set(re.findall(r"\bapi\((API[^,)]*)", serve))) == [
+        "API.cancel",
+        "API.data",
+        "API.job",
+        "API[mine.kind].estimate",
+        "API[mine.kind].evaluate",
+    ]
+    assert "'X-Xbrain-Token': DATA.serve.token" in serve
+    assert "http" not in re.sub(r"//.*|/\*.*?\*/", "", serve, flags=re.S)
+
+
+def test_the_serve_words_that_carry_meaning_are_pinned():
+    serve = _serve_code()
+
+    for words in (
+        "'Evaluar este post'",
+        "'Re-evaluar'",
+        "'Evaluar estos posts'",
+        "'Evaluar este topic ('",
+        "' sin evaluar)'",
+        "'Evaluar los '",
+        "' siguientes sin evaluar'",
+        "'Evaluar y pagar'",
+        "'Evaluar y pagar ' + usd(e.usd, 5)",
+        "'Cancelar'",
+        "' Coste estimado: '",
+        "' (coste medio por post de '",
+        "'Tope: '",
+        "' $. Al llegar se para; lo que ya esté en vuelo termina y puede '",
+        "'pasarlo por poco (como mucho '",
+        "'Volver a evaluar también los posts que ya tienen evaluación vigente: se pagan '",
+        "'otra vez y se sustituye su evaluación (antes se guarda una copia)'",
+        "'Parar (se guarda lo ya pagado)'",
+        "'lo paraste desde la página'",
+        "'Recargar la página'",
+        "'No se puede evaluar: '",
+    ):
+        assert words in serve, words
+
+
+def test_the_page_draws_serve_controls_only_when_served():
+    """Every serve control is behind `SERVED()`; the static page keeps «copiar comando»."""
+    template = _resource("jev.template.html")
+
+    assert "const SERVED = () => !!(DATA && DATA.serve);" in template
+    assert "SERVED() ? evalButton(" in template
+
+
+def test_no_two_top_level_functions_share_a_name():
+    """The page is one script: a second `function x(` silently REPLACES the first everywhere.
+    The serve section's `estimateText` did exactly that to the Configuración tab's."""
+    names = re.findall(r"^function (\w+)\(", _resource("jev.template.html"), re.M)
+
+    assert sorted(n for n in set(names) if names.count(n) > 1) == []
