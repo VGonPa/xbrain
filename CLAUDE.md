@@ -645,7 +645,7 @@ generates an Obsidian wiki.
   LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
   life of the corpus it described, and it is the worst kind of wrong in this file, because
   this file is read first and acted on.
-- Jev topic assessment (`xbrain jev topics|report|dashboard|serve`, `src/xbrain/jev/`) — a SIDE-CAR,
+- Jev topic assessment (`xbrain jev topics|report|dashboard|serve|ask|asks`, `src/xbrain/jev/`) — a SIDE-CAR,
   not a pipeline stage. One TypeSafe call per item carries one Noul per vocabulary slug plus a
   primary Choice with an escape option; the probabilities land in `data/jev/topics.json` and
   `jev report` compares them with `enrich` at `[jev].threshold` (default `0.85`), both
@@ -703,8 +703,18 @@ generates an Obsidian wiki.
   watches `/api/job` against `blob.serve.finished_at`). A paid pass holds
   `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
   `run_topics` requires the `PassLock` handle — so the terminal and the server never lose
-  each other's records; `jev topics` refused by it exits 75. `report` and `dashboard` re-read
-  what was paid for, free. Key from
+  each other's records; `jev topics` refused by it exits 75. `jev ask "<query>"` (`jev/ask.py`)
+  asks ONE Noul per post (query verbatim as `true`, same state as topics), caches answers per
+  query in `data/jev/asks/<sha>.json` by contract, keeps each query's last use + the cost-model
+  sums in `asks/index.json`, logs `kind: "ask"` + `query_sha` in runs.jsonl (topics cost views
+  filter it out; `report.ask_cost` prices a query; `jev asks` lists them). Flow shared with PR
+  12's server: `ask.plan_ask` (no lock) → confirm above `[jev].ask_max_usd` → lock, plan again,
+  `same_selection` → `run.run_ask` → `ask.finish_ask` (history rule). Estimate = posts ×
+  per_call + chars / chars_per_token, fitted on paid answers (prior 1,000 and 4.0). `--topic`
+  judges Jev at `[jev].threshold`, never at `--threshold`. It shares — never copies — the
+  pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`),
+  contract shape (`assess.contract`) and
+  lock with topics. `report` and `dashboard` re-read what was paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
   collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:

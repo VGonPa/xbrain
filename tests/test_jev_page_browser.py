@@ -1456,6 +1456,7 @@ _CONFIG_SETTINGS = {
     "fallback": "ninguno",
     "char_limit": 50_000,
     "serve_max_usd": 0.25,
+    "ask_max_usd": 0.5,
 }
 #: Four answers from one model and one from another, named so that name order and count
 #: order disagree.
@@ -1650,6 +1651,7 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
         "Peticiones a la vez",
         "Límite de evidencia",
         "Tope por trabajo de xbrain jev serve",
+        "Tope sin preguntar de xbrain jev ask",
         *[f"Precio de entrada · {p}" for p in sorted(prices)],
     ]
     assert by_name["Umbral"][1] == "0,875por defecto: 0,850"
@@ -1659,6 +1661,8 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     assert by_name["Límite de evidencia"][1] == "50.000 caracterespor defecto: 100.000 caracteres"
     assert by_name["Tope por trabajo de xbrain jev serve"][1] == "0,25 $por defecto: 1,00 $"
     assert by_name["Tope por trabajo de xbrain jev serve"][3] == "[jev].serve_max_usd"
+    assert by_name["Tope sin preguntar de xbrain jev ask"][1] == "0,50 $por defecto: 0,25 $"
+    assert by_name["Tope sin preguntar de xbrain jev ask"][3] == "[jev].ask_max_usd"
     # Most answers first, then by name: here the reverse of name order.
     assert by_name["Modelo que se pedirá"][1] == (
         "jev-9.9.9por defecto: jev-latest · las evaluaciones guardadas no registran qué modelo "
@@ -1672,8 +1676,8 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     intro, output = seen["settings_notes"][0], seen["settings_notes"][-1]
     assert intro.startswith("Umbral, Opción de escape, Límite de evidencia: con estos valores")
     assert (
-        "Modelo que se pedirá, Peticiones a la vez y Tope por trabajo de xbrain jev serve: "
-        "no cambian esta página" in intro
+        "Modelo que se pedirá, Peticiones a la vez, Tope por trabajo de xbrain jev serve y "
+        "Tope sin preguntar de xbrain jev ask: no cambian esta página" in intro
     )
     assert output == "Los tokens de salida son gratis."
 

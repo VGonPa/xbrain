@@ -2059,6 +2059,8 @@ const CONFIG_SETTINGS = {
     why: 'cuánta evidencia de un post se envía; lo que pasa de ahí se corta por el final. Cambiarlo caduca solo los posts cuyo corte se mueve.'},
   serve_max_usd: {name: 'Tope por trabajo de xbrain jev serve', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
     why: 'lo más que puede costar un trabajo lanzado con la API de `xbrain jev serve`: el servidor rechaza un trabajo cuya estimación lo pase, y no envía un post más cuando lo gastado y lo reservado para los posts en curso lo pasarían. `xbrain jev topics` desde la terminal no tiene tope.'},
+  ask_max_usd: {name: 'Tope sin preguntar de xbrain jev ask', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
+    why: 'por encima de esta estimación, `xbrain jev ask` pide confirmación antes de preguntar (`--yes` la da por dada). No cambia nada de esta página.'},
 };
 /** The files, by `config.files` key: what each one is, and the command that creates it. The
     name, path, whether it exists and whether a snapshot carries it are Python's. */

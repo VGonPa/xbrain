@@ -32,6 +32,9 @@ def test_jev_defaults(tmp_path: Path):
     assert cfg.jev_concurrency == 8
     assert cfg.jev_state_char_limit == 100_000
     assert cfg.jev_serve_max_usd == 1.0
+    assert cfg.jev_ask_max_usd == 0.25
+    # `jev ask`'s answers, one file per query plus the history, beside the side-car.
+    assert cfg.jev_asks_dir == tmp_path / "data" / "jev" / "asks"
     assert cfg.jev_dir == tmp_path / "data" / "jev"
     assert cfg.jev_topics_path == tmp_path / "data" / "jev" / "topics.json"
     # The run log sits beside the side-car: same directory, same gitignored `data/`.
@@ -53,6 +56,7 @@ def test_jev_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypat
     monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_CONCURRENCY", 3)
     monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_STATE_CHAR_LIMIT", 4242)
     monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_SERVE_MAX_USD", 0.33)
+    monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_ASK_MAX_USD", 0.07)
     _write_repo(tmp_path)
     cfg = load_config(tmp_path)
     assert cfg.jev_model == "moved-model"
@@ -61,6 +65,7 @@ def test_jev_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypat
     assert cfg.jev_concurrency == 3
     assert cfg.jev_state_char_limit == 4242
     assert cfg.jev_serve_max_usd == 0.33
+    assert cfg.jev_ask_max_usd == 0.07
 
 
 def test_config_example_jev_block_is_the_documented_default(tmp_path: Path):
@@ -74,6 +79,7 @@ def test_config_example_jev_block_is_the_documented_default(tmp_path: Path):
     assert cfg.jev_concurrency == defaults.DEFAULT_CONCURRENCY
     assert cfg.jev_state_char_limit == defaults.DEFAULT_STATE_CHAR_LIMIT
     assert cfg.jev_serve_max_usd == defaults.DEFAULT_SERVE_MAX_USD
+    assert cfg.jev_ask_max_usd == defaults.DEFAULT_ASK_MAX_USD
 
 
 def test_jev_section_round_trips(tmp_path: Path):
@@ -104,6 +110,8 @@ def test_jev_section_round_trips(tmp_path: Path):
         ("state_char_limit = 1", "jev_state_char_limit", 1),
         ("serve_max_usd = 0.0001", "jev_serve_max_usd", 0.0001),
         ("serve_max_usd = 5", "jev_serve_max_usd", 5.0),
+        ("ask_max_usd = 0.0001", "jev_ask_max_usd", 0.0001),
+        ("ask_max_usd = 2", "jev_ask_max_usd", 2.0),
     ],
 )
 def test_jev_accepts_the_edges_of_every_range(tmp_path: Path, jev: str, attr: str, expected):
@@ -139,6 +147,10 @@ def test_jev_accepts_the_edges_of_every_range(tmp_path: Path, jev: str, attr: st
         ('serve_max_usd = "1"', "[jev].serve_max_usd must be a number > 0"),
         ("serve_max_usd = inf", "[jev].serve_max_usd must be a number > 0"),
         ("serve_max_usd = nan", "[jev].serve_max_usd must be a number > 0"),
+        ("ask_max_usd = 0", "[jev].ask_max_usd must be a number > 0"),
+        ("ask_max_usd = true", "[jev].ask_max_usd must be a number > 0"),
+        ("ask_max_usd = inf", "[jev].ask_max_usd must be a number > 0"),
+        ("ask_max_usd = nan", "[jev].ask_max_usd must be a number > 0"),
     ],
 )
 def test_jev_section_rejects_bad_values(tmp_path: Path, bad: str, message: str):
@@ -192,6 +204,7 @@ def test_config_toml_accepts_exactly_the_keys_the_defaults_name(tmp_path: Path):
         "concurrency",
         "state_char_limit",
         "serve_max_usd",
+        "ask_max_usd",
     }
 
 
@@ -203,6 +216,7 @@ _NON_DEFAULT = {
     "concurrency": 3,
     "state_char_limit": 5000,
     "serve_max_usd": 0.25,
+    "ask_max_usd": 0.5,
 }
 
 

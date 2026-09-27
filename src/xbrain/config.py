@@ -101,6 +101,7 @@ class Config:
     jev_concurrency: int
     jev_state_char_limit: int
     jev_serve_max_usd: float
+    jev_ask_max_usd: float
 
     @property
     def payload_dir(self) -> Path:
@@ -166,8 +167,13 @@ class Config:
         return self.jev_dir / ".lock"
 
     @property
+    def jev_asks_dir(self) -> Path:
+        """`jev ask`'s answers, one `<query_sha>.json` per query, and `index.json` (history)."""
+        return self.jev_dir / "asks"
+
+    @property
     def jev_runs_path(self) -> Path:
-        """Append-only log of `jev topics` passes (`jev/store.append_run`), beside the side-car."""
+        """Append-only log of every paid Jev pass — topics and ask (`jev/store.append_run`)."""
         return self.jev_dir / "runs.jsonl"
 
     @property
@@ -232,19 +238,19 @@ def _jev_text(jev: dict, key: str, default: str) -> str:
     return value.strip()
 
 
-def _jev_max_usd(jev: dict, default: float) -> float:
-    """`[jev].serve_max_usd`: a finite number above 0. `inf` would make the cap no cap, and
+def _jev_max_usd(jev: dict, key: str, default: float) -> float:
+    """A `[jev].*_max_usd` cap: a finite number above 0. `inf` would make the cap no cap, and
     `nan` compares false with everything, so every estimate would pass under it."""
-    message = "[jev].serve_max_usd must be a number > 0"
-    value = _jev_number(jev, "serve_max_usd", default, message)
+    message = f"[jev].{key} must be a number > 0"
+    value = _jev_number(jev, key, default, message)
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"config.toml: {message}")
     return value
 
 
-def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float]:
+def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, float]:
     """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit,
-    serve_max_usd)`.
+    serve_max_usd, ask_max_usd)`.
 
     THE DEFAULTS ARE IMPORTED FROM `xbrain.jev.defaults`, NEVER RETYPED (rule 5) — the same
     rule `_index_settings` above shouts about, and the import is LOCAL for the same reason:
@@ -255,6 +261,7 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float]:
     reading a report computed at the default while the file says otherwise.
     """
     from xbrain.jev.defaults import (
+        DEFAULT_ASK_MAX_USD,
         DEFAULT_CONCURRENCY,
         DEFAULT_FALLBACK_OPTION,
         DEFAULT_MODEL,
@@ -288,9 +295,10 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float]:
             raise ValueError(f"config.toml: {message}")
         counts.append(value)
     fallback = _jev_text(jev, "fallback_option", DEFAULT_FALLBACK_OPTION)
-    max_usd = _jev_max_usd(jev, DEFAULT_SERVE_MAX_USD)
+    max_usd = _jev_max_usd(jev, "serve_max_usd", DEFAULT_SERVE_MAX_USD)
+    ask_max_usd = _jev_max_usd(jev, "ask_max_usd", DEFAULT_ASK_MAX_USD)
     model = _jev_text(jev, "model", DEFAULT_MODEL)
-    return model, threshold, fallback, counts[0], counts[1], max_usd
+    return model, threshold, fallback, counts[0], counts[1], max_usd, ask_max_usd
 
 
 def load_config(repo_root: Path) -> Config:
@@ -350,9 +358,15 @@ def load_config(repo_root: Path) -> Config:
         )
     data_dir = repo_root / paths["data_dir"]
     index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
-    jev_model, jev_threshold, jev_fallback, jev_concurrency, jev_char_limit, jev_max_usd = (
-        _jev_settings(settings)
-    )
+    (
+        jev_model,
+        jev_threshold,
+        jev_fallback,
+        jev_concurrency,
+        jev_char_limit,
+        jev_max_usd,
+        jev_ask_max_usd,
+    ) = _jev_settings(settings)
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -386,4 +400,5 @@ def load_config(repo_root: Path) -> Config:
         jev_concurrency=jev_concurrency,
         jev_state_char_limit=jev_char_limit,
         jev_serve_max_usd=jev_max_usd,
+        jev_ask_max_usd=jev_ask_max_usd,
     )

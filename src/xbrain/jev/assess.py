@@ -13,10 +13,11 @@ import json
 import logging
 import threading
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Generic, Protocol, TypeVar
 
 from pydantic import ValidationError
 
@@ -65,7 +66,7 @@ STATE_SURFACE_KEYS: tuple[str, ...] = tuple(
 _STATE_POSITION = {key: n for n, key in enumerate(STATE_SURFACE_KEYS)}
 
 
-def _nfc(text: str) -> str:
+def nfc(text: str) -> str:
     """Unicode-normalise before hashing.
 
     The same visible description in NFC and NFD is two different byte strings. Without this,
@@ -75,7 +76,8 @@ def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
-def _sha256(text: str) -> str:
+def sha256(text: str) -> str:
+    """The hex sha256 of `text` as UTF-8 — every jev contract, digest and query sha."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -176,7 +178,7 @@ def questions_digest(questions: dict[str, Question]) -> str:
         sort_keys=True,
         ensure_ascii=False,
     )
-    return _sha256(_nfc(payload))
+    return sha256(nfc(payload))
 
 
 def topic_contract(state_text: str, digest: str) -> str:
@@ -194,10 +196,19 @@ def topic_contract(state_text: str, digest: str) -> str:
     `digest` is `questions_digest(questions)`, taken as a parameter rather than the question
     map so a run serialises the canonical JSON once instead of once per item.
     """
-    return _sha256("\x1f".join((_CONTRACT_VERSION, _nfc(state_text), digest)))
+    return contract(_CONTRACT_VERSION, state_text, digest)
 
 
-def _record_refusal(exc: ValidationError) -> JevError:
+def contract(version: str, state_text: str, digest: str) -> str:
+    """THE contract shape: sha256(version ∥ state as sent, NFC ∥ questions digest).
+
+    `topic_contract` and `ask.ask_contract` are this with their own `version`, so the two
+    kinds of answer are bound the same way and can never be mistaken for each other.
+    """
+    return sha256("\x1f".join((version, nfc(state_text), digest)))
+
+
+def record_refusal(exc: ValidationError) -> JevError:
     """The seam's Spanish message for an answer this repo's own validators refuse.
 
     Both records built from a Jev answer — `PrimaryChoice` here and `TopicAssessment` in
@@ -265,7 +276,7 @@ def parse_topic_result(
         # The guards above cover the answer's SHAPE; the model still owns its own bounds (a
         # confidence outside [0, 1], a probability that is not one). Wrapped here so this
         # function is total with respect to `JevError` for a direct caller too.
-        raise _record_refusal(exc) from exc
+        raise record_refusal(exc) from exc
     return membership, choice
 
 
@@ -316,7 +327,7 @@ def assess_topics(
             output_tokens=result.output_tokens,
         )
     except ValidationError as exc:
-        raise _record_refusal(exc) from exc
+        raise record_refusal(exc) from exc
 
 
 def _contract_matches(assessment: TopicAssessment | None, state_text: str, digest: str) -> bool:
@@ -495,6 +506,35 @@ def select_items(
     if limit is not None and limit < 1:
         raise JevError("--limit debe ser >= 1")
     digest = questions_digest(build_topic_questions(vocab, fallback))
+
+    def _current(item: Item, state_text: str) -> bool:
+        return _contract_matches(assessments.get(item.id), state_text, digest)
+
+    return select_by_contract(
+        _candidates(store, ids), _current, limit=limit, force=force, char_limit=char_limit
+    )
+
+
+def select_by_contract(
+    candidates: Iterable[Item],
+    is_current: Callable[[Item, str], bool],
+    *,
+    limit: int | None,
+    force: bool,
+    char_limit: int,
+    state_of: Callable[[Item], tuple[str, int]] | None = None,
+) -> Selection:
+    """THE FUNNEL, whatever is being asked: every candidate ends selected, current (its
+    stored record's contract still matches — `is_current(item, state_text)`), evidence-free,
+    or cut by `limit`. `select_items` (topics) and `ask.select_ask_items` (a query) differ only
+    in `is_current`, so the partition `Selection` promises is computed in one place.
+
+    `state_of(item)` → `(state text as sent, pre-cut length)`, when the caller has already
+    built every candidate's state (`ask.plan_ask` builds each one once and reuses it for the
+    estimate and the results); `build_topic_state` otherwise.
+    """
+    if limit is not None and limit < 1:
+        raise JevError("--limit debe ser >= 1")
     selected: list[Item] = []
     # Parallel to `selected`: was this item's stored assessment still current when we took
     # it anyway? Recorded per item rather than counted on the spot so `limit` can cut both
@@ -502,8 +542,12 @@ def select_items(
     was_current: list[bool] = []
     skipped_current = 0
     skipped_no_evidence = 0
-    for item in _candidates(store, ids):
-        state, state_chars = build_topic_state(item, char_limit)
+    for item in candidates:
+        if state_of is None:
+            built, state_chars = build_topic_state(item, char_limit)
+            state_text = built[STATE_KEY]
+        else:
+            state_text, state_chars = state_of(item)
         # Judged on the PRE-cut evidence: an item with evidence but a tiny window has
         # something to ask about, and `evidence_surfaces` already drops blank values.
         if state_chars == 0:
@@ -512,7 +556,7 @@ def select_items(
         # Computed even under `force`, which costs nothing and is the whole point: the
         # answer is what tells a forced re-bill of a current corpus apart from a corpus
         # whose contracts had expired. Skipping the check would make the two identical.
-        current = _contract_matches(assessments.get(item.id), state[STATE_KEY], digest)
+        current = is_current(item, state_text)
         if current and not force:
             skipped_current += 1
             continue
@@ -528,8 +572,20 @@ def select_items(
     )
 
 
+class Keyed(Protocol):
+    """A paid record the pool hands back: all it needs is the post it is about."""
+
+    @property
+    def item_id(self) -> str: ...
+
+
+#: The record one call produces — `TopicAssessment` for a topics pass, `AskAssessment` for an
+#: ask. The pool, the checkpoint and the save are the same for both; only the call differs.
+R = TypeVar("R", bound=Keyed)
+
+
 @dataclass(frozen=True)
-class RunResult:
+class RunResult(Generic[R]):
     """What one run produced: the records, and the reason each failed item failed.
 
     `failed` is not "provider faults" — it also holds records this repo's own validators
@@ -537,7 +593,7 @@ class RunResult:
     `JevError`, so an xbrain bug does not read as N bad answers.
     """
 
-    assessed: tuple[TopicAssessment, ...]
+    assessed: tuple[R, ...]
     failed: tuple[tuple[str, str], ...]  # (item_id, reason)
     #: The run was cancelled from outside (`cancel` set): what was running was waited for and
     #: is in `assessed`/`failed`; `not_asked` posts were never sent.
@@ -567,9 +623,7 @@ def _report_progress(on_progress: Callable[[int, int], None] | None, done: int, 
         )
 
 
-def _deliver_result(
-    on_result: Callable[[TopicAssessment], None] | None, assessment: TopicAssessment
-) -> None:
+def _deliver_result(on_result: Callable[[R], None] | None, assessment: R) -> None:
     """Hand a stored record to the caller's checkpoint, and never let it fail the run.
 
     Guarded exactly like `_report_progress`, for a stronger reason: this hook exists so an
@@ -591,11 +645,11 @@ def _deliver_result(
 
 
 def _land(
-    future: Future[TopicAssessment],
+    future: Future[R],
     item: Item,
-    assessed: list[TopicAssessment],
+    assessed: list[R],
     failed: list[tuple[str, str]],
-    on_result: Callable[[TopicAssessment], None] | None,
+    on_result: Callable[[R], None] | None,
 ) -> bool:
     """One finished call into `assessed` or `failed`; False when it was never sent
     (`CallSkipped`)."""
@@ -616,11 +670,11 @@ def _land(
 
 
 def _collect(
-    futures: dict[Future[TopicAssessment], Item],
+    futures: dict[Future[R], Item],
     cancel: threading.Event | None,
-    assessed: list[TopicAssessment],
+    assessed: list[R],
     failed: list[tuple[str, str]],
-    on_result: Callable[[TopicAssessment], None] | None,
+    on_result: Callable[[R], None] | None,
     on_progress: Callable[[int, int], None] | None,
 ) -> int:
     """Land every call as it finishes; returns how many posts were never sent. Once `cancel`
@@ -653,37 +707,30 @@ def _all_failed(asked: int, failed: list[tuple[str, str]]) -> JevError:
 
 
 def _ask_unless_cancelled(
-    item: Item,
-    questions: dict[str, Question],
-    client: JevClient,
-    char_limit: int,
-    digest: str,
-    cancel: threading.Event | None,
-) -> TopicAssessment:
+    ask_one: Callable[[Item], R], item: Item, cancel: threading.Event | None
+) -> R:
     """A worker's unit: nothing is sent once `cancel` is set — a queued post a worker picks up
     in the instant between the cancel and the queue being emptied is skipped, not asked."""
     if cancel is not None and cancel.is_set():
         raise CallSkipped("cancelado antes de enviar")
-    return assess_topics(item, questions, client, char_limit=char_limit, digest=digest)
+    return ask_one(item)
 
 
-def run_assessments(
+def run_pool(
     items: list[Item],
-    vocab: list[Topic],
-    client: JevClient,
+    ask_one: Callable[[Item], R],
     *,
-    fallback: str,
-    char_limit: int,
     concurrency: int,
     on_progress: Callable[[int, int], None] | None = None,
-    on_result: Callable[[TopicAssessment], None] | None = None,
+    on_result: Callable[[R], None] | None = None,
     cancel: threading.Event | None = None,
-) -> RunResult:
-    """Ask about every item, `concurrency` at a time.
+) -> RunResult[R]:
+    """THE POOL: `ask_one(item)` for every item, `concurrency` at a time — whatever is asked.
 
-    The questions are built and validated ONCE, before the pool opens, and that same object
-    is handed to every worker: a bad vocabulary fails as a single `ValueError` in the
-    caller's thread, not as N identical failures buried in futures.
+    `run_assessments` (the topic questions) and `run.run_ask` (a user's query) are both
+    this function with a different `ask_one`, so the stop rules, the failure accounting and the
+    checkpoint delivery below exist once. `ask_one` makes ONE call and returns the record, or
+    raises; it runs in `concurrency` threads at once.
 
     EVERY worker exception is recorded as that item's failure and the run continues — a
     `JevError` keeps its operator message, anything else is stamped with its type. A run
@@ -705,23 +752,15 @@ def run_assessments(
     What survives an interrupt is whatever `on_result` was already handed. Every successful
     record is delivered to it the moment it is stored, in arrival order, so a caller that
     checkpoints there keeps the work it has paid for.
-
-    `client.ask` is called from `concurrency` threads at once and must be safe to do so; see
-    the `JevClient` protocol.
     """
-    questions = build_topic_questions(vocab, fallback)
     if not items:
         return RunResult(assessed=(), failed=())
-    digest = questions_digest(questions)
-    assessed: list[TopicAssessment] = []
+    assessed: list[R] = []
     failed: list[tuple[str, str]] = []
     pool = ThreadPoolExecutor(max_workers=concurrency)
     try:
         futures = {
-            pool.submit(
-                _ask_unless_cancelled, item, questions, client, char_limit, digest, cancel
-            ): item
-            for item in items
+            pool.submit(_ask_unless_cancelled, ask_one, item, cancel): item for item in items
         }
         not_asked = _collect(futures, cancel, assessed, failed, on_result, on_progress)
     finally:
@@ -738,4 +777,43 @@ def run_assessments(
         failed=tuple(failed),
         cancelled=cancelled,
         not_asked=not_asked,
+    )
+
+
+def run_assessments(
+    items: list[Item],
+    vocab: list[Topic],
+    client: JevClient,
+    *,
+    fallback: str,
+    char_limit: int,
+    concurrency: int,
+    on_progress: Callable[[int, int], None] | None = None,
+    on_result: Callable[[TopicAssessment], None] | None = None,
+    cancel: threading.Event | None = None,
+) -> RunResult[TopicAssessment]:
+    """Ask the topic questions about every item, `concurrency` at a time (`run_pool`).
+
+    The questions are built and validated ONCE, before the pool opens, and that same object
+    is handed to every worker: a bad vocabulary fails as a single `ValueError` in the
+    caller's thread, not as N identical failures buried in futures.
+
+    `client.ask` is called from `concurrency` threads at once and must be safe to do so; see
+    the `JevClient` protocol. How the run stops and what it raises is `run_pool`'s.
+    """
+    questions = build_topic_questions(vocab, fallback)
+    if not items:
+        return RunResult(assessed=(), failed=())
+    digest = questions_digest(questions)
+
+    def _ask_one(item: Item) -> TopicAssessment:
+        return assess_topics(item, questions, client, char_limit=char_limit, digest=digest)
+
+    return run_pool(
+        items,
+        _ask_one,
+        concurrency=concurrency,
+        on_progress=on_progress,
+        on_result=on_result,
+        cancel=cancel,
     )

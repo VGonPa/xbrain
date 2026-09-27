@@ -19,13 +19,22 @@ ways — a recap that disagrees with the bill it recaps.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import Protocol
 
-if TYPE_CHECKING:
-    # Annotations only — `from __future__ import annotations` keeps them strings, so this
-    # module stays importable without dragging in pydantic. `config.py` imports it during
-    # `load_config`, which every command pays for.
-    from xbrain.jev.models import TopicAssessment
+
+class Billed(Protocol):
+    """A paid answer as the bill reads it — a topics `TopicAssessment` or an ask
+    `AskAssessment`: who answered, and how many input tokens it reported (`None`: unknown).
+
+    A Protocol rather than the models, so this module stays importable without pydantic:
+    `config.py` imports it during `load_config`, which every command pays for."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def input_tokens(self) -> int | None: ...
+
 
 #: A moving alias on purpose: TypeSafe's updates are allowed to reach us, and every stored
 #: assessment records the concrete `model` the API answered with.
@@ -44,6 +53,21 @@ DEFAULT_STATE_CHAR_LIMIT = 100_000
 #: flight cost above their reservation. The terminal's `xbrain jev topics` has no cap: its
 #: operator chose the selection on the command line.
 DEFAULT_SERVE_MAX_USD = 1.00
+#: Above this estimate, in USD, `xbrain jev ask` asks before spending (`--yes` skips the
+#: question). A query over the whole corpus is ESTIMATED at ~0.18 $ (`docs/jev.md`, from the
+#: 2026-09-22 corpus figures), so the default lets a whole-corpus ask through and stops a larger
+#: one (a far longer query, a grown corpus).
+DEFAULT_ASK_MAX_USD = 0.25
+#: The provider the CLI builds (`typesafe.PROVIDER` is this constant): what a call not yet
+#: made will be billed as, so an estimate is priced without importing the vendor SDK.
+DEFAULT_PROVIDER = "typesafe"
+#: THE PRIOR of `jev ask`'s cost model, `tokens = posts × per_call + chars / chars_per_token`,
+#: used until paid ask answers of two different sizes let `ask.cost_model` fit both terms.
+#: From a fit over 293 real topics answers (2026-09-27, `docs/jev.md` § Estimate): about 1,050
+#: fixed tokens per call beyond the questions, and 4.3 characters per token on the evidence —
+#: rounded to 1,000 and a lower 4.0, which leans towards more tokens on long posts.
+DEFAULT_ASK_TOKENS_PER_CALL = 1_000
+DEFAULT_CHARS_PER_TOKEN = 4.0
 #: THE `[jev]` keys `config.toml` accepts, each with its default, in the order the
 #: Configuración tab lists them. `config.py` refuses any other key by this list, and the page
 #: states each one's value next to this default — one list, so a new key cannot reach the
@@ -55,6 +79,7 @@ JEV_DEFAULTS: dict[str, str | float | int] = {
     "concurrency": DEFAULT_CONCURRENCY,
     "state_char_limit": DEFAULT_STATE_CHAR_LIMIT,
     "serve_max_usd": DEFAULT_SERVE_MAX_USD,
+    "ask_max_usd": DEFAULT_ASK_MAX_USD,
 }
 
 #: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model
@@ -66,7 +91,7 @@ JEV_DEFAULTS: dict[str, str | float | int] = {
 INPUT_USD_PER_MTOK: dict[str, float] = {"typesafe": 0.042}
 
 
-def input_tokens_total(assessments: Iterable[TopicAssessment]) -> tuple[int, int]:
+def input_tokens_total(assessments: Iterable[Billed]) -> tuple[int, int]:
     """`(counted_tokens, records_without_count)` over `assessments`.
 
     The second number is not decoration. `input_tokens` is `None` whenever the provider
@@ -95,7 +120,7 @@ def tokens_cost_usd(tokens: int, provider: str) -> float:
     return tokens / 1e6 * INPUT_USD_PER_MTOK.get(provider, 0.0)
 
 
-def input_cost_usd(assessments: Iterable[TopicAssessment]) -> float:
+def input_cost_usd(assessments: Iterable[Billed]) -> float:
     """Estimated USD for the INPUT tokens of `assessments`, priced PER RECORD.
 
     Per record, by the provider that ANSWERED it, never one rate for the batch: `assessed`
@@ -130,7 +155,7 @@ def unpriced(providers: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted({p for p in providers if p not in INPUT_USD_PER_MTOK}))
 
 
-def unpriced_providers(assessments: Iterable[TopicAssessment]) -> tuple[str, ...]:
+def unpriced_providers(assessments: Iterable[Billed]) -> tuple[str, ...]:
     """`unpriced` over the providers that answered `assessments`."""
     return unpriced(a.provider for a in assessments)
 

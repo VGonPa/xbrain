@@ -38,12 +38,25 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from xbrain.jev.client import JevError
-from xbrain.jev.models import JevRun, TopicAssessment
+from xbrain.jev.models import (
+    AskAssessment,
+    AskFile,
+    AskIndex,
+    JevRun,
+    TopicAssessment,
+)
 from xbrain.store import _atomic_write
+
+if TYPE_CHECKING:
+    from xbrain.jev.ask import AskQuery
+
+#: The history file inside the asks directory; every other `*.json` there is one query.
+ASK_INDEX = "index.json"
 
 
 def load_assessments(path: Path) -> dict[str, TopicAssessment]:
@@ -145,3 +158,79 @@ def append_run(run: JevRun, path: Path) -> None:
             raise
     finally:
         os.close(fd)
+
+
+# --------------------------------------------------------------------------- `jev ask`
+
+
+def _dump(payload: object, path: Path) -> None:
+    """Pretty, sorted, atomic — the side-car's own reasons (`save_assessments`)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def load_asks(path: Path, query: AskQuery) -> dict[str, AskAssessment]:
+    """One query's answers keyed by post id; `{}` when the query was never asked.
+
+    Same stance as `load_assessments`: a file that exists but cannot be read is REFUSED with
+    its path, never read as empty — that would re-pay every answer in it and then overwrite
+    them. A file whose `query` is another query is refused too: its answers were paid for a
+    different question, and reading them here would present them as answers to this one.
+    """
+    if not path.exists():
+        return {}
+    try:
+        stored = AskFile.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise JevError(f"{path}: consulta guardada ilegible ({exc})") from exc
+    if stored.query != query.text:
+        raise JevError(
+            f"{path} guarda la consulta {stored.query!r}, no {query.text!r}: "
+            "el fichero no corresponde a su nombre; muévelo aparte y vuelve a lanzar"
+        )
+    return dict(stored.assessments)
+
+
+def save_asks(query: AskQuery, records: dict[str, AskAssessment], path: Path) -> None:
+    """Write one query's file whole (atomic): its query and every record, sorted by post id."""
+    stored = AskFile(query=query.text, assessments=dict(sorted(records.items())))
+    _dump(stored.model_dump(mode="json"), path)
+
+
+def ask_files(directory: Path) -> list[Path]:
+    """Every query's answer file under `directory` (not the history), by name."""
+    if not directory.exists():
+        return []
+    return sorted(path for path in directory.glob("*.json") if path.name != ASK_INDEX)
+
+
+def load_ask_file(path: Path) -> AskFile:
+    """A query's file read on its own — for a reader that does not know its query yet (the
+    history rebuilding a lost entry). A file that cannot be read is refused and named as
+    ANOTHER query's, with where to move it: the operator is asking something else, and the
+    fix is to take this file out of the way, not to repair the query they typed."""
+    try:
+        return AskFile.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise JevError(
+            f"{path}: consulta guardada ilegible (otra consulta; sácalo de {path.parent}/ "
+            f"y vuelve a lanzar): {exc}"
+        ) from exc
+
+
+def load_ask_index(path: Path) -> AskIndex:
+    """The query history and the cost calibration; empty before the first query.
+
+    Refused when corrupt — the history is the only list of what was asked, and an empty one
+    saved over it loses it — including an entry filed under another query's sha."""
+    if not path.exists():
+        return AskIndex()
+    try:
+        return AskIndex.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise JevError(f"{path}: historial de consultas ilegible ({exc})") from exc
+
+
+def save_ask_index(index: AskIndex, path: Path) -> None:
+    """Write the history whole (atomic), queries sorted by sha."""
+    _dump(index.model_dump(mode="json"), path)

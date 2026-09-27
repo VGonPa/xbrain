@@ -916,6 +916,43 @@ def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment])
     }
 
 
+def ask_cost_by_query(runs: Sequence[JevRun]) -> dict[str, dict[str, Any]]:
+    """What each `jev ask` query has cost, by `query_sha`: every logged ask pass for it,
+    summed and PRICED NOW through the same row and total as the topics history — so a query's
+    bill and a topics pass's are one formula. Topics passes are not in it."""
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for run in runs:
+        if run.kind == "ask" and run.query_sha is not None:
+            rows.setdefault(run.query_sha, []).append(_run_row(run))
+    return {sha: _history_total(query_rows) for sha, query_rows in rows.items()}
+
+
+def ask_cost(runs: Sequence[JevRun], query_sha: str) -> dict[str, Any]:
+    """What one query has cost (`ask_cost_by_query`'s entry); zero passes when never logged."""
+    return ask_cost_by_query(runs).get(query_sha, _history_total([]))
+
+
+def ask_history_fragment(runs: Sequence[JevRun]) -> str | None:
+    """`N pasadas · M peticiones · <the shared cost sentence>` over every `jev ask` pass, or
+    `None` when there is none — a line BESIDE the topics history, never inside its numbers."""
+    rows = [_run_row(run) for run in runs if run.kind == "ask"]
+    return cost_line(_history_total(rows)) if rows else None
+
+
+def cost_line(total: dict[str, Any]) -> str:
+    """`N pasadas · M peticiones · <the shared cost sentence>` for a `_history_total`."""
+    return (
+        f"{plural(total['runs'], 'pasada', 'pasadas')} · "
+        f"{plural(total['requests'], 'petición', 'peticiones')} · "
+        + jev_cost_fragment(
+            total["input_tokens"],
+            total["input_tokens_unknown"],
+            total["cost_usd"],
+            total["unpriced_providers"],
+        )
+    )
+
+
 def history_fragment(history: dict[str, Any]) -> str:
     """`N pasadas · M peticiones · <the shared cost sentence>`, plus what the log never saw.
 
@@ -925,16 +962,7 @@ def history_fragment(history: dict[str, Any]) -> str:
     """
     total = history["total"]
     if total["runs"]:
-        line = (
-            f"{plural(total['runs'], 'pasada', 'pasadas')} · "
-            f"{plural(total['requests'], 'petición', 'peticiones')} · "
-            + jev_cost_fragment(
-                total["input_tokens"],
-                total["input_tokens_unknown"],
-                total["cost_usd"],
-                total["unpriced_providers"],
-            )
-        )
+        line = cost_line(total)
     else:
         line = "sin pasadas registradas"
     outside = history["out_of_log"]
