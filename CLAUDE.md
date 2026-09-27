@@ -709,7 +709,14 @@ generates an Obsidian wiki.
   `kind: "ask"` + `query_sha` in runs.jsonl (topics cost views filter it out), estimates from
   `prompt_chars`/tokens and confirms above `[jev].ask_max_usd`. It shares — never copies — the
   pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`) and
-  lock with topics. `report` and `dashboard` re-read what was paid for, free. Key from
+  lock with topics. The server runs it as a second kind (`service._AskKind` beside
+  `_TopicsKind`: parse/price/refusal/view/run; the slot, confirmation, re-check, cap and end
+  are shared): `POST /api/ask/estimate|evaluate` (query + `jev ask`'s filters; capped by
+  `serve_max_usd`, not `ask_max_usd`; an all-cached query runs free and is still counted),
+  `GET /api/asks` and `/api/ask/<sha>` = the blob's `asks` (`dashboard.asks_view`: history,
+  results recomputed at build, `report.ask_bill`). The page's Preguntar tab (`#ask`,
+  `/* ask tab */`) draws only `DATA.asks` — static page included; the job panel is `#jobp`.
+  `report` and `dashboard` re-read what was paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
   collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:
