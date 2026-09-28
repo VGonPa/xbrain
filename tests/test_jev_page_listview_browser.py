@@ -184,6 +184,19 @@ const lvView = (listId, barId, pagerIds, dupId) => {
 };
 const lvAsk = () => Object.assign(lvView('ask-list', 'ask-view', ['ask-pager-top', 'ask-pager'], 'ask-dup'), {reach: txt(document.getElementById('ask-reach'))});
 const lvPosts = () => Object.assign(lvView('cards', 'posts-bar', ['pager-top', 'pager'], 'posts-dup'), {count: txt(document.getElementById('count'))});
+// Waits on the PAGE, never on a guessed delay (tests-seat m2): `lvDraws` counts the page's own
+// draws of the list (its `renderAsk` and `renderList`, wrapped: observed, never changed);
+// `lvAfter(act, ok)` runs the reader's action, then waits — paced on the page's clock — for a
+// new draw and, if given, for `ok()`; it throws (an ERROR step) when neither comes.
+let lvDraws = 0;
+{ const a0 = renderAsk, l0 = renderList;
+  renderAsk = function () { const r = a0.apply(this, arguments); lvDraws++; return r; };
+  renderList = function () { const r = l0.apply(this, arguments); lvDraws++; return r; }; }
+const lvTick = () => new Promise(r => setTimeout(r, 10));
+const lvUntil = async (ok, what) => { for (let i = 0; i < 600; i++) { if (ok()) return; await lvTick(); } throw new Error('nunca: ' + what); };
+const lvAfter = async (act, ok) => { const n = lvDraws; await act(); await lvUntil(() => lvDraws > n && (!ok || ok()), 'el dibujo tras la acción'); };
+// The list drawn at all (the page booted, the tab shown).
+const lvReady = () => lvUntil(() => !!document.querySelector(location.hash.startsWith('#ask') ? '#ask-view' : '#posts-bar .segtrack'), 'la lista');
 const lvAuthors = () => { const b = document.getElementById('refine-who-open'); if (b.getAttribute('aria-expanded') !== 'true') b.click();
   return [...document.querySelectorAll('#refine-authors button')].filter(seen).map(x => [x.dataset.author, txt(x.querySelector('.tcount')), x.getAttribute('aria-pressed')]); };
 """
@@ -195,14 +208,16 @@ _READ = (
     + _REFINE_JS
     + _LV_JS
     + r"""
-setTimeout(() => {
+(async () => {
   const pre = document.createElement('pre'); pre.id = 'probe';
   let out;
-  try { out = location.hash.startsWith('#ask') ? Object.assign(lvAsk(), {authors: lvAuthors(), refine: sQRefine()}) : lvPosts(); }
-  catch (e) { out = 'ERROR ' + e.message; }
+  try {
+    await lvReady();
+    out = location.hash.startsWith('#ask') ? Object.assign(lvAsk(), {authors: lvAuthors(), refine: sQRefine()}) : lvPosts();
+  } catch (e) { out = 'ERROR ' + e.message; }
   pre.textContent = JSON.stringify(out);
   document.body.appendChild(pre);
-}, 300);
+})();
 </script>"""
 )
 
@@ -439,25 +454,23 @@ _ASK_MOVE = (
   const pick = (id, value) => { const s = document.getElementById(id); s.value = value; s.dispatchEvent(new Event('change', {bubbles: true})); };
   const pageLink = (n) => [...document.querySelectorAll('#ask-pager a.pn')].find(a => a.textContent === String(n));
   const h0 = history.length;
-  await step('first', async () => { if (!location.hash.startsWith('#ask')) location.hash = '#ask'; await sleep(80); return lvAsk(); });
-  await step('page2', async () => { pageLink(2).click(); await sleep(80); return lvAsk(); });
-  await step('next', async () => { document.querySelector('#ask-pager a.pa[aria-label="Página siguiente"]').click(); await sleep(80); return lvAsk(); });
-  await step('size_down', async () => { pick('ask-view-size', '10'); await sleep(80); return lvAsk(); });
-  await step('size_default', async () => { pick('ask-view-size', '20'); await sleep(80); return lvAsk(); });
-  await step('size_up', async () => { pick('ask-view-size', '50'); await sleep(80); return lvAsk(); });
-  await step('sorted', async () => { document.getElementById('ask-view-sort-recent').click(); await sleep(80); return lvAsk(); });
-  await step('sorted_p2', async () => { pageLink(2).click(); await sleep(80); return lvAsk(); });
-  await step('filtered', async () => { sQSet({'refine-min': '0.3'}); await sleep(80); return lvAsk(); });
-  await step('grouped', async () => { document.getElementById('ask-view-group-author').click(); await sleep(80); return lvAsk(); });
-  await step('go', async () => { pick('ask-view-go', 'size'); await sleep(80); return lvAsk(); });
-  await step('folded', async () => {
-    document.querySelector('#ask-list > .lvhead button').click(); await sleep(80);
-    return lvAsk();
-  });
-  await step('unfolded', async () => { document.querySelector('#ask-list > .lvhead button').click(); await sleep(80); return lvAsk(); });
-  await step('back', async () => { history.back(); await sleep(150); return lvAsk(); });
-  await step('forward', async () => { history.forward(); await sleep(150); return lvAsk(); });
-  await step('reset', async () => { document.getElementById('refine-clear').click(); await sleep(80); return Object.assign(lvAsk(), {refine: sQRefine()}); });
+  const act = async (fn, ok) => { await lvAfter(fn, ok); return lvAsk(); };
+  await step('first', async () => { if (!location.hash.startsWith('#ask')) await lvAfter(() => { location.hash = '#ask'; }); await lvReady(); return lvAsk(); });
+  await step('page2', async () => act(() => pageLink(2).click()));
+  await step('next', async () => act(() => document.querySelector('#ask-pager a.pa[aria-label="Página siguiente"]').click()));
+  await step('size_down', async () => act(() => pick('ask-view-size', '10')));
+  await step('size_default', async () => act(() => pick('ask-view-size', '20')));
+  await step('size_up', async () => act(() => pick('ask-view-size', '50')));
+  await step('sorted', async () => act(() => document.getElementById('ask-view-sort-recent').click()));
+  await step('sorted_p2', async () => act(() => pageLink(2).click()));
+  await step('filtered', async () => act(() => sQSet({'refine-min': '0.3'})));
+  await step('grouped', async () => act(() => document.getElementById('ask-view-group-author').click()));
+  await step('go', async () => act(() => pick('ask-view-go', 'size')));
+  await step('folded', async () => act(() => document.querySelector('#ask-list > .lvhead button').click()));
+  await step('unfolded', async () => act(() => document.querySelector('#ask-list > .lvhead button').click()));
+  await step('back', async () => act(() => history.back()));
+  await step('forward', async () => act(() => history.forward()));
+  await step('reset', async () => Object.assign(await act(() => document.getElementById('refine-clear').click()), {refine: sQRefine()}));
   await step('pushed', async () => history.length - h0);
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
   document.body.appendChild(pre);
@@ -599,14 +612,15 @@ def test_a_zero_minimum_in_the_link_stays_zero_over_a_query_asked_with_one(tmp_p
         + _LV_JS
         + r"""
 (async () => {
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
   const out = {};
-  await sleep(80);
-  out.opened = lvAsk();
-  document.getElementById('ask-view-sort-old').click(); await sleep(80);
-  out.sorted = lvAsk();
-  location.hash = '#ask?q=' + DATA.asks.history[0].sha; await sleep(80);
-  out.plain = lvAsk();
+  try {
+    await lvReady();
+    out.opened = lvAsk();
+    await lvAfter(() => document.getElementById('ask-view-sort-old').click());
+    out.sorted = lvAsk();
+    await lvAfter(() => { location.hash = '#ask?q=' + DATA.asks.history[0].sha; });
+    out.plain = lvAsk();
+  } catch (e) { out.error = 'ERROR ' + e.message; }
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
   document.body.appendChild(pre);
 })();
@@ -615,6 +629,8 @@ def test_a_zero_minimum_in_the_link_stays_zero_over_a_query_asked_with_one(tmp_p
     page = _page(tmp_path, build_page_data(cfg, now=DT), probe)
 
     seen = _dump(page.as_uri() + _ask({"min": "0"}))
+
+    assert "error" not in seen, seen
 
     assert seen["opened"]["reach"].startswith("808 leídos por Jev")
     assert "min=0" in seen["sorted"]["hash"] and "sort=old" in seen["sorted"]["hash"]
@@ -689,17 +705,35 @@ _POSTS_MOVE = (
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
   const key = k => document.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true}));
   const cur = () => { const c = document.querySelector('.card.cur'); return c && c.dataset.id; };
-  await step('first', async () => { await sleep(80); return lvPosts(); });
+  const act = async (fn, ok) => { await lvAfter(fn, ok); return lvPosts(); };
+  const next = () => document.querySelector('#pager a.pa[aria-label="Página siguiente"]').click();
+  const pick = (id, value) => { const s = document.getElementById(id); s.value = value; s.dispatchEvent(new Event('change', {bubbles: true})); };
+  await step('first', async () => { await lvReady(); return lvPosts(); });
+  // j and k draw a new page in the same task (`goTo`): read at once.
   await step('walk', async () => {
     for (let i = 0; i < 12; i++) key('j');
-    await sleep(40);
     return Object.assign(lvPosts(), {cur: cur()});
   });
-  await step('back_up', async () => { key('k'); key('k'); await sleep(40); return Object.assign(lvPosts(), {cur: cur()}); });
-  await step('sorted', async () => { document.getElementById('posts-bar-sort-author').click(); await sleep(80); return lvPosts(); });
+  await step('back_up', async () => { key('k'); key('k'); return Object.assign(lvPosts(), {cur: cur()}); });
+  await step('sorted', async () => act(() => document.getElementById('posts-bar-sort-author').click()));
+  // Tests-seat I2: a sort from page 2, and a rail topic from page 3, start at page 1.
+  await step('sorted_from_p2', async () => {
+    await lvAfter(next, () => lvPosts().bottom.current === '2');
+    return act(() => document.getElementById('posts-bar-sort-recent').click());
+  });
+  await step('topic_from_p3', async () => {
+    await lvAfter(next); await lvAfter(next, () => lvPosts().bottom.current === '3');
+    return act(() => document.querySelector('#rail .tbox button.f').click());
+  });
+  // Tests-seat I3: a grouping and its order picked on the page are written to the hash.
+  await step('grouped', async () => {
+    await lvAfter(() => document.querySelector('.chipx').click());
+    await lvAfter(() => document.getElementById('posts-bar-group-author').click());
+    return act(() => pick('posts-bar-go', 'size'));
+  });
   await step('search', async () => {
     const box = document.getElementById('search');
-    box.value = 'agentic'; box.dispatchEvent(new Event('input')); await sleep(40);
+    box.value = 'agentic'; box.dispatchEvent(new Event('input'));
     return lvPosts();
   });
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
@@ -731,6 +765,22 @@ def test_j_walks_across_pages_and_a_sort_or_a_search_starts_at_page_one(tmp_path
     by_author = [p["id"] for p in _sorted(data["posts"], "author", acc)]
     assert seen["sorted"]["ids"] == by_author[:10] and "page=" not in seen["sorted"]["hash"]
     assert "s=author" in seen["sorted"]["hash"] and "size=10" in seen["sorted"]["hash"]
+    by_recent = _sorted(data["posts"], "recent", acc)
+    from_p2 = seen["sorted_from_p2"]
+    assert "page=" not in from_p2["hash"] and "s=recent" in from_p2["hash"]
+    assert from_p2["ids"] == [p["id"] for p in by_recent[:10]]
+    topic = seen["topic_from_p3"]
+    assert "page=" not in topic["hash"] and "&t=" in topic["hash"]
+    slug = topic["hash"].split("&t=")[1].split("&")[0]
+    assert topic["ids"] == [p["id"] for p in by_recent if slug in p["slugs"]][:10]
+    grouped = seen["grouped"]
+    assert "group=author" in grouped["hash"] and "go=size" in grouped["hash"]
+    groups = _grouped(data["posts"], by_recent, "author", "size", acc)
+    assert [r["head"] for r in grouped["rows"] if "head" in r][:1] == [groups[0][0]]
+    # The hash alone draws the same view (a bookmark, a reload).
+    (tmp_path / "again").mkdir()
+    again = _dump(_page(tmp_path / "again", data, _READ).as_uri() + grouped["hash"])
+    assert (again["rows"], again["bar"]) == (grouped["rows"], grouped["bar"])
     assert (
         seen["search"]["bottom"]["current"] in ("1", None)
         and "page=" not in (seen["search"]["hash"])
@@ -896,9 +946,9 @@ _LAND_PROBE = (
     return {before: Math.round(scrollY), pager_top: Math.round(next.getBoundingClientRect().top), click: () => next.click()};
   };
   await step('ask_bottom', async () => {
-    await sleep(80);
+    await lvReady();
     const b = bottomNext('ask-pager');
-    b.click(); await sleep(150);
+    await lvAfter(() => b.click());
     return {before: b.before, pager_top: b.pager_top, refine_top: top('ask-refine'), scroll: Math.round(scrollY),
       hash: location.hash, focus: focus()};
   });
@@ -906,22 +956,22 @@ _LAND_PROBE = (
     // The view bar on screen, the refine bar's head just above the top: a sort does not scroll.
     scrollTo({top: scrollY + document.getElementById('ask-refine').getBoundingClientRect().top + 40, behavior: 'instant'});
     const before = Math.round(scrollY);
-    document.getElementById('ask-view-sort-recent').click(); await sleep(150);
+    await lvAfter(() => document.getElementById('ask-view-sort-recent').click());
     return {before: before, scroll: Math.round(scrollY), hash: location.hash};
   });
   await step('ask_fold', async () => {
-    document.getElementById('ask-view-group-author').click(); await sleep(150);
+    await lvAfter(() => document.getElementById('ask-view-group-author').click());
     const b = document.querySelector('#ask-list > .lvhead button');
     const id = b.id;
-    b.focus(); b.click(); await sleep(150);
+    b.focus(); await lvAfter(() => b.click());
     const folded = focus();
-    document.activeElement.click(); await sleep(150);
+    await lvAfter(() => document.activeElement.click());
     return {id: id, folded: folded, unfolded: focus()};
   });
   await step('posts_bottom', async () => {
-    location.hash = '#revisar/posts?f=all&size=50&group=author'; await sleep(150);
+    await lvAfter(() => { location.hash = '#revisar/posts?f=all&size=50&group=author'; });
     const b = bottomNext('pager');
-    b.click(); await sleep(150);
+    await lvAfter(() => b.click());
     return {before: b.before, bar_top: top('posts-bar'), scroll: Math.round(scrollY), hash: location.hash, focus: focus()};
   });
   await step('posts_fold', async () => {
@@ -929,9 +979,9 @@ _LAND_PROBE = (
     // is on page 1, and the reader (and the focus) go there with it — no history entry.
     const b = document.querySelector('#cards > .lvhead button');
     const id = b.id, cont = !!b.querySelector('.lvcont'), h0 = history.length;
-    b.focus(); b.click(); await sleep(150);
+    b.focus(); await lvAfter(() => b.click());
     const folded = Object.assign(focus(), {hash: location.hash, on_screen: inView(document.activeElement)});
-    document.activeElement.click(); await sleep(150);
+    await lvAfter(() => document.activeElement.click());
     return {id: id, cont: cont, folded: folded, unfolded: focus(), pushed: history.length - h0};
   });
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
@@ -997,24 +1047,43 @@ _POSTS_BACK = (
   const out = {};
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
   const next = () => document.querySelector('#pager a.pa[aria-label="Página siguiente"]').click();
-  await step('p3', async () => { await sleep(80); next(); await sleep(120); next(); await sleep(120); return lvPosts(); });
-  await step('p4', async () => { next(); await sleep(120); return lvPosts(); });
+  const act = async (fn, ok) => { await lvAfter(fn, ok); return lvPosts(); };
+  const pick = (id, value) => { const s = document.getElementById(id); s.value = value; s.dispatchEvent(new Event('change', {bubbles: true})); };
+  await step('p3', async () => { await lvReady(); await lvAfter(next); return act(next); });
+  await step('p4', async () => act(next));
   await step('search', async () => {
     const box = document.getElementById('search');
-    box.value = document.querySelector('#cards .card').dataset.id; box.dispatchEvent(new Event('input')); await sleep(120);
+    box.value = document.querySelector('#cards .card').dataset.id; box.dispatchEvent(new Event('input'));
     return lvPosts();
   });
-  await step('back', async () => { history.back(); await sleep(200); return Object.assign(lvPosts(), {q: document.getElementById('search').value}); });
-  await step('forward', async () => { history.forward(); await sleep(200); return lvPosts(); });
-  await step('past', async () => { location.hash = '#revisar/posts?f=all&size=10&page=999'; await sleep(200); return lvPosts(); });
+  await step('back', async () => Object.assign(await act(() => history.back()), {q: document.getElementById('search').value}));
+  await step('forward', async () => act(() => history.forward()));
+  await step('past', async () => act(() => { location.hash = '#revisar/posts?f=all&size=10&page=999'; }));
   await step('filter', async () => {
     // A rail filter is a history entry like a sort (arch m1: one rule): Back undoes it.
     const before = location.hash;
     const b = [...document.querySelectorAll('#rail > button.f')].find(x => !x.classList.contains('on') && x.getAttribute('aria-pressed') !== 'true');
-    b.click(); await sleep(200);
+    await lvAfter(() => b.click());
     const moved = location.hash;
-    history.back(); await sleep(200);
+    await lvAfter(() => history.back());
     return {before: before, moved: moved, back: location.hash};
+  });
+  // Tests-seat I1 (arch I2), the seat's two repros: a new size, then Back — the page before,
+  // and its entry, are kept; a grouping dropped, then Back — the same.
+  await step('size_back', async () => {
+    await lvAfter(() => { location.hash = '#revisar/posts?f=all&size=10&page=50'; });
+    const at = lvPosts();
+    const sized = await act(() => pick('posts-bar-size', '100'));
+    const back = await act(() => history.back());
+    const fwd = await act(() => history.forward());
+    return {at: at, sized: sized, back: back, forward: fwd};
+  });
+  await step('group_back', async () => {
+    await lvAfter(() => { location.hash = '#revisar/posts?f=all&group=topic&page=20'; });
+    const at = lvPosts();
+    const flat = await act(() => document.getElementById('posts-bar-group-none').click());
+    const back = await act(() => history.back());
+    return {at: at, flat: flat, back: back};
   });
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
   document.body.appendChild(pre);
@@ -1046,6 +1115,18 @@ def test_posts_back_to_a_bigger_view_keeps_its_page_and_its_history_entry(varied
     last = (len(order) + 9) // 10
     assert seen["past"]["bottom"]["current"] == str(last)
     assert seen["past"]["hash"].endswith(f"size=10&page={last}")
+    size = seen["size_back"]
+    assert size["at"]["ids"] == order[490:500]
+    assert size["sized"]["hash"].endswith("size=100&page=5")
+    assert (
+        size["back"]["hash"].endswith("size=10&page=50") and size["back"]["ids"] == order[490:500]
+    )
+    assert size["back"]["bottom"]["current"] == "50"
+    assert size["forward"]["hash"].endswith("size=100&page=5")
+    group = seen["group_back"]
+    assert group["at"]["bottom"]["current"] == "20" and "group=" not in group["flat"]["hash"]
+    assert group["back"]["hash"].endswith("group=topic&page=20")
+    assert (group["back"]["bottom"]["current"], group["back"]["ids"]) == ("20", group["at"]["ids"])
     f = seen["filter"]
     assert f["moved"] != f["before"] and "page=" not in f["moved"] and f["back"] == f["before"]
 
