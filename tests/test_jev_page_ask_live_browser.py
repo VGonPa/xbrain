@@ -176,10 +176,14 @@ const sLooks = [];
 let sConfirmed = null;
 // While `sHold` is a promise, the page's looks at its stream wait for it before they go out.
 let sHold = null;
+// While `sHoldWatch` is a promise, the idle watch's looks (`/api/job`, no cursor) wait for it.
+let sHoldWatch = null;
 const sFetchLooks = window.fetch;
 window.fetch = function (u, init) {
   const look = String(u).includes('/api/job?since=');
-  const p = look && sHold ? sHold.then(() => sFetchLooks.call(window, u, init)) : sFetchLooks.call(window, u, init);
+  const idle = /\/api\/job$/.test(String(u));
+  const held = look ? sHold : idle ? sHoldWatch : null;
+  const p = held ? held.then(() => sFetchLooks.call(window, u, init)) : sFetchLooks.call(window, u, init);
   if (look) sLooks.push(performance.now());
   if (String(u).includes('/api/ask/evaluate')) p.then(() => { sConfirmed = performance.now(); });
   return p;
@@ -601,6 +605,7 @@ _REASK_PROBE = (
         + r"""
 // Holds the page's looks at its stream (`sHold`) until the returned function is called.
 const sHoldLooks = () => { let go; sHold = new Promise(r => { go = r; }); return () => { sHold = null; go(); }; };
+const sHoldWatchLooks = () => { let go; sHoldWatch = new Promise(r => { go = r; }); return () => { sHoldWatch = null; go(); }; };
 (async () => {
   await sStep('first', async () => {
     location.hash = '#ask';
@@ -651,11 +656,17 @@ const sHoldLooks = () => { let go; sHold = new Promise(r => { go = r; }); return
     await sRelease(7);
     await sJobUntil(j => j.number === c.number && j.done >= 7, 'C: 7');
     const n0 = sLooks.length;
+    // The idle watch is held: only the page's own switch (`switched` → `resume`) can follow C,
+    // not the watch finding it within WATCH_MS (PR 16 re-review M3).
+    const unwatch = sHoldWatchLooks();
     unhold();
-    await sWait(() => askLive && askLive.number === c.number && askLive.answers.length >= 7, 'la página sigue C');
+    const followed = await sWait(() => askLive && askLive.number === c.number && askLive.answers.length >= 7, 'la página sigue C')
+      .then(() => true, () => false);
+    unwatch();
+    if (!followed) return {b: b.number, c: c.number, followed: false};
     const t1 = performance.now();
     await sWait(() => performance.now() - t1 >= 1500, 'un segundo y medio');
-    return {b: b.number, c: c.number, looks: sLooks.length - n0, live: askLive.number,
+    return {b: b.number, c: c.number, followed: true, looks: sLooks.length - n0, live: askLive.number,
       answers: askLive.answers.map(r => r.id), history: sQHistory(), status: sStatus()};
   });
   await sStep('c_end', async () => {
@@ -786,6 +797,8 @@ def test_when_the_followed_job_changes_the_page_follows_the_new_one_without_a_ho
     a bounded number of looks, not a 0 ms loop on a reply it did not take."""
     switch = _step(reasked, "switch")
 
+    # With the idle watch held, the page still follows C: its own switch resumed it.
+    assert switch["followed"] is True, switch
     assert switch["c"] == switch["b"] + 1 and switch["live"] == switch["c"]
     assert sorted(switch["answers"]) == sorted(_ids(7))
     # The held look, three pages of C, and a look or two a second after.

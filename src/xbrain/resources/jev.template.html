@@ -251,7 +251,10 @@ details.hist[open]>summary{margin-bottom:8px}
 .xembed iframe{display:block;width:100%;border:0;border-radius:var(--r-l);color-scheme:normal}
 /* Until X answers, the slot shows the saved copy (`.xwait`: who, when, the text) and X's frame
    loads out of sight under it; X's first height swaps them (`xHeight`), once. */
-.xembed iframe.xhid{position:absolute;top:0;left:0;visibility:hidden;pointer-events:none}
+/* Out of sight is `opacity:0`, never `visibility:hidden` or `display:none`: X does not render a
+   frame it cannot see, so a hidden one never sends the height that would swap it in. Absolute,
+   it takes no room, and the slot keeps the saved copy's height until the swap. */
+.xembed iframe.xhid{position:absolute;top:0;left:0;opacity:0;pointer-events:none}
 .xembed.xgrow{overflow:hidden;transition:height .2s ease-out}
 .xwait>.xby{font-size:14px;line-height:1.3;margin-top:2px}
 .xwait>.xby b{font-weight:600}
@@ -1474,7 +1477,7 @@ const X_ID = /^\d{1,25}$/;
     copy. Any message from X counts: a frame off screen is throttled and sends its height only
     once it is scrolled into view, long after it said it has the post. */
 const X_WAIT_MS = 8000;
-/** A frame's height until X says its own (it loads hidden, under the saved copy). */
+/** A frame's height until X says its own (it loads unseen, under the saved copy). */
 const X_MIN_H = 220;
 /** How long the slot takes to go from the saved copy's height to X's (none with reduced motion). */
 const X_GROW_MS = 200;
@@ -1552,7 +1555,7 @@ function articleBody(p) {
 
 /** A place for X's frame; the frame itself is made when the card comes near the viewport. It
     is never empty: until X answers it shows the saved copy (`xWait`), which costs no network,
-    and X's frame loads hidden under it and takes its place on its first height (`xHeight`). */
+    and X's frame loads unseen under it (drawn, at `opacity:0`) and takes its place on its first height (`xHeight`). */
 function xSlot(p) {
   const slot = el('div', 'xembed');
   slot.dataset.id = p.id;
@@ -1617,6 +1620,10 @@ function xForget() {
 function xFrame(slot) {
   if (!slot.isConnected || slot.querySelector('iframe') || !X_ID.test(slot.dataset.id)) return;
   const f = el('iframe', 'xhid');
+  // Out of sight but drawn (`.xhid`): out of the tab order and of what a reader hears, too,
+  // until X's first height swaps it in (`xHeight`).
+  f.setAttribute('tabindex', '-1');
+  f.setAttribute('aria-hidden', 'true');
   f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox');
   f.setAttribute('referrerpolicy', 'no-referrer');
   f.setAttribute('loading', 'lazy');
@@ -1653,15 +1660,20 @@ function xFallBack(f, why) {
 
 /** The saved copy a card opened on becomes its view: the slot (and X's frame in it) goes, the
     copy stays where it is — the same nodes, with its who-and-when line, so the card keeps its
-    layout — and the note says why. */
+    layout — and the note says why. Above the reader in the live results (which hold the
+    reader's place themselves, `overflow-anchor: none`) the page moves by what the note adds,
+    as `xHeight` does for X's frame: the reader does not. */
 function xSettle(a, wait, why) {
   const slot = wait.parentNode;
+  const above = slot.getBoundingClientRect().top < 0 && a.closest('.asklist');
+  const before = above ? a.getBoundingClientRect().height : 0;
   slot.querySelectorAll('iframe').forEach((f) => clearTimeout(f.xTimer));
   wait.classList.add('settled');
   slot.replaceWith(wait);
   wait.before(el('p', 'xnote', XNOTE[why]));
   const t = a.querySelector('.vtog');
   if (t) t.textContent = 'ver en X';
+  if (above) scrollBy({top: a.getBoundingClientRect().height - before, behavior: 'instant'});
 }
 
 /** X said its frame's height `h`. The first time, the frame takes the saved copy's place: the
@@ -1679,13 +1691,19 @@ function xHeight(f, h) {
     return;
   }
   const before = slot.getBoundingClientRect();
+  // Above the reader in the live results, what moves the reader is the CARD's growth, which
+  // is less than the slot's when the card's other column is taller than the saved copy.
+  const card = before.top < 0 && slot.closest('.asklist') && slot.closest('.card');
+  const cardBefore = card ? card.getBoundingClientRect().height : 0;
   wait.remove();
   f.classList.remove('xhid');
+  f.removeAttribute('tabindex');
+  f.removeAttribute('aria-hidden');
   slot.removeAttribute('aria-busy');
   const after = slot.getBoundingClientRect().height;
   if (Math.abs(after - before.height) < 1) return;
-  if (before.top < 0 && slot.closest('.asklist')) {
-    scrollBy({top: after - before.height, behavior: 'instant'});
+  if (card) {
+    scrollBy({top: card.getBoundingClientRect().height - cardBefore, behavior: 'instant'});
     return;
   }
   if (SCROLL === 'auto' || before.top >= innerHeight || before.bottom <= 0) return;
