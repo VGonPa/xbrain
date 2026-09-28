@@ -741,23 +741,43 @@ the list, and the tests compare each order, group and count with a brute force i
 - **Ordenar** (a segmented control). The list arrives in its **base order** — relevance for an
   ask (Python's ranking: probability, then post id), *más discrepancias* for Posts — and every
   other sort is **stable** over it: ties keep the base order. *Recientes* / *Antiguos* by the
-  post's moment; *Autor A–Z* by the handle as the author filter reads it; *Topic* by enrich's
-  primary topic (its label, A–Z; posts with none last).
+  post's moment; *Autor A–Z* by the handle as the author filter reads it; *Topic A–Z* by
+  enrich's primary topic (its label, A–Z; posts with none last); in Posts, *Más caros* by what
+  Jev's evaluation cost. On a phone the control stays one row that scrolls sideways (a fade at
+  its edge says there is more), with the pressed sort scrolled into view.
 - **Agrupar** (pills): *Sin agrupar*, *Topic*, *Autor*, *Mes* (the post's month in UTC, as the
   day filters read days). Grouped by topic, **a post appears under each of its topics** (an ask
   result's topics are its refine keys' — what the topic filter matches; a Posts card's are its
   `slugs`), and the list says how many entries that makes of how many posts. Each group has a
-  head with its name and count that folds or unfolds it (kept while the page is open); sorting
-  applies within each group. The groups follow each other *con su mejor post primero* (the
-  default: the group holding the best post of the base order — for an ask, the best
-  relevance), *los más grandes primero* or *por nombre* (months newest first); the group of
-  posts without one (*Sin topic*, …) always goes last.
-- **Por página** 10 · 20 · 50 · 100 (and the list's own default when it is not one of them:
-  `[jev].ask_top` for an ask, 50 for Posts), and the **pager** — *k–m de N* and «‹ 1 2 3 … 41
-  ›», each number a link (so the keyboard, the back button and a reload know it; the current
-  page is `aria-current`), over and under the list. A sort, filter or grouping starts at page 1;
-  a new page size keeps the first post you were looking at on the page shown. A page past the
-  last shows the last. The page and its size are in the URL.
+  head with its name and count that folds or unfolds it (kept while the page is open; the
+  focus stays on the head's button, so a second Enter unfolds it); a group that continues from
+  the page before repeats its head, marked *continúa de la página anterior* — folded from
+  there, its head is on the earlier page, and the list goes there with it. Sorting applies
+  within each group. *Grupos* orders them: *Mejor primero* (the default: the group holding the
+  best post of the base order — for an ask, the best relevance), *Más grandes primero* or *Por
+  nombre* (*Por fecha* for months: newest first); the group of posts without one (*Sin topic*,
+  …) always goes last. Month heads read «Septiembre de 2026».
+- The **pager**, over and under the list: *k–m de N*, *Por página* (10 · 20 · 50 · 100, and
+  the list's own default when it is not one of them: `[jev].ask_top` for an ask, 50 for Posts)
+  and «‹ 1 2 3 … 41 ›» — each number a link (so the keyboard, the back button and a reload know
+  it; the current page is `aria-current`; the two pagers are two landmarks with two names).
+  The numbers follow the range on the left, so a page added while an ask streams grows them to
+  the right, never under the pointer. On a phone the top pager is one line — the range, without
+  its noun, and the numbers — and *Por página* is the bottom pager's. A sort, filter or
+  grouping starts at page 1; a new page size keeps the first post you were looking at on the
+  page shown. **Turning a page** brings the list's head to the top of the screen when it was
+  above it (the bottom pager, under twenty cards, is the one people use) and puts the focus on
+  the top pager's new page, so a screen reader says «Página 3, página actual»; a sort or a
+  filter does not scroll, the reader is at the bar already. A page past the last shows the last,
+  and the URL is corrected to it in place (except while an ask runs: its list grows into the
+  page). The page and its size are in the URL, and Back returns to the page you left — the page
+  is checked against the view it opens, never against the one on screen before.
+- **Restablecer**, at the end of the bar, shown only when the view differs from its defaults.
+  In Preguntar it clears every refine too; in Posts it resets the sort, grouping and size (the
+  rail's filter and the search stay).
+- **History**: a sort, a grouping, a size, a page and a filter are each a history entry; typing
+  in the search box replaces the entry (one per keystroke would drown Back). Folding a group is
+  not a view of its own.
 
 ### The Topics tab
 
@@ -901,10 +921,14 @@ reopening a query costs nothing.
   every leading `@` dropped, case ignored — `@@Dana` is `dana`, as in Python; its panel also
   lists the authors among the answers, most first, each with how many answers it keeps under
   the rest of the refine — a click picks one); under them, the [list view](#the-list-view-sort-group-and-pages)'s
-  bar — *Ordenar* (*Relevancia*, the default, *Recientes*, *Antiguos*, *Autor A–Z*, *Topic*),
-  *Agrupar* and *Por página* (10, 20, 50 or 100; `[jev].ask_top` by default) — and the pager,
-  over and under the list, instead of «Ver más». **Restablecer** goes back to every default:
-  no refine, relevance, no grouping, page 1. A panel
+  bar — *Ordenar* (*Relevancia*, the default, *Recientes*, *Antiguos*, *Autor A–Z*, *Topic
+  A–Z*) and *Agrupar* — and the pager, over and under the list, with *Por página* (10, 20, 50
+  or 100; `[jev].ask_top` by default), instead of «Ver más». The line under the query's title
+  says what is shown and in what order — «808 leídos por Jev, de mayor a menor probabilidad.»,
+  «156 con relevancia ≥ 0,50 · 808 leídos por Jev, agrupados por topic, …» — and the pager says
+  which of them are on this page: the range is said once. **Restablecer** (at the end of the
+  bar, shown only when something differs) goes back to every default: no refine, relevance, no
+  grouping, page 1. A panel
   opens with the focus inside, keeps Tab inside, and closes on Escape (focus back on its pill)
   or a click outside; one left open stays open while the refine redraws the list. It
   asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
@@ -922,10 +946,15 @@ reopening a query costs nothing.
 - **While an ask runs** (served), its results **fill in and re-rank live**. Pressing *Preguntar
   y pagar* opens the query's results right away (`#ask?q=<sha>`); the answers the query already
   had are there at once, and each new answer appears **in its ranked place** as Jev gives it —
-  the cards already shown stay as they are (none is drawn again), those pushed past the top
-  go to the next page — the page number never changes under you: on page 2, you stay on page 2
-  while the list grows — except a card on your screen, which stays (the list is briefly
-  longer) until you scroll past it. A card that lands **above** one already on the list says
+  the cards already shown stay as they are (none is drawn again, none is moved: a moved X
+  frame would reload), those pushed past the top go to the next page — the page number never
+  changes under you: on page 2, you stay on page 2 while the list grows (the line says, once,
+  that the page changes as better answers land) — except a card on your screen, which stays
+  (the list is briefly longer) until you scroll past it. **Grouped**, the groups keep the order
+  they were drawn in while the ask runs (a new best answer, or a group growing past another,
+  would otherwise move every card of a group); a new group goes after them, and the end orders
+  them by the rule. The pager is updated in place as the list grows, so a keyboard on it keeps
+  its place. A card that lands **above** one already on the list says
   **nuevo** in verdigris for a few seconds, fading (with reduced motion it does not fade; it
   just goes); the list's first fill, an answer that only extends its end, and the answers the
   query already had are not marked. There is no progress-bar phase: the job block is ONE status

@@ -158,7 +158,7 @@ def _flat(groups, acc) -> list[str]:
 # --------------------------------------------------------------------------- the page's side
 
 #: The list view as a reader sees it: the list's rows (group heads and cards, in order), both
-#: pagers, the view bar's state, the «Mostrando …» line and the note on duplicated entries.
+#: pagers, the view bar's state, the line saying what is shown and the note on duplicated entries.
 _LV_JS = r"""
 const lvSeenPager = (id) => { const p = document.getElementById(id); if (!seen(p)) return null;
   return {range: txt(p.querySelector('.prange')), items: [...p.querySelectorAll('.pnums > *')].filter(seen).map(a => a.textContent),
@@ -176,9 +176,9 @@ const lvView = (listId, barId, pagerIds, dupId) => {
       : {id: k.dataset.id}),
     ids: [...list.children].filter(seen).filter(k => k.matches('.card')).map(k => k.dataset.id),
     top: lvSeenPager(pagerIds[0]), bottom: lvSeenPager(pagerIds[1]),
-    bar: {sort: pressed('.segtrack button'), group: pressed('.lvgrp button'), size: bar.querySelector('select[id$="-size"]').value,
+    bar: {sort: pressed('.segtrack button'), group: pressed('.lvgrp button'), size: document.getElementById(barId + '-size').value,
       go: bar.querySelector('select[id$="-go"]') ? bar.querySelector('select[id$="-go"]').value : null,
-      sizes: [...bar.querySelector('select[id$="-size"]').options].map(o => o.value)},
+      sizes: [...document.getElementById(barId + '-size').options].map(o => o.value)},
     dup: txt(document.getElementById(dupId)),
   };
 };
@@ -271,7 +271,7 @@ def test_each_sort_of_the_results_is_pythons_order(varied, sort):
         "author": "por autor, de la A a la Z",
         "topic": "por topic principal, de la A a la Z",
     }[sort]
-    assert seen["reach"] == f"Mostrando 1–808 de 808 leídos por Jev, {words}."
+    assert seen["reach"] == f"808 leídos por Jev, {words}."
 
 
 @_requires_chrome
@@ -320,11 +320,8 @@ def test_each_grouping_is_pythons_groups_counts_and_order(varied, group, go, sor
     if group == "author":
         assert names == [f"@{key}" for key, _ in groups]
     if group == "month":
-        assert names[0].endswith(" de 2026") and names[0].split()[0] in (
-            "mayo",
-            "junio",
-            "julio",
-        )
+        # A header: capitalised («Mayo de 2026», UX m4).
+        assert names[0].endswith(" de 2026") and names[0].split()[0] in ("Mayo", "Junio", "Julio")
 
 
 # --------------------------------------------------------------------------- Preguntar: pages
@@ -355,7 +352,7 @@ def test_the_pager_pages_pythons_ranking_twenty_at_a_time(varied, page, items, c
         assert pager["range"] == f"{start + 1}–{end} de 808 resultados"
         # ‹ on the first page and › on the last are there, off.
         assert pager["off"] == (["‹"] if n == 1 else ["›"] if n == 41 else [])
-    assert seen["reach"].startswith(f"Mostrando {start + 1}–{end} de 808 leídos por Jev")
+    assert seen["reach"] == "808 leídos por Jev, de mayor a menor probabilidad."
     assert seen["bar"]["size"] == "20" and seen["bar"]["sizes"] == ["10", "20", "50", "100"]
     # Every page link is a link: the keyboard, the back button and a reload know it.
     assert all(h.startswith(f"#ask?q={SHA}") for h in seen["bottom"]["links"])
@@ -619,11 +616,11 @@ def test_a_zero_minimum_in_the_link_stays_zero_over_a_query_asked_with_one(tmp_p
 
     seen = _dump(page.as_uri() + _ask({"min": "0"}))
 
-    assert seen["opened"]["reach"].startswith("Mostrando 1–20 de 808 leídos por Jev")
+    assert seen["opened"]["reach"].startswith("808 leídos por Jev")
     assert "min=0" in seen["sorted"]["hash"] and "sort=old" in seen["sorted"]["hash"]
-    assert seen["sorted"]["reach"].startswith("Mostrando 1–20 de 808 leídos por Jev")
+    assert seen["sorted"]["reach"].startswith("808 leídos por Jev")
     # Without it, the query's own minimum is the default.
-    assert seen["plain"]["reach"].startswith("Mostrando 1–20 de 156 con relevancia ≥ 0,50")
+    assert seen["plain"]["reach"].startswith("156 con relevancia ≥ 0,50")
 
 
 # --------------------------------------------------------------------------- Revisar › Posts
@@ -872,3 +869,253 @@ def test_a_videos_play_mark_never_covers_why_it_has_no_frame_and_an_end_names_it
         "1 … 4 5 6 … 9",
         "1 2 … 7",
     ]
+
+
+# --------------------------------------------------------------------------- PR 17 fix wave
+#: The reader turns a page from the BOTTOM pager (the one used under twenty cards): the list's
+#: head lands at the top of the screen, and the keyboard focus is on the new current page of the
+#: top pager (a screen reader says «Página 3, página actual»). A sort from the bar does not
+#: scroll (the reader is at the bar already). A fold keeps the focus on its own button.
+_LAND_PROBE = (
+    "<script>"
+    + _SEEN
+    + _LV_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
+  const top = (id) => Math.round(document.getElementById(id).getBoundingClientRect().top);
+  const focus = () => { const a = document.activeElement;
+    return {id: a.id || null, tag: a.tagName, label: a.getAttribute('aria-label'), current: a.getAttribute('aria-current'),
+      nav: a.closest('nav') ? a.closest('nav').id : null, expanded: a.getAttribute('aria-expanded')}; };
+  const bottomNext = (pager) => {
+    const next = document.querySelector('#' + pager + ' a.pa[aria-label="Página siguiente"]');
+    next.scrollIntoView({block: 'end', behavior: 'instant'});
+    next.focus();
+    return {before: Math.round(scrollY), pager_top: Math.round(next.getBoundingClientRect().top), click: () => next.click()};
+  };
+  await step('ask_bottom', async () => {
+    await sleep(80);
+    const b = bottomNext('ask-pager');
+    b.click(); await sleep(150);
+    return {before: b.before, pager_top: b.pager_top, refine_top: top('ask-refine'), scroll: Math.round(scrollY),
+      hash: location.hash, focus: focus()};
+  });
+  await step('ask_sort', async () => {
+    // The view bar on screen, the refine bar's head just above the top: a sort does not scroll.
+    scrollTo({top: scrollY + document.getElementById('ask-refine').getBoundingClientRect().top + 40, behavior: 'instant'});
+    const before = Math.round(scrollY);
+    document.getElementById('ask-view-sort-recent').click(); await sleep(150);
+    return {before: before, scroll: Math.round(scrollY), hash: location.hash};
+  });
+  await step('ask_fold', async () => {
+    document.getElementById('ask-view-group-author').click(); await sleep(150);
+    const b = document.querySelector('#ask-list > .lvhead button');
+    const id = b.id;
+    b.focus(); b.click(); await sleep(150);
+    const folded = focus();
+    document.activeElement.click(); await sleep(150);
+    return {id: id, folded: folded, unfolded: focus()};
+  });
+  await step('posts_bottom', async () => {
+    location.hash = '#revisar/posts?f=all&size=50&group=author'; await sleep(150);
+    const b = bottomNext('pager');
+    b.click(); await sleep(150);
+    return {before: b.before, bar_top: top('posts-bar'), scroll: Math.round(scrollY), hash: location.hash, focus: focus()};
+  });
+  await step('posts_fold', async () => {
+    // Page 2 opens on a group continued from page 1: folded from that head, the group's head
+    // is on page 1, and the reader (and the focus) go there with it — no history entry.
+    const b = document.querySelector('#cards > .lvhead button');
+    const id = b.id, cont = !!b.querySelector('.lvcont'), h0 = history.length;
+    b.focus(); b.click(); await sleep(150);
+    const folded = Object.assign(focus(), {hash: location.hash, on_screen: inView(document.activeElement)});
+    document.activeElement.click(); await sleep(150);
+    return {id: id, cont: cont, folded: folded, unfolded: focus(), pushed: history.length - h0};
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_a_page_turned_from_the_bottom_lands_on_the_lists_head_with_the_focus_on_its_page(
+    varied,
+):
+    """PR 17 review C1 + I1 (UX): from the bottom pager, the list's head is at the top of the
+    screen and the focus is on the top pager's new current page; a sort does not scroll; a
+    fold keeps the focus on its button (a stable id), so a second Enter unfolds it."""
+    _, data, page_file = varied
+    root = page_file.parent / "land"
+    root.mkdir(exist_ok=True)
+    page = _page(root, data, _LAND_PROBE)
+
+    seen = _dump(page.as_uri() + _ask({"size": "50"}), window="1280,900")
+
+    _no_error(seen)
+    ask = seen["ask_bottom"]
+    assert ask["before"] > 2000 and ask["hash"].endswith("&size=50&page=2")
+    assert 0 <= ask["refine_top"] <= 10, ask
+    assert ask["focus"] == {
+        "id": "ask-pager-top-p2",
+        "tag": "A",
+        "label": "Página 2",
+        "current": "page",
+        "nav": "ask-pager-top",
+        "expanded": None,
+    }
+    sort = seen["ask_sort"]
+    assert "sort=recent" in sort["hash"] and sort["scroll"] == sort["before"]
+    fold = seen["ask_fold"]
+    assert fold["id"].startswith("ask-list-fold-")
+    assert (fold["folded"]["id"], fold["folded"]["expanded"]) == (fold["id"], "false")
+    assert (fold["unfolded"]["id"], fold["unfolded"]["expanded"]) == (fold["id"], "true")
+    posts = seen["posts_bottom"]
+    assert posts["before"] > 2000 and "page=2" in posts["hash"]
+    assert 0 <= posts["bar_top"] <= 10, posts
+    assert (posts["focus"]["id"], posts["focus"]["current"]) == ("pager-top-p2", "page")
+    pfold = seen["posts_fold"]
+    assert pfold["id"].startswith("cards-fold-") and pfold["cont"] is True
+    assert (pfold["folded"]["id"], pfold["folded"]["expanded"]) == (pfold["id"], "false")
+    assert "page=" not in pfold["folded"]["hash"] and pfold["folded"]["on_screen"] is True
+    assert (pfold["unfolded"]["id"], pfold["unfolded"]["expanded"]) == (pfold["id"], "true")
+    assert pfold["pushed"] == 0
+
+
+#: Posts' back and forward: page 3, then 4 (each a history entry), then a search that leaves
+#: one page (it replaces the entry, like any typing). Back is page 3 of the whole list again.
+_POSTS_BACK = (
+    "<script>"
+    + _SEEN
+    + _LV_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
+  const next = () => document.querySelector('#pager a.pa[aria-label="Página siguiente"]').click();
+  await step('p3', async () => { await sleep(80); next(); await sleep(120); next(); await sleep(120); return lvPosts(); });
+  await step('p4', async () => { next(); await sleep(120); return lvPosts(); });
+  await step('search', async () => {
+    const box = document.getElementById('search');
+    box.value = document.querySelector('#cards .card').dataset.id; box.dispatchEvent(new Event('input')); await sleep(120);
+    return lvPosts();
+  });
+  await step('back', async () => { history.back(); await sleep(200); return Object.assign(lvPosts(), {q: document.getElementById('search').value}); });
+  await step('forward', async () => { history.forward(); await sleep(200); return lvPosts(); });
+  await step('past', async () => { location.hash = '#revisar/posts?f=all&size=10&page=999'; await sleep(200); return lvPosts(); });
+  await step('filter', async () => {
+    // A rail filter is a history entry like a sort (arch m1: one rule): Back undoes it.
+    const before = location.hash;
+    const b = [...document.querySelectorAll('#rail > button.f')].find(x => !x.classList.contains('on') && x.getAttribute('aria-pressed') !== 'true');
+    b.click(); await sleep(200);
+    const moved = location.hash;
+    history.back(); await sleep(200);
+    return {before: before, moved: moved, back: location.hash};
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_posts_back_to_a_bigger_view_keeps_its_page_and_its_history_entry(varied):
+    """PR 17 review I2 (arch): the page of a hash is checked against the view it opens, never
+    the one on screen before — so Back from a one-page search returns to page 3 of the whole
+    list, and the entry is not rewritten. A page past the last still opens the last."""
+    _, data, page_file = varied
+    root = page_file.parent / "back"
+    root.mkdir(exist_ok=True)
+    page = _page(root, data, _POSTS_BACK)
+    order = [p["id"] for p in data["posts"]]
+
+    seen = _dump(page.as_uri() + "#revisar/posts?f=all&size=10")
+
+    _no_error(seen)
+    assert seen["p3"]["ids"] == order[20:30] and seen["p4"]["ids"] == order[30:40]
+    assert seen["search"]["ids"] == [order[30]]
+    back = seen["back"]
+    assert back["hash"].endswith("size=10&page=3") and "q=" not in back["hash"]
+    assert back["ids"] == order[20:30] and back["bottom"]["current"] == "3" and back["q"] == ""
+    assert "q=" in seen["forward"]["hash"] and seen["forward"]["ids"] == [order[30]]
+    last = (len(order) + 9) // 10
+    assert seen["past"]["bottom"]["current"] == str(last)
+    assert seen["past"]["hash"].endswith(f"size=10&page={last}")
+    f = seen["filter"]
+    assert f["moved"] != f["before"] and "page=" not in f["moved"] and f["back"] == f["before"]
+
+
+#: A 375 px frame of the page (headless Chrome keeps a window ≥ 500 px; served, so the frame is
+#: same-origin): the controls over the results and over Posts, measured.
+_PHONE_LV = (
+    "<script>"
+    + r"""
+(async () => {
+  if (window !== window.top) return;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const measure = async (hash, bar, pager, first) => {
+    const phone = document.createElement('iframe');
+    phone.style.cssText = 'width:375px;height:812px;border:0';
+    phone.src = location.pathname + hash;
+    document.body.prepend(phone);
+    await new Promise(r => phone.addEventListener('load', r, {once: true}));
+    const d = phone.contentDocument, w = phone.contentWindow;
+    for (let i = 0; i < 200 && !d.querySelector(first); i++) await sleep(25);
+    await sleep(200);
+    const r = (e) => e.getBoundingClientRect();
+    const track = d.querySelector('#' + bar + ' .segtrack');
+    const buttons = [...track.querySelectorAll('button')];
+    const pressed = track.querySelector('[aria-pressed="true"]');
+    const tops = new Set(buttons.map(b => Math.round(r(b).top)));
+    const range = d.querySelector('#' + pager + ' .prange'), nums = d.querySelector('#' + pager + ' .pnums');
+    const end = d.querySelector('#' + (pager === 'pager-top' ? 'pager' : 'ask-pager') + ' select');
+    const out = {width: w.innerWidth, page: d.documentElement.scrollWidth,
+      controls: Math.round(r(d.querySelector(first)).top - r(d.getElementById(bar)).top),
+      track_rows: tops.size, track_scrolls: track.scrollWidth > track.clientWidth,
+      pressed_seen: r(pressed).left >= r(track).left - 1 && r(pressed).right <= r(track).right + 1,
+      label_inline: Math.abs(r(d.querySelector('#' + bar + ' .lvseg .lvlab')).top - r(track).top) < 12,
+      size_in_pager: !!end && end.checkVisibility(),
+      pager_rows: range && nums ? Math.abs(r(range).top - r(nums).top) < 12 : null};
+    phone.remove();
+    return out;
+  };
+  try {
+    out.ask = await measure('#ask?q=__SHA__&sort=author&group=author', 'ask-view', 'ask-pager-top', '#ask-list > .lvhead');
+    out.posts = await measure('#revisar/posts?f=all&s=cost&group=month', 'posts-bar', 'pager-top', '#cards > .lvhead');
+  } catch (e) { out.error = e.message; }
+  fetch('/probe-done', {method: 'POST', body: JSON.stringify(out)});
+})();
+</script>"""
+).replace("__SHA__", SHA)
+
+
+@_requires_chrome
+def test_at_375_px_the_controls_are_compact_and_the_sort_track_is_one_scrolling_row(varied):
+    """PR 17 review I3 (UX): on a phone the sort track stays ONE row that scrolls (the pressed
+    sort scrolled into view), «Ordenar» sits beside it, «Por página» lives in the bottom pager's
+    row, the top pager's range and page numbers share a line, and the bar plus the pager take
+    ≤ 200 px before the list's first row — grouped, which is the tallest, with the last sort
+    pressed."""
+    from tests.test_jev_page_embed_browser import _live
+
+    _, data, page_file = varied
+    root = page_file.parent / "phone"
+    root.mkdir(exist_ok=True)
+    page = _page(root, data, _PHONE_LV)
+
+    seen = _live(page, "#revisar/posts?f=all")
+
+    assert "error" not in seen, seen
+    for name in ("ask", "posts"):
+        view = seen[name]
+        assert view["width"] == 375 and view["page"] <= 375, (name, view)
+        assert view["track_rows"] == 1 and view["track_scrolls"], (name, view)
+        assert view["pressed_seen"] and view["label_inline"], (name, view)
+        assert view["size_in_pager"] and view["pager_rows"], (name, view)
+        assert view["controls"] <= 200, (name, view)

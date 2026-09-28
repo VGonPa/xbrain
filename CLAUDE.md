@@ -745,7 +745,10 @@ generates an Obsidian wiki.
   list view (`lvSort`/`lvGroups`/`lvPage`/`lvFacet`/`lvPager`/`lvBar`, PR 17): stable over the
   base order, state in the hash (`sort/group/go/size/page`; ask's pre-pager `top` = size), JS
   on purpose (display over shipped fields, no report number), brute-forced against Python in
-  `tests/test_jev_page_listview_browser.py`; a live ask refills the page the hash names. Every answer reaches the page through
+  `tests/test_jev_page_listview_browser.py`; a live ask refills the page the hash names (removing
+  before inserting: a kept node is never moved; grouped, the group order is frozen until the end;
+  the pager updated in place), a page change lands on the list's head with the focus on the top
+  pager's page, and Posts checks the page against the view it draws, never the one before. Every answer reaches the page through
   `ask.answer_view`, as columns (`dashboard.answer_columns`: `{ids, p}` + model/minute once).
   A running ask STREAMS its answers (`GET /api/job?since=<cursor>`, `<number>-<index>`; at most
   `service.STREAM_PAGE` per reply): the query's current answers first, then each one

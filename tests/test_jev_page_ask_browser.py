@@ -244,7 +244,7 @@ def test_static_the_last_query_opens_by_default_and_says_what_it_found(ask_stati
     # Both answers are results, ranked — the old cut at 0,85 showed none.
     assert _probs(view["results"]) == [("4", "0,20"), ("2", "0,10")]
     assert view["empty"] is None and view["more"] is None
-    assert "Mostrando 1–2 de 2 leídos por Jev, de mayor a menor probabilidad." in view["head"]
+    assert "2 leídos por Jev, de mayor a menor probabilidad." in view["head"]
 
 
 @_requires_chrome
@@ -255,7 +255,7 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
     assert view["hash"] == f"#ask?q={shas['hooks']}"
     assert _probs(view["results"]) == _shown(ranked())
     assert [h["current"] for h in view["history"]] == [False, True, False]
-    assert "Mostrando 1–5 de 5 leídos por Jev, de mayor a menor probabilidad." in view["head"]
+    assert "5 leídos por Jev, de mayor a menor probabilidad." in view["head"]
     assert "0,85" not in view["head"]
     for result in view["results"]:
         assert re.fullmatch(r"Lo que vio Jev · 2 fuentes, \d+ caracteres", result["saw"])
@@ -1128,7 +1128,9 @@ def test_static_victors_ask_opens_on_the_first_20_ranked_not_on_nothing(victor_s
     assert [p for _, p in order[:3]] == ["0,80", "0,79", "0,79"]
     assert first["head"].startswith("«En qué topics hablo de agentic engineering?»")
     assert "Filtros: desde 7 may 2026" in first["head"]
-    assert "Mostrando 1–20 de 808 leídos por Jev, de mayor a menor probabilidad." in first["head"]
+    # The line says the set and its order; which of them are on screen is the pager's.
+    assert "808 leídos por Jev, de mayor a menor probabilidad." in first["head"]
+    assert "Mostrando" not in first["head"] and "1–20" not in first["head"]
     assert "0,85" not in first["head"] and first["empty"] is None
     assert first["more"] is None and first["pager"] == "1–20 de 808 resultados"
     assert " · 20 de 808 leídos por Jev · " in first["history"][0]["text"]
@@ -1146,7 +1148,7 @@ def test_static_the_next_page_shows_the_next_20_and_the_hash_keeps_it(victor_sta
     assert _probs(seen["more"]["results"]) == order[20:40]
     assert seen["more"]["pager"] == "21–40 de 808 resultados" and seen["more"]["page"] == "2"
     assert "page=2" in seen["more"]["hash"] and seen["more"]["refine"]["top"] == "20"
-    assert "Mostrando 21–40 de 808" in seen["more"]["head"]
+    assert "808 leídos por Jev" in seen["more"]["head"] and "21–40" not in seen["more"]["head"]
     assert _probs(seen["more2"]["results"]) == order[40:60]
     # Leaving the tab and coming back by its link keeps the refine state and the page.
     assert _probs(seen["away_back"]["results"]) == order[40:60]
@@ -1164,8 +1166,8 @@ def test_static_refining_filters_the_saved_answers_like_python(victor_static):
     assert "page=" not in refined["hash"]
     assert "min=0.5" in refined["hash"] and "t=agentic-engineering" in refined["hash"]
     assert (
-        f"Mostrando 1–{min(20, len(expected.ranked))} de {len(expected.ranked)} con relevancia "
-        "≥ 0,50 que pasan el refinado · 808 leídos por Jev" in refined["head"]
+        f"{len(expected.ranked)} con relevancia ≥ 0,50 que pasan el refinado · 808 leídos por Jev"
+        in refined["head"]
     )
     # Restablecer: back to the query's defaults, the first 20 of every answer.
     cleared = seen["cleared"]
@@ -1368,8 +1370,8 @@ def test_static_a_query_asked_with_a_minimum_opens_at_it_and_ask_top_shapes_the_
     assert len(order) == 156 and len(data["asks"]["history"][0]["answers"]["ids"]) == 808
     assert _probs(first["results"]) == order[:7]
     assert (
-        "Mostrando 1–7 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev, de mayor a menor "
-        "probabilidad." in first["head"]
+        "156 con relevancia ≥ 0,50 · 808 leídos por Jev, de mayor a menor probabilidad."
+        in first["head"]
     )
     assert first["refine"]["min"] == "0.5" and first["refine"]["top"] == "7"
     assert first["more"] is None and first["pager"] == "1–7 de 156 resultados"
@@ -1596,7 +1598,7 @@ def test_served_refining_changes_the_list_with_no_request_and_no_client(victor_s
     assert _probs(step["more"]["results"]) == _shown2(_refined(cfg).ranked)[20:40]
     # A refine starts again at page 1.
     assert _probs(step["min"]["results"]) == _shown2(_refined(cfg, minimum=0.5).ranked)[:20]
-    assert "Mostrando 1–20 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev" in step["min"]["head"]
+    assert "156 con relevancia ≥ 0,50 · 808 leídos por Jev" in step["min"]["head"]
     topic = step["topic"]
     expected = _shown2(_refined(cfg, minimum=0.3, topics=("startups",)).ranked)
     assert _probs(topic["results"]) == expected[:20]
