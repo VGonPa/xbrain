@@ -304,8 +304,11 @@ _PROBE = (
     const grow = {on: slot.classList.contains('xgrow'), inline: slot.style.height,
       transition: getComputedStyle(slot).transitionProperty, top: Math.round(at.top), bottom: Math.round(at.bottom), vh: innerHeight};
     const now = sCard(A);
-    await until(() => !slot.classList.contains('xgrow') && !slot.style.height, 3000);
-    await sleep(100);
+    // Waits on the page, not a guessed delay (under load a fixed 100 ms read the slot before
+    // the observer had reported its last height): the grow ends, then the observer has seen
+    // the height the slot settled at.
+    await until(() => !slot.classList.contains('xgrow') && !slot.style.height, 15000);
+    await until(() => heights[heights.length - 1] === Math.round(slot.getBoundingClientRect().height), 15000);
     watch.disconnect();
     return {a: now, b_before: other, b: sCard(B).frame.height, heights: heights, grow: grow,
       settled: {height: Math.round(slot.getBoundingClientRect().height), grow: slot.classList.contains('xgrow'),

@@ -123,8 +123,12 @@ const key = k => document.dispatchEvent(new KeyboardEvent('keydown', {key: k, bu
 const cur = () => { const c = document.querySelector('.card.cur'); return c && c.dataset.id; };
 const railButtons = () => [...document.querySelectorAll('#rail > button.f')].filter(seen);
 const topicButtons = () => [...document.querySelectorAll('#rail .tbox button.f')];
-const drawAll = async () => { while (seen(document.getElementById('more'))) { document.getElementById('more').click(); await sleep(5); } };
-const cards = async () => { await drawAll(); return seenCards(document.getElementById('cards')); };
+// The list is paged (PR 17): `pages(read)` reads every page, walking the pager's «›» as a
+// reader would, and leaves the list on its last page.
+const pages = async (read) => { const out = []; for (;;) { out.push(...read());
+  const next = document.querySelector('#pager a.pa[aria-label="Página siguiente"]');
+  if (!seen(next)) return out; next.click(); await sleep(10); } };
+const cards = async () => pages(() => seenCards(document.getElementById('cards')));
 (async () => {
   await sleep(100);
   const out = {view: {f: view.f, count: count()}, filters: {}, topics: {}, all_topics: {}};
@@ -133,7 +137,8 @@ const cards = async () => { await drawAll(); return seenCards(document.getElemen
     const b = railButtons().find(x => x.firstChild.textContent === name);
     const rail = num(txt(b.lastChild));
     b.click(); await sleep(10);
-    out.filters[name] = {rail: rail, list: count(), ids: await cards(), hash: location.hash};
+    // The hash first: reading every page walks the pager, which moves it.
+    out.filters[name] = {rail: rail, list: count(), hash: location.hash, ids: await cards()};
   }
   railButtons().find(b => b.firstChild.textContent === 'Con discrepancias').click(); await sleep(10);
   for (const b of topicButtons()) {
@@ -165,21 +170,23 @@ const cards = async () => { await drawAll(); return seenCards(document.getElemen
     out.all_topics[b.firstChild.textContent] = await cards();
     b.click(); await sleep(10);
   }
-  // Todos: fifty cards, then fifty more once j walks past them.
+  // Todos: fifty cards, then the next fifty — page 2 — once j walks past them.
   railButtons().find(b => b.firstChild.textContent === 'Todos').click(); await sleep(10);
   out.drawn_first = seenCards(document.getElementById('cards')).length;
   for (let i = 0; i < 55; i++) key('j');
   out.drawn_after = seenCards(document.getElementById('cards')).length;
-  out.j_cursor = cur(); out.j_expected = shown[54].id;
+  out.j_cursor = cur(); out.j_expected = shown[54].x.id;
   // Re-clicking the view redraws the list and resets the cursor (the same hash would not).
   railButtons().find(b => b.firstChild.textContent === 'Todos').click(); await sleep(10);
   key('n'); const n1 = cur(); key('n'); const n2 = cur(); key('p'); const p1 = cur();
   out.n = [n1, n2, p1];
   // Sin evaluar: which cards offer the command, which say there is no evidence.
   railButtons().find(b => b.firstChild.textContent === 'Sin evaluar por Jev').click(); await sleep(10);
-  await drawAll();
-  out.copy_ids = [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && seen(c.querySelector('.ask button'))).map(c => c.dataset.id);
-  out.no_evidence_ids = [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && c.textContent.includes('sin evidencia')).map(c => c.dataset.id);
+  const sinEvaluar = async () => { railButtons().find(b => b.firstChild.textContent === 'Sin evaluar por Jev').click(); await sleep(10); };
+  out.copy_ids = await pages(() => [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && seen(c.querySelector('.ask button'))).map(c => c.dataset.id));
+  await sinEvaluar();
+  out.no_evidence_ids = await pages(() => [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && c.textContent.includes('sin evidencia')).map(c => c.dataset.id));
+  await sinEvaluar();
   // What a card says about Jev's review of its topics, and where: its head and its Jev block.
   out.status = Object.fromEntries(['stale', 'never'].map(id => {
     const c = document.getElementById('post-' + id);
@@ -238,7 +245,8 @@ setTimeout(() => {
   const pre = document.createElement('pre'); pre.id = 'probe';
   pre.textContent = JSON.stringify({q: view.q, f: view.f, search: document.getElementById('search').value,
     banner_hidden: document.getElementById('banner').hidden, count: txt(document.getElementById('count')),
-    cards: seenCards(document.getElementById('cards')), more_shown: seen(document.getElementById('more'))});
+    cards: seenCards(document.getElementById('cards')),
+    more_shown: seen(document.querySelector('#pager .pnums'))});
   document.body.appendChild(pre);
 }, 200);
 </script>
@@ -512,7 +520,8 @@ def test_fifty_cards_at_a_time_and_j_walks_into_the_next_fifty(probed):
     _data_, seen = probed
 
     assert seen["drawn_first"] == 50
-    assert seen["drawn_after"] == 100
+    # j past the fiftieth post turned the page: page 2 holds the next fifty (or what is left).
+    assert seen["drawn_after"] == min(50, seen["filters"]["Todos"]["list"] - 50)
     assert seen["j_cursor"] == seen["j_expected"]
 
 
@@ -623,7 +632,7 @@ def test_a_malformed_hash_opens_the_page_instead_of_breaking_it(tmp_path, hash_)
 
     assert seen["banner_hidden"] is True
     assert seen["count"].startswith("mostrando")
-    # One post, all drawn: no "Mostrar 0 más" button left on screen.
+    # One post, one page: no pager numbers on screen.
     assert seen["more_shown"] is False
 
 

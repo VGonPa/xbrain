@@ -3228,32 +3228,51 @@ def _refine_words(refine: AskFilters) -> str:
 
 
 def _echo_ask_results(
-    results: AskResults, minimum: float, top: int | None, refine: AskFilters | None = None
+    results: AskResults,
+    minimum: float,
+    top: int | None,
+    refine: AskFilters | None = None,
+    page: int | None = None,
 ) -> None:
-    """The results RANKED, the first `top` (every one when None): probability as a number and
-    a bar, id, author, day, the post, its link; then how many more there are.
+    """The results RANKED, page `page` of `top` each (every one when `top` is None): probability
+    as a number and a bar, id, author, day, the post, its link; then how many more there are.
+    A page past the last is refused, naming how many there are (the page's pager counts the
+    same way: `jev asks 1 --top 20 --page 3` is the page's page 3 at 20 per page). `page` None:
+    the command has no `--page` (`jev ask`), so the tail does not offer one.
 
     The header counts what the list holds: «los 20 primeros de 187 que pasan el refinado
     (topic …) con relevancia ≥ 0.5 · 808 leídos por Jev» — the refine (`jev asks … --topic`)
     and the minimum both named, so shown + «y N más» adds up to the number said."""
+    paged = page is not None
+    page = page or 1
     total = len(results.ranked)
-    shown = total if top is None else min(top, total)
+    size = total if top is None else top
+    pages = max(1, -(-total // size)) if size else 1
+    if page > pages:
+        raise ValueError(f"--page {page} no existe: hay {plural(pages, 'página', 'páginas')}")
+    start = (page - 1) * size
+    end = total if top is None else min(start + top, total)
+    shown = end - start
     read = plural(results.answered, "leído por Jev", "leídos por Jev")
-    which = f"los {shown} primeros" if shown < total else f"los {shown}"
+    if page > 1:
+        which = f"los {start + 1}–{end}"
+    else:
+        which = f"los {shown} primeros" if shown < total else f"los {shown}"
     words = _refine_words(refine) if refine is not None else ""
     what = f"{total} que pasan el refinado ({words})" if words else f"{total}"
     if minimum > 0:
         what += f" con relevancia ≥ {minimum}"
     of = f"{what} · {read}" if words or minimum > 0 else read
     typer.echo(f"Resultados: {which} de {of}, de mayor a menor probabilidad")
-    for item, record in results.ranked[:shown]:
+    for item, record in results.ranked[start:end]:
         typer.echo(
             f"  {record.probability:.2f} {_bar(record.probability)}  {item.id}  "
             f"@{item.author.handle}  {item.created_at:%Y-%m-%d}  {_one_line(item.text, 70)}  "
             f"{item.url}"
         )
-    if shown < total:
-        typer.echo(f"  … y {total - shown} más (--top N o --all para verlos)")
+    if end < total:
+        more = f"--page {page + 1} para la siguiente página, " if paged else ""
+        typer.echo(f"  … y {total - end} más ({more}--top N o --all para verlos)")
 
 
 @jev_app.command("asks")
@@ -3277,15 +3296,25 @@ def jev_asks_cmd(
         None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
     ),
     show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+    page: int = typer.Option(
+        1, "--page", help="Qué página imprimir, de --top en --top (1 = la primera)"
+    ),
 ) -> None:
     """Las consultas hechas con `jev ask`: cuándo, cuántas veces, su último uso y lo que han
     costado (del registro de pasadas). Con una consulta (`jev asks 1`), reimprime sus
-    resultados guardados, refinados con --min/--topic/--since/--until/--author/--top: no
+    resultados guardados, refinados con --min/--topic/--since/--until/--author, de --top en
+    --top (--page N para la página N, como la paginación de la pestaña Preguntar): no
     pregunta nada, no construye cliente y no cuesta nada. Solo lee."""
     cfg = _config()
     history = load_history(cfg)
     entries = sorted(history.queries.values(), key=lambda e: e.last_asked_at, reverse=True)
-    refining = any((topic, since, until, author, minimum is not None, top is not None, show_all))
+    refining = any(
+        (topic, since, until, author, minimum is not None, top is not None, show_all, page != 1)
+    )
+    if page < 1:
+        raise ValueError("--page debe ser >= 1")
+    if show_all and page != 1:
+        raise ValueError("--page no va con --all: --all imprime todos en una sola página")
     if which is not None:
         _reprint_ask(
             cfg,
@@ -3293,6 +3322,7 @@ def jev_asks_cmd(
             _ask_filters(topic, since, until, author, False),
             minimum,
             _ask_shown(cfg, minimum or 0.0, top, show_all),
+            page,
         )
         return
     if refining:
@@ -3346,6 +3376,7 @@ def _reprint_ask(
     refine: AskFilters,
     minimum: float | None,
     top: int | None,
+    page: int = 1,
 ) -> None:
     """A saved query's results, refined (`ask.refine_results`), from its file: no client."""
     jev = load_jev_pairs(cfg)
@@ -3355,7 +3386,7 @@ def _reprint_ask(
         found, refine, used, store=jev.store, jev=jev, threshold=cfg.jev_threshold
     )
     typer.echo(f"«{entry.query}» · {entry.last_asked_at:%Y-%m-%d}")
-    _echo_ask_results(refined, used, top, refine)
+    _echo_ask_results(refined, used, top, refine, page)
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:

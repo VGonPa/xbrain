@@ -199,7 +199,7 @@ serve_max_usd = 1.0
 # is ESTIMATED at ~0.18 $ (docs/jev.md, from the 2026-09-22 corpus figures).
 ask_max_usd = 0.25
 # How many of a query's results `xbrain jev ask` prints (`--top N`, `--all`) and the Preguntar
-# tab shows at first («Ver más» adds as many again). Results are ranked by how sure Jev is that
+# tab shows per page by default (its «Por página» offers 10, 20, 50 and 100). Results are ranked by how sure Jev is that
 # the post answers, best first; `[jev].threshold` above is the TOPIC bar and does not cut them.
 ask_top = 20
 # Output, all under <data_dir>/jev/: topics.json (the assessments), asks/ (each query's

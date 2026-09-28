@@ -136,12 +136,15 @@ const sLiveView = () => ({
   ids: sQResults().map(r => r.id),
   nuevo: [...document.querySelectorAll('#ask-list > .card')].filter(c => seen(c.querySelector('.askr .nuevo'))).map(c => c.dataset.id),
   more: txt(sId('ask-more')),
+  pager: txt(document.querySelector('#ask-pager .prange')),
+  page: txt(document.querySelector('#ask-pager [aria-current="page"]')),
   empty: txt(sId('ask-empty')),
   number: askLive ? askLive.number : null,
   live: sId('ask-list') ? sId('ask-list').dataset.live || null : null,
   min: askView.refine.min,
   hash: location.hash,
   scroll: Math.round(scrollY),
+  focus: document.activeElement ? document.activeElement.id || document.activeElement.tagName : null,
 });
 // Observed, never changed: what the list showed right after each look added answers, and
 // right before the job's end replaced it.
@@ -189,7 +192,7 @@ window.fetch = function (u, init) {
   return p;
 };
 const sRelease = (n) => sFetch0.call(window, '/probe-release', {method: 'POST', body: String(n)});
-const sAnswered = (k) => sWait(() => (txt(sId('ask-reach')) || '').includes(' de ' + k + ' respondidos hasta ahora'), k + ' respuestas');
+const sAnswered = (k) => sWait(() => (txt(sId('ask-reach')) || '').startsWith(k + ' respondidos hasta ahora'), k + ' respuestas');
 // The job block while an ask runs: one status line right over the gallery.
 const sStatus = () => { const box = sId('jobp'), bar = box.querySelector('[role=progressbar]');
   return {text: txt(sId('ask-progress')), slim: box.classList.contains('slim'), shown: seen(box),
@@ -349,6 +352,11 @@ def live(tmp_path_factory) -> dict[str, Any]:
     return seen
 
 
+def _range(n: int) -> str:
+    """The first page's range as the gallery line says it: «1–n», or «0» with nothing."""
+    return f"1–{n}" if n else "0"
+
+
 def _ids(n: int) -> list[str]:
     """The ids of the first `n` posts the pool asks (selection order = store order): after
     `n` released, exactly these have answered."""
@@ -378,10 +386,10 @@ def test_the_live_list_opens_empty_under_the_asked_query_and_the_rail_says_it_ru
     assert start["hash"].startswith("#ask?q=") and start["live"]
     assert start["ids"] == [] and start["more"] is None
     assert start["empty"].startswith("Aún no ha llegado ninguna respuesta")
-    # The gallery's line says what it shows; k of N is the status line's, not said twice.
-    assert (
-        start["reach"] == "Mostrando 0 de 0 respondidos hasta ahora, de mayor a menor probabilidad."
-    )
+    # The gallery's line says what it shows; k of N is the status line's and the window the
+    # pager's: none said twice.
+    assert start["reach"] == "0 respondidos hasta ahora, de mayor a menor probabilidad."
+    assert start["pager"] == "0 de 0 resultados"
     # No bar-only phase: the job block is already one status line — under the query's title,
     # over the refine bar and the (empty) gallery.
     status = start["status"]
@@ -414,9 +422,8 @@ def test_every_answer_arrives_once_and_each_look_shows_the_ranked_top(live):
         # Past the top: only cards that were already there, still in rank order.
         assert set(look["ids"][TOP:]) <= set(look["before"]), look
         assert look["ids"] == [post for post in expected if post in set(look["ids"])], look
-        assert look["reach"].startswith(
-            f"Mostrando {min(len(expected), TOP)} de {len(so_far)} respondidos hasta ahora"
-        )
+        assert look["reach"].startswith(f"{len(so_far)} respondidos hasta ahora"), look
+        assert look["pager"].startswith(f"{_range(min(len(expected), TOP))} de {len(expected)} ")
         _nuevo_rule(look, expected)
     assert sorted(so_far) == sorted(PLANNED) and len(so_far) == len(set(so_far))
 
@@ -438,8 +445,8 @@ def test_a_new_answer_lands_in_its_ranked_place_and_the_cards_there_stay(live):
     assert anchored["ids"] == ranked8[:TOP] + held
     assert anchored["tags"] == [("w1" if post in _ids(4) else None) for post in anchored["ids"]]
     assert set(_ids(8)[4:]) <= set(anchored["nuevo"])
-    left = 2 - len(held)
-    assert anchored["more"] == (f"Ver {left} más (quedan {left})" if left else None)
+    # The pager (PR 17) counts the page as it is: the six of page 1 of eight answers.
+    assert anchored["more"] is None and anchored["pager"] == "1–6 de 8 resultados"
 
 
 @_requires_chrome
@@ -488,9 +495,9 @@ def test_the_free_refine_works_while_the_ask_runs(live):
     assert after["ids"] == _ranked(_ids(16), 0.6)[:TOP]
     over = len(_ranked(_ids(16), 0.6))
     assert after["reach"] == (
-        f"Mostrando {over} de 16 respondidos hasta ahora · "
-        f"{over} con relevancia ≥ 0,60, de mayor a menor probabilidad."
+        f"16 respondidos hasta ahora · {over} con relevancia ≥ 0,60, de mayor a menor probabilidad."
     )
+    assert after["pager"].startswith(f"{_range(over)} de {over} ")
     # The status line counts at the refine's minimum once one is set.
     assert after["status"]["text"].startswith(
         f"Preguntando… 16 de {POSTS} · {over} con relevancia ≥ 0,60 · "
@@ -539,11 +546,11 @@ def test_the_final_list_is_finish_asks_ranking_in_the_live_order(live):
     # Complete, the live list already WAS that ranking under the reader's refine; the end
     # replaced it with the blob's row and nothing moved.
     expected = [post for post, p in ranking if p >= 0.6][:TOP]
-    assert f" de {POSTS} respondidos hasta ahora" in end["before_end"]["reach"]
+    assert end["before_end"]["reach"].startswith(f"{POSTS} respondidos hasta ahora")
     assert live_order == expected == end["ids"]
     # Its refine stayed; the head is the history's now.
     assert "min=0.6" in end["hash"] and end["live"] is None
-    assert end["reach"].startswith(f"Mostrando {TOP} de ")
+    assert end["pager"].startswith(f"1–{TOP} de ") and "leídos por Jev" in end["reach"]
     assert end["history"][0]["text"].startswith(LIVE_QUERY + " · ")
     assert "en curso" not in end["history"][0]["text"]
 
@@ -722,9 +729,9 @@ def test_asked_again_the_live_list_opens_at_the_querys_minimum_with_its_answers(
     assert first["ids"] == _reranked(cached, 0.5) == cached
     assert first["nuevo"] == []
     assert first["reach"] == (
-        "Mostrando 2 de 2 respondidos hasta ahora · 2 con relevancia ≥ 0,50, "
-        "de mayor a menor probabilidad."
+        "2 respondidos hasta ahora · 2 con relevancia ≥ 0,50, de mayor a menor probabilidad."
     )
+    assert first["pager"] == "1–2 de 2 resultados"
     # The status line counts this job's answers only: the two it had are not «relevantes» of it.
     assert re.fullmatch(rf"Preguntando… 0 de {POSTS - 2} · {_USD} gastado", first["status"]["text"])
 
@@ -752,7 +759,7 @@ def test_asked_again_cached_answers_are_never_nuevo_and_the_list_never_recuts_at
     # The end takes the blob's row at the SAME minimum: the live list was already it.
     final = _reranked(so_far, 0.5)[:TOP]
     assert end["before_end"]["ids"] == final == end["ids"]
-    assert "min=" not in end["hash"] and end["reach"].startswith(f"Mostrando {TOP} de ")
+    assert "min=" not in end["hash"] and end["pager"].startswith(f"1–{TOP} de ")
 
 
 @_requires_chrome
@@ -982,3 +989,246 @@ def test_a_running_ask_is_looked_at_at_once_then_about_every_second(live):
     # A retry after a failed look would be 500 ms; a look is never hurried or lagging.
     assert 950 <= gaps[len(gaps) // 2] <= 1100
     assert gaps[0] >= 900
+
+
+# ------------------------------------------------------------------ PR 17: the page holds
+
+#: The reader on page 2 of 2 per page (a link: `size=2&page=2`) while the stream grows the
+#: list: every look shows ranks 3–4 of the answers so far, and the page never changes.
+_PAGED_PROBE = (
+    (
+        "<script>"
+        + _SERVE_JS
+        + _ASK_JS
+        + _REFINE_JS
+        + _LIVE_JS
+        + r"""
+(async () => {
+  await sStep('start', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')), 'el formulario');
+    sId('ask-q').value = '__QUERY__';
+    sId('ask-q').dispatchEvent(new Event('input', {bubbles: true}));
+    sPress(sId('ask-form'), 'Estimar lo que cuesta');
+    await sWait(() => sPanel().go, 'la estimación');
+    sId('ask-go').click();
+    await sWait(() => sId('ask-list') && sId('ask-list').dataset.live && location.hash.startsWith('#ask?q='), 'la lista en vivo');
+    location.hash = '#ask?q=' + askLive.sha + '&size=2&page=2';
+    await sWait(() => location.hash.endsWith('&size=2&page=2') && sId('ask-list') && sId('ask-list').dataset.live, 'la página 2');
+    scrollTo({top: 0, behavior: 'instant'});
+    return sLiveView();
+  });
+  let k = 0;
+  for (const n of [4, 4, 2, 6, 8]) {
+    await sStep('wave' + (k + n), async () => {
+      scrollTo({top: 0, behavior: 'instant'});
+      const r0 = sRefreshed;
+      await sRelease(n);
+      k += n;
+      if (k < __POSTS__) await sAnswered(k);
+      else await sWait(() => sRefreshed > r0, 'el final del trabajo');
+      // The keyboard on the top pager's «‹» from here on: every look after keeps it there.
+      if (k === 4) sId('ask-pager-top-prev').focus();
+      return sLiveView();
+    });
+  }
+  await sStep('absorbed', async () => sAbsorbed);
+  sDone();
+})();
+</script>"""
+    )
+    .replace("__QUERY__", LIVE_QUERY)
+    .replace("__POSTS__", str(POSTS))
+)
+
+
+@pytest.fixture(scope="module")
+def paged(tmp_path_factory) -> dict[str, Any]:
+    client = _Gated()
+    finished: list[Any] = []
+    real = service_module.finish_ask
+
+    def _spy(*args: Any, **kw: Any):
+        found = real(*args, **kw)
+        finished.append(found)
+        return found
+
+    class _Releasing(JevService):
+        def probe_release(self, n: int) -> None:
+            client.release(n)
+
+    seen = _served_dump(
+        tmp_path_factory.mktemp("ask-paged"),
+        _PAGED_PROBE,
+        make_client=lambda: client,
+        repo=_live_repo,
+        base=_Releasing,
+        patch=lambda mp: mp.setattr(service_module, "finish_ask", _spy),
+    )
+    seen["finished"] = [[item.id for item, _ in found.ranked] for found in finished]
+    return seen
+
+
+@_requires_chrome
+def test_a_reader_on_page_two_stays_on_page_two_while_the_list_grows(paged):
+    """PR 17: the stream never moves the reader to another page. After EVERY look, the cards
+    are ranks 3–4 of the answers so far (Python's `(-p, id)`), the hash and the pager still say
+    page 2 — and at the end, page 2 of `finish_ask`'s ranking."""
+    start = _step(paged, "start")
+    absorbed = _step(paged, "absorbed")
+    so_far: list[str] = []
+
+    assert start["hash"].endswith("&size=2&page=2")
+    assert len(absorbed) >= 4
+    for look in absorbed:
+        so_far += look["got"]
+        expected = _ranked(so_far)
+        assert look["ids"] == expected[2:4], look
+        assert look["hash"].endswith("&size=2&page=2"), look
+        if len(so_far) > 2:
+            assert look["page"] == "2", look
+            assert look["pager"].startswith(f"3–{min(4, len(so_far))} de {len(so_far)} "), look
+            # Past page 1 of a ranking, the line says once that the page moves as better
+            # answers land.
+            assert look["reach"] == (
+                f"{len(so_far)} respondidos hasta ahora · la página cambia mientras llegan "
+                "respuestas mejor puntuadas, de mayor a menor probabilidad."
+            ), look
+    # PR 17 review I2 (UX): the pager is updated in place while the list grows (or, when its
+    # pages change, given back the focus by id): a keyboard on it keeps its place every look.
+    held = [
+        look
+        for look in absorbed
+        if sum(len(x["got"]) for x in absorbed[: absorbed.index(look) + 1]) > 4
+    ]
+    assert len(held) >= 3
+    assert all(look["focus"] == "ask-pager-top-prev" for look in held), [x["focus"] for x in held]
+    end = _step(paged, f"wave{POSTS}")
+    assert end["focus"] == "ask-pager-top-prev"
+    (ranking,) = paged["finished"]
+    assert end["live"] is None and end["hash"].endswith("&size=2&page=2")
+    assert end["ids"] == ranking[2:4] == _ranked(list(PLANNED))[2:4]
+    assert end["page"] == "2" and end["pager"] == f"3–4 de {POSTS} resultados"
+
+
+# ------------------------------------------------------------------ PR 17 fix wave: grouped live
+
+#: Posts 0–2 by @ana, the rest by @bea: after the first wave @ana's group is the biggest, after
+#: the second @bea's is — grouped «Más grandes primero», the rule would swap the groups mid-run.
+_GROUPED_HANDLES = {0: "ana", 1: "ana", 2: "ana"}
+
+
+def _grouped_repo(root: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+    cfg = _live_repo(root, monkeypatch)
+    items = [
+        victor_item(
+            n,
+            topic="agentic-engineering" if n % 2 else "startups",
+            created=_START + timedelta(hours=n),
+            handle=_GROUPED_HANDLES.get(n, "bea"),
+        )
+        for n in range(POSTS)
+    ]
+    save_store({item.id: item for item in items}, root / "data" / "items.json")
+    return cfg
+
+
+#: The reader groups a running ask by author, biggest first, one page of 50. From the first
+#: wave on, every card is tagged and watched: none is taken out of the list or moved (a moved
+#: node reloads its X frame) while the ask runs; the groups keep the order they were drawn in;
+#: the end orders them by the rule.
+_GROUPED_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + _ASK_JS
+    + _REFINE_JS
+    + _LIVE_JS
+    + r"""
+(async () => {
+  const heads = () => [...document.querySelectorAll('#ask-list > .lvhead')].map(h => h.dataset.group);
+  const tagged = () => [...document.querySelectorAll('#ask-list > .card')].filter(c => c.__probe).map(c => c.dataset.id);
+  // Every tagged card taken out of the list (a move is a removal, then an insert).
+  const removed = [];
+  let watching = null, theList = null;
+  const watch = () => { theList = sId('ask-list'); watching = new MutationObserver(recs => recs.forEach(r => r.removedNodes.forEach(n => {
+    if (n.__probe) removed.push(n.dataset.id); }))); watching.observe(theList, {childList: true}); };
+  await sStep('start', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')), 'el formulario');
+    sId('ask-q').value = '__QUERY__';
+    sId('ask-q').dispatchEvent(new Event('input', {bubbles: true}));
+    sPress(sId('ask-form'), 'Estimar lo que cuesta');
+    await sWait(() => sPanel().go, 'la estimación');
+    sId('ask-go').click();
+    await sWait(() => sId('ask-list') && sId('ask-list').dataset.live && location.hash.startsWith('#ask?q='), 'la lista en vivo');
+    location.hash = '#ask?q=' + askLive.sha + '&group=author&go=size&size=50';
+    await sWait(() => location.hash.endsWith('&size=50') && sId('ask-list') && sId('ask-list').dataset.live, 'agrupada');
+    return sLiveView();
+  });
+  let k = 0;
+  for (const n of [4, 4, 2, 6]) {
+    await sStep('wave' + (k + n), async () => {
+      await sRelease(n);
+      k += n;
+      await sAnswered(k);
+      if (!watching) watch();
+      const out = Object.assign(sLiveView(), {heads: heads(), tagged: tagged(), removed: removed.slice(),
+        same_list: sId('ask-list') === theList});
+      sTag('w' + k);
+      return out;
+    });
+  }
+  await sStep('end', async () => {
+    const before = removed.length, r0 = sRefreshed;
+    watching.takeRecords();
+    await sRelease(8);
+    await sWait(() => sRefreshed > r0, 'el final del trabajo');
+    return Object.assign(sLiveView(), {heads: heads(), before_end: sBeforeEnd, removed_live: removed.slice(0, before)});
+  });
+  sDone();
+})();
+</script>"""
+).replace("__QUERY__", LIVE_QUERY)
+
+
+@pytest.fixture(scope="module")
+def grouped_live(tmp_path_factory) -> dict[str, Any]:
+    client = _Gated()
+
+    class _Releasing(JevService):
+        def probe_release(self, n: int) -> None:
+            client.release(n)
+
+    return _served_dump(
+        tmp_path_factory.mktemp("ask-grouped-live"),
+        _GROUPED_PROBE,
+        make_client=lambda: client,
+        repo=_grouped_repo,
+        base=_Releasing,
+    )
+
+
+@_requires_chrome
+def test_grouped_while_an_ask_runs_the_cards_shown_never_move_and_the_groups_keep_their_order(
+    grouped_live,
+):
+    """PR 17 review I1 (arch): grouped, a live ask only ADDS. After the first wave @ana's group
+    is first (3 against 1); after the second, @bea's is bigger — and still second, so no card
+    of @ana's moves. No card drawn is ever taken out or moved while the ask runs (a move
+    reloads an X frame); the end orders the groups by the rule: @bea first."""
+    first = _step(grouped_live, "wave4")
+    assert first["heads"] == ["ana", "bea"] and first["live"]
+    tagged = first["ids"]
+    for name in ("wave8", "wave10", "wave16"):
+        look = _step(grouped_live, name)
+        assert look["heads"] == ["ana", "bea"], (name, look["heads"])
+        assert look["removed"] == [] and look["same_list"], (name, look["removed"])
+        # Every card tagged before is still there, in the same order among the tagged.
+        assert [i for i in look["ids"] if i in set(look["tagged"])] == look["tagged"]
+        assert set(tagged) <= set(look["tagged"]), name
+        tagged = look["ids"]
+    # 16 answers: @ana 3, @bea 13 — by the rule, @bea's group would be first.
+    assert _step(grouped_live, "wave16")["ids"][:3] == _ranked(["1000000", "1000001", "1000002"])
+    end = _step(grouped_live, "end")
+    assert end["removed_live"] == []
+    assert end["live"] is None and end["heads"] == ["bea", "ana"]

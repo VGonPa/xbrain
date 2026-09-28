@@ -509,13 +509,48 @@ def test_cli_asks_reprints_a_saved_query_refined_without_a_client(tmp_path: Path
         "agentic-engineering) con relevancia ≥ 0.5 · 808 leídos por Jev, de mayor a menor "
         "probabilidad" in out
     )
-    assert f"  … y {len(expected) - 3} más (--top N o --all para verlos)" in out
+    assert (
+        f"  … y {len(expected) - 3} más (--page 2 para la siguiente página, --top N o --all "
+        "para verlos)" in out
+    )
     lines = [line for line in out.splitlines() if "https://x.com/" in line]
     assert [line.split()[2] for line in lines] == expected[:3]
     assert not load_runs(cfg.jev_runs_path)
     # Reprinting is reading: the history is not touched.
     [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
     assert (entry.times, entry.last_min) == (1, 0.0)
+
+
+def test_cli_asks_pages_a_saved_query_as_the_page_does(tmp_path: Path, monkeypatch):
+    """`jev asks 1 --top 20 --page 3` prints Python's ranking [40:60] — the page's page 3 at 20
+    per page — says which ones and how many follow; the last page ends the list; a page past
+    it, a page 0 and `--page` with `--all` are refused. Nothing is asked."""
+    victor_shaped_repo(tmp_path)
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    _, jev, found = _victor(tmp_path / "again")
+    expected = _expected(found, jev, minimum=0.0)
+
+    third = runner.invoke(app, ["jev", "asks", "1", "--top", "20", "--page", "3"])
+    last = runner.invoke(app, ["jev", "asks", "1", "--top", "20", "--page", "41"])
+    past = runner.invoke(app, ["jev", "asks", "1", "--top", "20", "--page", "42"])
+    zero = runner.invoke(app, ["jev", "asks", "1", "--page", "0"])
+    both = runner.invoke(app, ["jev", "asks", "1", "--page", "2", "--all"])
+
+    assert third.exit_code == 0, third.output
+    assert "Resultados: los 41–60 de 808 leídos por Jev, de mayor a menor probabilidad" in (
+        third.output
+    )
+    rows = [line.split()[2] for line in third.output.splitlines() if "https://x.com/" in line]
+    assert rows == expected[40:60]
+    assert "  … y 748 más (--page 4 para la siguiente página" in third.output
+    assert last.exit_code == 0, last.output
+    assert "Resultados: los 801–808 de 808" in last.output and "… y" not in last.output
+    tail = [line.split()[2] for line in last.output.splitlines() if "https://x.com/" in line]
+    assert tail == expected[800:]
+    assert past.exit_code == 1 and "--page 42 no existe: hay 41 páginas" in past.output
+    assert zero.exit_code == 1 and "--page debe ser >= 1" in zero.output
+    assert both.exit_code == 1 and "--page no va con --all" in both.output
 
 
 def test_cli_asks_picks_a_query_by_sha_prefix_and_refuses_an_unknown_one(
@@ -574,7 +609,10 @@ def test_cli_a_refined_reprint_counts_what_passes_the_refine(tmp_path: Path, mon
         f"Resultados: los 20 primeros de {len(kept)} que pasan el refinado (topic startups, "
         "autor @someone) · 808 leídos por Jev, de mayor a menor probabilidad" in out
     )
-    assert f"  … y {len(kept) - 20} más (--top N o --all para verlos)" in out
+    assert (
+        f"  … y {len(kept) - 20} más (--page 2 para la siguiente página, --top N o --all para "
+        "verlos)" in out
+    )
 
 
 def test_cli_asks_numbers_each_query_and_the_number_or_sha_reopens_it(cfg: Config, monkeypatch):

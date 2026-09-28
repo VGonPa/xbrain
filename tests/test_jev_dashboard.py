@@ -1448,10 +1448,11 @@ def test_the_page_has_no_slider_and_no_threshold_input():
     assert 'type="range"' not in template
     assert 'id="threshold"' not in template
     assert "derive(" not in template and "selfCheck" not in template
-    # The only input is the search box; sort is a select; filters are buttons.
+    # The only input is the search box; sort is the list view's segmented control, drawn by
+    # `lvBar` into `#posts-bar`; filters are buttons.
     inputs = re.findall(r"<input[^>]*>", template)
     assert len(inputs) == 1 and 'type="search"' in inputs[0]
-    assert '<select id="sort"' in template
+    assert '<div id="posts-bar"></div>' in template and "function lvBar(" in template
 
 
 def test_the_word_noul_appears_nowhere_on_the_page():
@@ -1603,11 +1604,15 @@ def test_the_page_has_three_top_tabs_and_revisar_has_three_sub_tabs_all_hash_rou
 def test_the_posts_view_lives_in_the_hash_so_it_can_be_bookmarked():
     template = _resource("jev.template.html")
     hash_code = _script_section(template, "function readHash(", "function writeHash(")
-    write_code = _script_section(template, "function writeHash(", "/* end hash */")
+    # `postsHash` writes the view (`writeHash` puts it in the URL); the list view's own keys
+    # (group, go, page, size) are read by `lvRead`.
+    write_code = _script_section(template, "function postsHash(", "function writeHash(")
 
     for key in ("f", "t", "q", "s"):
         assert f"get('{key}')" in hash_code, key
         assert f"'{key}'" in write_code, key
+    for key in ("group", "go", "page", "size"):
+        assert f"get('{key}')" in hash_code and f"'{key}'" in write_code, key
     # The default filter, when the hash names none, is "Con discrepancias".
     assert "|| 'disc'" in hash_code
 
@@ -1634,7 +1639,7 @@ def test_each_filter_is_a_card_key_with_the_reports_count_beside_it():
         "{key: 'fallback', get name() { return 'Jev eligió «' + DATA.fallback + '»'; }, "
         "count: () => DATA.summary.primary_fallback}"
     ) in rail
-    matches = _script_section(template, "function matches(", "function sorted(")
+    matches = _script_section(template, "function matches(", "function listCard(")
     assert "p.in.includes(view.f)" in matches
 
 
@@ -1942,15 +1947,15 @@ def test_the_keyboard_moves_by_card_and_by_disagreement():
 
     for key in ("'j'", "'k'", "'n'", "'p'"):
         assert key in keys, key
-    assert "const disagrees = (p) => p.in.includes('disc');" in keys
+    assert "const disagrees = (i) => shown[i].x.in.includes('disc');" in keys
 
 
-def test_the_cards_render_incrementally():
-    """~2.6k posts: fifty at a time, more when the reader reaches the end."""
+def test_the_cards_render_a_page_at_a_time():
+    """~2.6k posts: fifty per page by default (PR 17's pager replaced the endless scroll)."""
     template = _resource("jev.template.html")
 
     assert "const PAGE = 50" in template
-    assert "IntersectionObserver" in template
+    assert "pageView = lvPage(groups, view.size, view.page" in template
 
 
 def test_the_topic_list_starts_folded_on_a_narrow_screen():

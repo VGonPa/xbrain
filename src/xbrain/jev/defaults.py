@@ -59,7 +59,7 @@ DEFAULT_SERVE_MAX_USD = 1.00
 #: one (a far longer query, a grown corpus).
 DEFAULT_ASK_MAX_USD = 0.25
 #: How many of a query's results are shown at first: `xbrain jev ask` prints this many
-#: (`--top N`, `--all`), the Preguntar tab shows this many and adds as many with «Ver más».
+#: (`--top N`, `--all`), and it is the Preguntar tab's page size by default.
 #: Results are RANKED by probability, never cut by `[jev].threshold` (a topic-membership bar
 #: that a yes/no to an open question rarely reaches).
 DEFAULT_ASK_TOP = 20

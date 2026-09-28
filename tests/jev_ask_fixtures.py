@@ -66,13 +66,20 @@ class _Planned(FakeJevClient):
         )
 
 
-def victor_item(n: int, *, topic: str, created: datetime) -> Item:
+def victor_item(
+    n: int,
+    *,
+    topic: str,
+    created: datetime,
+    handle: str = "someone",
+    topics: list[str] | None = None,
+) -> Item:
     item_id = f"{1_000_000 + n}"
     return Item(
         id=item_id,
         source="bookmark",
-        url=f"https://x.com/someone/status/{item_id}",
-        author=Author(handle="someone", name="Someone"),
+        url=f"https://x.com/{handle}/status/{item_id}",
+        author=Author(handle=handle, name=handle.title()),
         text=f"p{n:04d} un post sobre {topic}",
         created_at=created,
         captured_at=created,
@@ -81,7 +88,7 @@ def victor_item(n: int, *, topic: str, created: datetime) -> Item:
             executor="claude-code",
             summary="s",
             primary_topic=topic,
-            topics=[topic],
+            topics=topics or [topic],
         ),
     )
 
@@ -110,13 +117,34 @@ def victor_topic_side_car(cfg: Config, store: dict[str, Item]) -> None:
     save_assessments(records, cfg.jev_topics_path)
 
 
+#: With `varied`: five authors (one handle in mixed case, one with several leading «@» typed
+#: in the tests), a post's author by `n % 5`.
+VARIED_HANDLES = ["someone", "Ana_B", "carlos", "Dana", "eve"]
+
+
+def _varied(n: int, p: float) -> dict:
+    """`varied`: the post's author, day and topics spread so the list view has something to
+    sort and group — posts over ~2 months in an order unrelated to the ranking (a permutation
+    of n), two posts at each moment (ties the base order breaks), a third with a second topic
+    (a post under two topics), every eleventh with `nutricion` as its primary."""
+    primary = "nutricion" if n % 11 == 0 else ("agentic-engineering" if p >= 0.5 else "startups")
+    topics = [primary] + (["nutricion"] if n % 3 == 0 and primary != "nutricion" else [])
+    return {
+        "handle": VARIED_HANDLES[n % 5],
+        "created": _START + timedelta(hours=4 * (((n * 389) % 808) // 2)),
+        "topic": primary,
+        "topics": topics,
+    }
+
+
 def victor_shaped_repo(
-    root: Path, *, older: int = 5, jev: str = "", topics: bool = False
+    root: Path, *, older: int = 5, jev: str = "", topics: bool = False, varied: bool = False
 ) -> Config:
     """A repo whose one query is Víctor's, answered on the 808 posts since 2026-05-07, with
     `older` posts before that day (outside the filter, never asked). Enrich puts the posts
     with the higher probabilities in `agentic-engineering`, the rest in `startups`. With
-    `topics`, a current topics side-car too (`victor_topic_side_car`)."""
+    `topics`, a current topics side-car too (`victor_topic_side_car`); with `varied`, several
+    authors, days and topics (`_varied`)."""
     vault = root / "vault"
     vault.mkdir(parents=True, exist_ok=True)
     (root / "config.toml").write_text(
@@ -129,11 +157,14 @@ def victor_shaped_repo(
     store: dict[str, Item] = {}
     planned: dict[str, float] = {}
     for n, p in enumerate(probabilities):
-        item = victor_item(
-            n,
-            topic="agentic-engineering" if p >= 0.5 else "startups",
-            created=_START + timedelta(hours=n),
-        )
+        if varied:
+            item = victor_item(n, **_varied(n, p))
+        else:
+            item = victor_item(
+                n,
+                topic="agentic-engineering" if p >= 0.5 else "startups",
+                created=_START + timedelta(hours=n),
+            )
         store[item.id] = item
         planned[f"p{n:04d}"] = p
     for k in range(older):
