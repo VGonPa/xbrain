@@ -678,6 +678,10 @@ class _AskKind:
         if not isinstance(pick, AskPick):  # pragma: no cover — the slot runs its own kind
             raise TypeError("an ask job carries an AskPick")
         job.post_price = _post_price(plan)
+        # The minimum this use's results open at, read ONCE before the pass: `finish_ask`
+        # writes the history this reads (the query's last minimum), so reading it after would
+        # depend on the order (the same value today; not by construction).
+        minimum = use_minimum(plan, pick.minimum)
         on_answer: Callable[[AskAssessment], None] | None = None
         try:
             answer = _stream_entry(cfg, plan, jev)
@@ -694,7 +698,7 @@ class _AskKind:
                 job,
                 lambda: [answer(record, True) for _, record in current_answers(plan).ranked],
                 asking=len(plan.selection.items),
-                minimum=use_minimum(plan, pick.minimum),
+                minimum=minimum,
             )
             on_answer = lambda record: _stream(job, answer(record, False))  # noqa: E731
         outcome = run_ask(
@@ -720,7 +724,7 @@ class _AskKind:
             "results": len(found.ranked),
             # The minimum `results` is cut at (`finish_ask`'s: this use's, else the query's
             # last): the page names it beside the count.
-            "min": use_minimum(plan, pick.minimum),
+            "min": minimum,
             "answered": found.answered,
             "recorded": found.recorded,
         }
