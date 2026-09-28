@@ -13,7 +13,9 @@ estimate, the confirmation, the one job and its cap); this module routes and gua
   outside that folder however the path is spelled.
 
 Routes: `/` (the page), `/api/data` (its blob), `/api/job`
-(the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, per
+(the one job; `/api/job?since=<cursor>` adds a running ask's answers from that cursor — read
+from the job's memory, at most `service.STREAM_PAGE` per reply), `POST /api/job/cancel` (the
+page's soft stop of that job), `/_media/…`, per
 kind of pass (`topics`, `ask`) `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate`,
 and what was asked: `/api/asks` (the query history with each query's results) and
 `/api/ask/<sha>` (one query) — both read-only, both slices of the blob — and
@@ -197,6 +199,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._media(url.path)
         elif url.path == "/api/ask/counts":
             self._json(200, service.ask_counts(parse_qs(url.query, keep_blank_values=True)))
+        elif url.path == "/api/job" and url.query:
+            self._json(200, service.job_view(parse_qs(url.query, keep_blank_values=True)))
         else:
             self._json(200, self._get_json(url.path))
 

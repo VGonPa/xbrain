@@ -302,8 +302,11 @@ def _open(page: Path, hash_: str = "") -> dict[str, Any]:
     return _dump(page.as_uri() + hash_)
 
 
-def _dump(url: str, budget_ms: int = 8000, window: str = "") -> dict[str, Any]:
-    """`window` ("1280,900") sets the window's size; left empty, Chrome's own default."""
+def _dump(
+    url: str, budget_ms: int = 8000, window: str = "", flags: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """`window` ("1280,900") sets the window's size; left empty, Chrome's own default.
+    `flags`: more Chrome switches (`--force-prefers-reduced-motion`)."""
     assert CHROME is not None
     result = subprocess.run(  # nosec B603 - fixed argv, a file or local server this test made
         [
@@ -314,6 +317,7 @@ def _dump(url: str, budget_ms: int = 8000, window: str = "") -> dict[str, Any]:
             _NO_NETWORK,
             f"--virtual-time-budget={budget_ms}",
             *([f"--window-size={window}"] if window else []),
+            *flags,
             "--dump-dom",
             url,
         ],
@@ -2393,8 +2397,8 @@ def _page_saw(done: int = 0) -> tuple[Any, Any]:
     saw = threading.Event()
 
     class _Watched(JevService):
-        def job_view(self) -> dict[str, Any]:
-            view = super().job_view()
+        def job_view(self, params: Any = None) -> dict[str, Any]:
+            view = super().job_view(params)
             if view["state"] == "running" and view["done"] >= done:
                 saw.set()
             return view
@@ -2481,8 +2485,10 @@ _PROBE_WAIT_S = 0.01
 
 def _probe_handler() -> Any:
     """The server's handler, plus the routes only a probe uses: `/probe-step` (the step now
-    running) and `/probe-done` (the output), which land on the server object, and
-    `/probe-wait` (one paced look: 204 with the server's `Date`, for `sWait`)."""
+    running) and `/probe-done` (the output), which land on the server object,
+    `/probe-wait` (one paced look: 204 with the server's `Date`, for `sWait`), and
+    `/probe-release` (its body, a number, handed to the service's `probe_release`: how many
+    more answers a gated fake may give — the probe decides when a job moves on)."""
     from xbrain.jev.serve import _Handler
 
     class _ProbeHandler(_Handler):
@@ -2495,11 +2501,13 @@ def _probe_handler() -> Any:
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802 — the stdlib's name
-            if self.path not in ("/probe-step", "/probe-done"):
+            if self.path not in ("/probe-step", "/probe-done", "/probe-release"):
                 super().do_POST()
                 return
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
-            if self.path == "/probe-step":
+            if self.path == "/probe-release":
+                self.server.service.probe_release(int(body))  # type: ignore[attr-defined]
+            elif self.path == "/probe-step":
                 self.server.probe_step = body  # type: ignore[attr-defined]
             else:
                 self.server.probe_out = body  # type: ignore[attr-defined]
@@ -3065,19 +3073,32 @@ _END_PROBE = (
     + _SERVE_JS
     + r"""
 const sScenario = /*SCENARIO*/;
+// While `sHoldJob` is a promise, the page's reads of the job wait for it: the reader hides the
+// block while the job RUNS, whatever the job's speed (a job that fails at once — `error` —
+// could otherwise end before the hide, and a block closed after its end stays closed).
+let sHoldJob = null;
+const sFetchJob = window.fetch;
+window.fetch = function (u, init) {
+  if (sHoldJob && /\/api\/job(\?|$)/.test(String(u))) { const h = sHoldJob; return h.then(() => sFetchJob.call(window, u, init)); }
+  return sFetchJob.call(window, u, init);
+};
 (async () => {
   await sStep('estimate', async () => {
     await (sScenario.kind === 'ask' ? sQuery : sNext)(sScenario.n);
     return sPanel();
   });
   await sStep('run', async () => {
+    let go = null;
+    if (sScenario.hide) sHoldJob = new Promise(r => { go = r; });
     sId('ask-go').click();
     await sWait(() => sPanel().stop !== null || sPanel().close === 'Cerrar', 'el trabajo');
     let hidden = null;
-    if (sScenario.hide) { sId('ask-cancel').click(); hidden = !sPanel().shown; }
+    if (sScenario.hide) { sId('ask-cancel').click(); hidden = !sPanel().shown; sHoldJob = null; go(); }
     if (sScenario.stop) {
-      await sWait(() => /[1-9]\d* respuesta/.test(sPanel().progress || ''), 'la primera respuesta');
-      sPress(sId('jobp'), 'Parar (se guarda lo ya pagado)');
+      // A topics pass counts «N respuestas»; a running ask's status line «Preguntando… k de N».
+      await sWait(() => /[1-9]\d* respuesta|^Preguntando… [1-9]/.test(sPanel().progress || ''), 'la primera respuesta');
+      // «Parar (se guarda lo ya pagado)» in a topics block, «Parar» in an ask's status line.
+      sId('ask-stop').click();
     }
     return {hidden};
   });
@@ -3086,7 +3107,7 @@ const sScenario = /*SCENARIO*/;
     // which a request in flight holds still — and each look of `sWait` is one. So the page's
     // clock runs first, idle, past every retry; then the look. (A scenario that ends sooner
     // is simply there on the first look.)
-    await new Promise(r => setTimeout(r, POLL_MS + RETRY_MS.reduce((a, b) => a + b, 0) + 500));
+    await new Promise(r => setTimeout(r, Math.max(POLL_MS, ASK_POLL_MS) + RETRY_MS.reduce((a, b) => a + b, 0) + 500));
     await sWait(() => sRefreshed > 0 || sPanel().reload !== null, 'el final');
     return sPanel();
   });
@@ -3203,8 +3224,8 @@ def _ended(tmp_path: Path, scenario: str, kind: str = "topics") -> dict[str, Any
 
             failures = 0
 
-            def job_view(self) -> dict[str, Any]:
-                view = super().job_view()
+            def job_view(self, params: Any = None) -> dict[str, Any]:
+                view = super().job_view(params)
                 if view["state"] != "idle" and _Flaky.failures < 2:
                     _Flaky.failures += 1
                     raise RuntimeError("un momento")
@@ -3216,8 +3237,8 @@ def _ended(tmp_path: Path, scenario: str, kind: str = "topics") -> dict[str, Any
     class _Lost(JevService):
         """`/api/job` breaks once a job exists: the page's polling loses the server."""
 
-        def job_view(self) -> dict[str, Any]:
-            view = super().job_view()
+        def job_view(self, params: Any = None) -> dict[str, Any]:
+            view = super().job_view(params)
             if view["state"] != "idle":
                 raise RuntimeError("se cayó")
             return view

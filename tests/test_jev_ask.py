@@ -1676,3 +1676,65 @@ def test_cli_refuses_a_confirmed_ask_whose_price_rose_under_the_lock(cfg: Config
     assert "¿Preguntar igualmente?" in result.output
     assert "la estimación subió" in result.output and "confirmad" in result.output
     assert not cfg.jev_runs_path.exists()
+
+
+# --------------------------------------------------------------------------- live answers
+
+
+def test_each_answer_is_told_the_moment_it_is_banked_and_before_any_save(cfg: Config):
+    """`on_answer` sees each banked record once, in arrival order, while its file does not yet
+    exist (the pass saves at the end, or every `CHECKPOINT_EVERY`): what a served ask streams."""
+    told: list[tuple[str, bool]] = []
+    path = _ask_path(cfg, AskQuery.of(QUERY))
+
+    _, outcome, results = _run(
+        cfg, _ByText(), on_answer=lambda record: told.append((record.item_id, path.exists()))
+    )
+
+    assert sorted(post for post, _ in told) == ["1", "2", "3"]
+    assert all(not saved for _, saved in told)
+    assert {a.item_id for a in outcome.assessed} == {post for post, _ in told}
+    assert [item.id for item, _ in results.ranked] == ["1", "3", "2"]
+
+
+def test_a_live_answer_hook_that_raises_costs_no_answer_and_no_checkpoint(
+    cfg: Config, monkeypatch, caplog
+):
+    """The hook is display (`_call_hook`): one that raises is logged, and the checkpoint after
+    it still saves — a checkpoint every answer here, so three saves and then the final one."""
+    from xbrain.jev import run as jev_run
+
+    saves: list[int] = []
+    real = jev_run.save_asks
+    monkeypatch.setattr(jev_run, "CHECKPOINT_EVERY", 1)
+    monkeypatch.setattr(
+        jev_run,
+        "save_asks",
+        lambda q, records, path: (saves.append(len(records)), real(q, records, path)),
+    )
+
+    def _broken(record: AskAssessment) -> None:
+        raise RuntimeError("la página no pudo mostrarla")
+
+    _, outcome, results = _run(cfg, _ByText(), on_answer=_broken)
+
+    assert len(outcome.assessed) == 3 and len(results.ranked) == 3
+    assert saves == [1, 2, 3, 3]
+    assert len(load_asks(_ask_path(cfg, AskQuery.of(QUERY)), AskQuery.of(QUERY))) == 3
+    assert caplog.text.count("on_answer falló") == 3
+
+
+def test_the_answers_already_current_are_the_results_before_any_cut(cfg: Config):
+    """`current_answers(plan)`: what `finish_ask` ranks, before its minimum — the live list's
+    opening rows. `use_minimum`: the minimum sent, else the query's last one."""
+    _run(cfg, _ByText())
+    with pass_lock(cfg.jev_lock_path, "test"):
+        plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None)
+    found = jev_ask.current_answers(plan)
+
+    assert [(item.id, r.probability) for item, r in found.ranked] == [
+        ("1", 0.95),
+        ("3", 0.95),
+        ("2", 0.1),
+    ]
+    assert jev_ask.use_minimum(plan, None) == 0.0 and jev_ask.use_minimum(plan, 0.4) == 0.4

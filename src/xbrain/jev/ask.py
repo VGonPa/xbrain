@@ -886,8 +886,7 @@ def finish_ask(
     sends none) keeps the query's last minimum (0 for a new query).
     """
     previous = plan.history.queries.get(plan.query.sha)
-    if minimum is None:
-        minimum = previous.last_min if previous else 0.0
+    minimum = use_minimum(plan, minimum)
     results = _rank(plan.candidates, plan.records, plan.query, _state_lookup(plan), minimum)
     banked = outcome.assessed if outcome is not None else ()
     if outcome is not None and outcome.interrupted and not banked:
@@ -914,3 +913,20 @@ def finish_ask(
 
 def _state_lookup(plan: AskPlan) -> Callable[[Item], str | None]:
     return lambda item: plan.states.get(item.id)
+
+
+def use_minimum(plan: AskPlan, minimum: float | None) -> float:
+    """The minimum this use of `plan.query` is recorded with: `minimum` when sent, else the
+    query's last one (0 for a new query) — `finish_ask`'s rule, and the default a served ask's
+    live results open at, so the list never re-cuts when the job ends."""
+    if minimum is not None:
+        return minimum
+    previous = plan.history.queries.get(plan.query.sha)
+    return previous.last_min if previous else 0.0
+
+
+def current_answers(plan: AskPlan) -> AskResults:
+    """Every candidate's CURRENT answer as `plan.records` holds it now, ranked, no minimum:
+    `finish_ask`'s results before its cut. Called before the pass, it is what a served ask's
+    live results open with (answers already paid, which the pass will not ask again)."""
+    return _rank(plan.candidates, plan.records, plan.query, _state_lookup(plan), 0.0)

@@ -547,7 +547,7 @@ _NOTHING_KEPT_PROBE = (
     await sQuery(1);
     sId('ask-go').click();
     await sWait(() => sPanel().stop !== null, 'el trabajo');
-    sPress(sId('jobp'), 'Parar (se guarda lo ya pagado)');
+    sPress(sId('jobp'), 'Parar');
     await sWait(() => sRefreshed > 0, 'el final');
     for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
     return Object.assign(sPanel(), {hash: location.hash,
@@ -652,11 +652,11 @@ def idle_lost(tmp_path_factory) -> dict[str, Any]:
 
         looks = 0
 
-        def job_view(self) -> dict[str, Any]:
+        def job_view(self, params: Any = None) -> dict[str, Any]:
             _Down.looks += 1
             if _Down.looks <= 6:
                 raise RuntimeError("se cayó")
-            return super().job_view()
+            return super().job_view(params)
 
     seen = _served_dump(
         tmp_path_factory.mktemp("idle-lost"), _IDLE_LOST_PROBE, client=_Recorder(), base=_Down

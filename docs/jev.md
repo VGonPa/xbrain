@@ -874,7 +874,41 @@ reopening a query costs nothing.
   function `xbrain jev asks N --min … --topic …` prints with. The state is ONE object in the
   URL hash (`#ask?q=<sha>&top=40&min=0.5&t=a,b&since=…&until=…&author=…`), so a refined view
   is a link, and it survives a reload; opening a query from the history starts it unrefined, and
-  so does a job that ends on it.
+  so does pressing *Preguntar y pagar* (a refine made while it runs stays at the end).
+- **While an ask runs** (served), its results **fill in and re-rank live**. Pressing *Preguntar
+  y pagar* opens the query's results right away (`#ask?q=<sha>`); the answers the query already
+  had are there at once, and each new answer appears **in its ranked place** as Jev gives it —
+  the cards already shown stay as they are (none is drawn again), those pushed past the top
+  make room for «Ver más» — except a card on your screen, which stays (the list is briefly
+  longer) until you scroll past it. A card that lands **above** one already on the list says
+  **nuevo** in verdigris for a few seconds, fading (with reduced motion it does not fade; it
+  just goes); the list's first fill, an answer that only extends its end, and the answers the
+  query already had are not marked. There is no progress-bar phase: the job block is ONE status
+  line under the query's title, above the refine bar and the gallery, and it **stays on screen
+  while you scroll the gallery** (sticky) — *Preguntando… k de N · M muy relevantes (≥ t) ·
+  ~X $ gastado* with **Parar** (what it keeps, «se guarda lo ya pagado», is its tooltip) and
+  **Ocultar**. k of N is posts asked of those to ask; M counts THIS job's answers (not the
+  ones the query already had: the same base as k) at or above `[jev].threshold` — the one bar at
+  which the page reads a Jev probability as «yes» — or at the refine's minimum once one is set,
+  and is left out while it is 0. The gallery says what it shows: *Mostrando S de K respondidos
+  hasta ahora* (*· M con relevancia ≥ min* when a minimum is set, *· R pasan el refinado* when a
+  refine is). The page looks at the job at once, then every second (at once again while more
+  answers wait than one reply carries — only after it took that reply's answers). If you have
+  scrolled into the list, **your place holds**: the first card on screen stays where it is while
+  answers land above it; with the list's top on screen you see them land. The free refine works
+  the whole time, and what you are typing in it is left alone. At the end the SAME list is
+  refilled with the saved results (`finish_ask`'s ranking, the order the terminal prints) — the
+  same order the live list already had, under the same refine: no card is drawn again, nothing
+  under you moves, no progress bar comes back, and the status line becomes one quiet line,
+  *Preguntado: N leídos · M muy relevantes (≥ t) · ~X $ gastado* (an end that was not clean —
+  stopped, the cap, failures — says so in full). A use that kept nothing (stopped before any
+  answer) goes back to what the tab showed before. The history lists the running query at the
+  top with the job's own numbers, *en curso · k de N · ~X $* — never its last use's day, count
+  or cost, nor *reconstruida* (a checkpoint writes the query's answer file before the job's end
+  records the history, so the page's data built mid-run rebuilds that row). A page that meets a
+  job another tab started follows it the same way; if the job it follows ends between two looks
+  and another starts, it reloads the data (the one that ended is in the history) and follows
+  the new one from its start.
   The results are **recomputed when the page is built**: an answer to a post whose evidence
   changed since is not a result. They are the **post cards themselves** (the ones in Posts,
   with their own Jev block), each with a strip on top: *Responde a la pregunta*, the
@@ -1119,6 +1153,25 @@ code:
    that finished every post is `done` with no reason, even if it ended at the cap. The view
    stops changing when the job ends. `usd` includes the reservations charged for answers that
    could not be priced (`charged_at_estimate`).
+   **An ask's answers as they arrive** (`GET /api/job?since=<cursor>`): the same view plus
+   `stream` — `{from, next, answers, more, expected, min}`. `since=0` starts at the job's
+   first answer; `next` is the cursor for the following poll (`<job number>-<index>`); a
+   cursor from another job starts this one from 0, and one past this job's end, or anything
+   that is not a cursor (or a second `since`, or another parameter), is a 400. `answers` is
+   the job's stream from the cursor, in **arrival order**: first the answers the query already
+   had (ranked, `cached: true`), then each one the pass banks (`cached: false`), each
+   `{id, p, model, asked_at, keys, cached}` plus `surfaces` for a post whose card has no Jev
+   block — what the saved results carry for it after the job (`dashboard.streamed_answer`,
+   through `ask.answer_view`). At most 100 per reply (`service.STREAM_PAGE`); `more` says
+   others are waiting. `expected` is how many answers there will be if every post answers;
+   `min` is the minimum the results open at (the query's last one, as `finish_ask` keeps it).
+   Across polls no answer is missed or handed over twice, whatever the concurrency. It is read
+   from the job's memory, never from a file; a topics job, or no job, has `stream: null` (and so
+   does an ask whose stream could not be prepared: display only, it never stops the job). The
+   stream is held `service.STREAM_KEEP_S` (120 s) after the job ends, for a page still behind
+   (every page takes the saved results at the end); then its entries are let go and a cursor
+   before the end gets no answers and `next` at the end. The same guards as every GET: the
+   `Host` is checked on every request, and a foreign `Origin` is refused when one is sent.
 4. **Stop** (`POST /api/job/cancel`, body `{}`, the same token and `Origin` as any POST): the
    running job stops softly — nothing queued is sent, the calls in flight are waited for,
    saved and logged — and ends `interrupted` with reason `cancelado`. It answers 200 with the
