@@ -9,10 +9,13 @@ import logging
 import os
 import re
 import sys
+import webbrowser
 from collections import Counter
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import typer
@@ -47,6 +50,55 @@ from xbrain.fetch import (
 )
 from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
+from xbrain.jev.assess import (
+    RunResult,
+    Selection,
+    select_items,
+)
+from xbrain.jev.ask import (
+    AskFilters,
+    AskPlan,
+    AskQuery,
+    AskResults,
+    ask_path,
+    finish_ask,
+    load_history,
+    normalise_author,
+    plan_ask,
+    refine_results,
+    reopen_results,
+    same_selection,
+)
+from xbrain.jev.client import JevClient, JevError
+from xbrain.jev.dashboard import build_page_data, render_jev_dashboard_html
+from xbrain.jev.defaults import (
+    Billed,
+    input_cost_usd,
+    input_tokens_total,
+    jev_cost_fragment,
+    plural,
+    unpriced_providers,
+)
+from xbrain.jev.env import dry_run_key_line, typesafe_api_key
+from xbrain.jev.load import JevPairs, load_jev_pairs
+from xbrain.jev.models import AskHistoryEntry
+from xbrain.jev.report import (
+    ask_cost,
+    ask_cost_by_query,
+    ask_history_fragment,
+    build_report,
+    cost_line,
+    cost_fragment,
+    history_fragment,
+    report_paths,
+    run_history,
+    write_reports,
+)
+from xbrain.jev.lock import PassLock, PassLockBusy, pass_lock
+from xbrain.jev.run import FAILURES_SHOWN, RunOutcome, run_ask, run_topics
+from xbrain.jev.serve import make_server, serve_until_interrupted
+from xbrain.jev.service import JevService, over_cap
+from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -66,6 +118,7 @@ from xbrain.refresh import (
 )
 from xbrain.rubrics import load_vocab, save_vocab
 from xbrain.store import (
+    _atomic_write,
     load_state,
     load_store,
     load_topic_pages,
@@ -158,6 +211,8 @@ from xbrain.video_digest import (
     items_pending_video_digest,
 )
 from xbrain.worksheet import export_worksheet, import_worksheet
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
 
@@ -265,6 +320,16 @@ def _handle_cli_errors(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except (typer.Exit, typer.Abort):
+            # BOTH subclass `RuntimeError`, which `_OPERATOR_ERRORS` lists, so without this
+            # re-raise the clause below catches click's own control flow and rewrites it.
+            # `typer.Exit(code=N)` became a bare "Error: " (its `str` is empty) plus exit 1,
+            # silently replacing the code the command chose — `xbrain jev topics` exits 130
+            # on an interrupt, and the stacked `_handle_index_errors` raises its own Exit.
+            # `typer.Abort` is what `typer.confirm(..., abort=True)` raises when the operator
+            # answers "n" (`download-videos`); it became "Error: " instead of "Aborted!".
+            # `typer.Abort is click.Abort`, so naming it through typer adds no import.
+            raise
         except _OPERATOR_ERRORS as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
@@ -1034,6 +1099,12 @@ def _run_describe(
                 typer.echo(f"  {item_id}  {url}  {error}", err=True)
 
 
+# RAW docstring, and the `\[` in it, because typer renders a command docstring as its help
+# through Rich: `[describe]` reads as a style tag and gets eaten, leaving a bare `.version`
+# — a key in no config file, in the sentence whose job is to name the key. The backslash is
+# for Rich, so it has to survive Python: hence `r"""`, since `"\["` is also an invalid
+# Python escape. Same defect as `[vision]` in #90; pinned on the RENDERED help by
+# `test_command_help_renders_its_config_key_literally`.
 @app.command()
 @_handle_cli_errors
 def describe(
@@ -1055,7 +1126,7 @@ def describe(
     model: str | None = typer.Option(
         None,
         "--model",
-        help="Modelo de visión a usar. Si no se pasa, se usa el del config (`describe.model`).",
+        help=r"Modelo de visión a usar. Si no se pasa, se usa el del config (`\[describe].model`).",
     ),
     batch_size: int = typer.Option(
         5,
@@ -1080,11 +1151,11 @@ def describe(
         help="Imprime cada foto fallida (item_id, URL, error) al final del run.",
     ),
 ) -> None:
-    """Describe las fotos descargadas con un LLM de visión.
+    r"""Describe las fotos descargadas con un LLM de visión.
 
     Solo describe fotos con bytes en disco (`MediaPhotoDownloaded`).
     Las entradas ya descritas en la versión actual se saltan; bumpear
-    `[describe].version` en `config.toml` fuerza un re-describe
+    `\[describe].version` en `config.toml` fuerza un re-describe
     automático sin `--force`. Las descripciones se persisten en
     `items.json` y son consumidas por `xbrain enrich` y `xbrain topics`
     en las llamadas LLM subsiguientes.
@@ -1674,10 +1745,10 @@ def digest_video(
         "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
     ),
 ) -> None:
-    """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
+    r"""Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
     Para cada vídeo seleccionado: descarga efímera (reutiliza `fetch-video`) →
-    transcribe con un transcriptor EXTERNO local (config `transcribe.command`,
+    transcribe con un transcriptor EXTERNO local (config `\[transcribe].command`,
     por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
     item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
@@ -1693,11 +1764,11 @@ def digest_video(
     disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
 
     `--frames` (opt-in, capa visual PR4): extrae key-frames con ffmpeg (EXTERNO),
-    los describe con el modelo de visión EXTERNO (`\\[vision].command`), adjunta las
+    los describe con el modelo de visión EXTERNO (`\[vision].command`), adjunta las
     descripciones al source `x_video` y embebe los frames en la nota como fotos.
     Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
     (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
-    se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
+    se describe como metraje, con tope `\[frames].footage_max_frames`. Sin
     `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
     `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
     """
@@ -2406,6 +2477,46 @@ def verify_command(
     )
 
 
+def _echo_jev_retired_by_vocab(cfg: Config) -> None:
+    """Say how many Jev assessments a `vocab.yaml` write just retired. Silent when none exist.
+
+    ANY vocabulary write retires the WHOLE side-car, and no contract arithmetic is needed to
+    know it: `TopicAssessment.contract` hashes the QUESTIONS, the questions are built from the
+    vocabulary, so a re-worded description expires every record exactly as adding a topic
+    does. The count is therefore `len(assessments)`, always.
+
+    Without this the retirement was silent, and the next `xbrain jev report` printed
+    `0 vigentes` over a full file — which reads as "nobody has ever run `jev topics`". The two
+    readings differ by the price of re-assessing the corpus, and an operator who reaches for
+    `--force` to resolve the ambiguity pays it.
+
+    Called only where `vocab.yaml` is actually WRITTEN. `xbrain vocab --executor claude-code`
+    exports a worksheet and writes nothing, so it retires nothing and says nothing.
+
+    The remedy is a PLAIN `jev topics`, never `--force`. A retired record is not current, so
+    `select_items` picks it up on its own; recommending `--force` would teach the operator to
+    reach for the one flag that also re-bills the records that ARE still current, which after
+    a partial vocabulary edit is the rest of the corpus.
+
+    Reads through `load_assessments` rather than counting JSON keys here — one loader for the
+    side-car — but an unreadable one must not fail a `vocab` run that has already succeeded,
+    so the refusal is reported and the count is not claimed.
+    """
+    if not cfg.jev_topics_path.exists():
+        return
+    try:
+        count = len(load_assessments(cfg.jev_topics_path))
+    except JevError as exc:
+        typer.echo(f"Las evaluaciones de Jev quedan caducadas (no se pudieron contar: {exc})")
+        return
+    if not count:
+        return
+    retired = plural(
+        count, "evaluación de Jev queda caducada", "evaluaciones de Jev quedan caducadas"
+    )
+    typer.echo(f"{retired}: `xbrain jev topics` las vuelve a pedir (y a facturar).")
+
+
 def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:
     """When `--regenerate` is set, drop every item's enrichment and persist."""
     if regenerate:
@@ -2428,6 +2539,7 @@ def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> Non
     _mark_for_regenerate(store, cfg, regenerate)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    _echo_jev_retired_by_vocab(cfg)
 
 
 def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool) -> None:
@@ -2451,6 +2563,7 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     _mark_for_regenerate(store, cfg, regenerate)
     typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    _echo_jev_retired_by_vocab(cfg)
 
 
 @app.command()
@@ -2580,6 +2693,964 @@ def status() -> None:
     typer.echo(f"  enriquecidos: {sum(1 for i in store.values() if i.enriched)}")
     typer.echo(f"  última extracción bookmarks: {state.bookmarks.last_run}")
     typer.echo(f"  última extracción tweets: {state.own_tweets.last_run}")
+
+
+jev_app = typer.Typer(
+    help="Jev (TypeSafe AI): a qué topics pertenece cada item, según un juez externo"
+)
+app.add_typer(jev_app, name="jev")
+
+
+def _jev_client(cfg: Config) -> JevClient:
+    """The TypeSafe client for this run — the seam tests monkeypatch.
+
+    The adapter is imported INSIDE the function on purpose. `jev/typesafe.py` is the only
+    module that imports the vendor SDK, and importing it at module top would make every
+    `xbrain` invocation — `--help` included — pay for the SDK's import, for a command most
+    runs never reach.
+
+    The key is checked BEFORE that import, so the one path a first-run operator is most
+    likely to take — no key configured — does not pay for the vendor's HTTP stack to be
+    told it is missing. And the import itself is guarded: `ImportError` is not in
+    `_OPERATOR_ERRORS`, so a half-finished install would otherwise reach the operator as a
+    traceback, after their key was accepted and the selection printed.
+
+    The remedy it names is the WHOLE command (`uv sync --extra dev --locked`, what both CI
+    workflows run) and never a bare `uv sync`: `dev` is an optional-dependencies EXTRA, so
+    `uv sync` alone prunes the environment to the resolved set and takes pytest, ruff, mypy,
+    poe, bandit and detect-secrets with it. The operator repairs the SDK and silently loses
+    `uv run poe check` — a command that has vanished rather than an error naming a cause.
+
+    Built only AFTER selection, so `--dry-run` and an empty backlog never need a key.
+    """
+    key = typesafe_api_key(cfg.repo_root)
+    if not key:
+        raise JevError(
+            "TYPESAFE_API_KEY no encontrada: expórtala o pégala en <repo>/.env (ver .env.example)"
+        )
+    try:
+        from xbrain.jev.typesafe import TypeSafeJevClient
+    except ImportError as exc:
+        raise JevError(
+            f"el SDK de TypeSafe no está disponible ({exc}): instala las dependencias con "
+            "`uv sync --extra dev --locked` y vuelve a lanzar el comando"
+        ) from exc
+    return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
+
+
+def _jev_cost_line(assessments: tuple[Billed, ...]) -> str:
+    """`N tokens de entrada (+K sin recuento) (~X $ · proveedor sin tarifa: …)`.
+
+    A tuple, not an iterable: the three `jev.defaults` helpers each walk `assessments`, so a
+    one-shot generator would be exhausted after the first and price the run at zero.
+
+    Every number here comes from `jev.defaults`, which is the ONE place a Jev run is priced,
+    and so does the SENTENCE — `jev topics`, `jev report` and `topics-report.md` quote the
+    same bill, and a fragment formatted at each call site is three definitions of it (it
+    printed `~0.000 $` here and `~0.0001 $` there for the same side-car).
+
+    Why the fragment carries its two parenthetical markers is argued in
+    `jev_cost_fragment` itself; this function's only job is to hand it the three numbers.
+    """
+    tokens, unknown = input_tokens_total(assessments)
+    return jev_cost_fragment(
+        tokens, unknown, input_cost_usd(assessments), unpriced_providers(assessments)
+    )
+
+
+def _jev_selection_line(selection: Selection, stored: int) -> str:
+    """What the funnel did, in one line. The counts PARTITION the candidate set.
+
+    A segment is printed only when its count is non-zero, except the first and the last: the
+    information that distinguishes "everything is up to date" from "the evidence layer
+    regressed" is exactly the segment that is non-zero in each case, so suppressing zeros
+    costs nothing and keeps the common line short. All-zero means the corpus is empty, which
+    is its own answer.
+    """
+    segments = [plural(len(selection.items), "item por evaluar", "items por evaluar")]
+    if selection.skipped_current:
+        segments.append(plural(selection.skipped_current, "vigente", "vigentes"))
+    if selection.skipped_no_evidence:
+        segments.append(f"{selection.skipped_no_evidence} sin evidencia")
+    if selection.forced:
+        # Current, and being re-asked anyway. This is the re-bill, announced BEFORE it happens.
+        segments.append(plural(selection.forced, "forzado", "forzados"))
+    if selection.remaining:
+        segments.append(f"{selection.remaining} fuera del límite")
+    stored_text = plural(stored, "evaluación guardada", "evaluaciones guardadas")
+    return f"{' · '.join(segments)} ({stored_text})"
+
+
+#: How `_echo_jev_outcome` / `_echo_jev_interrupt` name what a pass kept: topic
+#: evaluations by default, answers for `jev ask`.
+_ASK_NOUN = ("respuesta", "respuestas")
+_ASK_NEW = ("respuesta nueva", "respuestas nuevas")
+
+
+def _echo_jev_outcome(
+    result: RunResult[Any],
+    topics_path: Path,
+    *,
+    noun: tuple[str, str] = ("evaluada", "evaluadas"),
+) -> None:
+    """The run's one-line summary on stdout, then its per-item failures on stderr.
+
+    Printed BEFORE the side-car is written, never after. The counters are sitting on
+    `result` and cannot fail; the save can. With the summary echoed afterwards, a save
+    failure means the operator never learns what the run cost or which items failed — the
+    exact bug `#90 re-review item 4` fixed for `redescribe-frames` (`_finish_redescribe_run`).
+    """
+    models = sorted({assessment.model for assessment in result.assessed})
+    typer.echo(
+        f"{plural(len(result.assessed), *noun)} · "
+        f"{plural(len(result.failed), 'fallida', 'fallidas')} · "
+        f"{_jev_cost_line(result.assessed)} · "
+        f"{'modelo' if len(models) == 1 else 'modelos'} {', '.join(models)} → {topics_path}"
+    )
+    for item_id, reason in result.failed[:FAILURES_SHOWN]:
+        typer.echo(f"  FALLO {item_id}: {reason}", err=True)
+    if len(result.failed) > FAILURES_SHOWN:
+        remaining = len(result.failed) - FAILURES_SHOWN
+        # The eleventh failure of eleven is "1 fallo más", not "1 fallos más".
+        typer.echo(f"  … y {plural(remaining, 'fallo', 'fallos')} más", err=True)
+
+
+def _echo_jev_interrupt(
+    banked: tuple[Any, ...],
+    stored: int,
+    *,
+    force: bool,
+    path: Path,
+    new: tuple[str, str] = ("evaluación nueva", "evaluaciones nuevas"),
+) -> None:
+    """What Ctrl-C kept, on stderr — printed BEFORE `run_topics` saves it.
+
+    With nothing banked there is nothing to save and no bill to report: `run_topics` writes
+    nothing (saving would put an unchanged map over the side-car, `{}` on a first run).
+    """
+    if not banked:
+        typer.echo("Interrumpido: nada nuevo que guardar", err=True)
+        return
+    kind = (
+        plural(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
+        if force
+        else plural(len(banked), *new)
+    )
+    typer.echo(
+        f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
+        f"({stored} en total) en {path}",
+        err=True,
+    )
+    # What the interruption cost is the question the operator actually has here.
+    typer.echo(f"  {_jev_cost_line(banked)}", err=True)
+
+
+def _echo_jev_logged(path: Path, line: str, error: BaseException | None) -> None:
+    """Where the pass went in the run log — or the line to append by hand when it could not.
+
+    The failure is not an error of the command: the pass keeps its exit code and its saved
+    records. The line goes to stderr whole so the history is not lost.
+    """
+    if error is None:
+        typer.echo(f"pasada registrada → {path}")
+        return
+    typer.echo(f"no se pudo registrar la pasada en {path} ({error}); añádela a mano:", err=True)
+    typer.echo(line, err=True)
+
+
+@jev_app.command("topics")
+@_handle_cli_errors
+def jev_topics_cmd(
+    ids: list[str] = typer.Option([], "--id", help="Solo estos items (repetible)"),
+    limit: int | None = typer.Option(None, help="Máximo de items a evaluar"),
+    force: bool = typer.Option(
+        False, "--force", help="Re-evaluar aunque la evaluación esté vigente"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Solo cuenta; no llama a Jev"),
+) -> None:
+    """Pregunta a Jev, por item, a qué topics pertenece el post (un noul por topic + el primario).
+
+    Escribe `<data_dir>/jev/topics.json` (por defecto `data/jev/topics.json`) y, si envió
+    alguna petición, añade una línea con lo que costó la pasada a `data/jev/runs.jsonl`.
+    Nunca toca items.json.
+    """
+    cfg = _config()
+    # The pass lock covers LOAD → SAVE: a pass started while another one runs (a second
+    # terminal, or the page's job under `xbrain jev serve`) would save its own map over the
+    # other's paid records. `--dry-run` only reads, so it never waits on — or blocks — a pass.
+    try:
+        with (
+            nullcontext() if dry_run else pass_lock(cfg.jev_lock_path, "xbrain jev topics") as lock
+        ):
+            outcome = _jev_topics_pass(cfg, ids, limit, force=force, dry_run=dry_run, lock=lock)
+    except PassLockBusy as exc:
+        # 75 = EX_TEMPFAIL: nothing is wrong except the timing (a job of `xbrain jev serve`, or
+        # another terminal, is mid-pass). A script can tell it from a real failure and retry.
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=75) from exc
+    if outcome is not None and outcome.interrupted:
+        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
+        # to checkpoint must not change the code the shell sees.
+        raise typer.Exit(code=130)
+
+
+def _jev_topics_pass(
+    cfg: Config,
+    ids: list[str],
+    limit: int | None,
+    *,
+    force: bool,
+    dry_run: bool,
+    lock: PassLock | None,
+) -> RunOutcome | None:
+    """`jev topics` from loading the side-car to the end of the pass: the part the lock covers.
+
+    `None` when nothing was run (`--dry-run`, or nothing to ask)."""
+    store = load_store(cfg.items_path)
+    vocab = load_vocab(cfg.vocab_path)
+    assessments = load_assessments(cfg.jev_topics_path)
+    selection = select_items(
+        store,
+        assessments,
+        vocab,
+        ids=ids,
+        limit=limit,
+        force=force,
+        fallback=cfg.jev_fallback_option,
+        char_limit=cfg.jev_state_char_limit,
+    )
+    typer.echo(_jev_selection_line(selection, len(assessments)))
+    if dry_run:
+        typer.echo(dry_run_key_line(cfg.repo_root))
+        return None
+    if not selection.items or lock is None:
+        return None
+
+    def _progress(done: int, total: int) -> None:
+        if done % 50 == 0 or done == total:
+            typer.echo(f"  {done}/{total}")
+
+    # THE run loop lives in `jev.run` so the local server (`xbrain jev serve`) calls the same
+    # one; this command only decides what to print, and when (`run_topics`' hooks fire at
+    # those moments).
+    return run_topics(
+        cfg,
+        selection,
+        assessments,
+        vocab,
+        lambda: _jev_client(cfg),
+        lock=lock,
+        on_backup=lambda backup: typer.echo(f"Copia de seguridad: {backup}"),
+        on_progress=_progress,
+        on_summary=lambda result: _echo_jev_outcome(result, cfg.jev_topics_path),
+        on_interrupted=lambda banked, stored: _echo_jev_interrupt(
+            banked, stored, force=force, path=cfg.jev_topics_path
+        ),
+        on_logged=_echo_jev_logged,
+    )
+
+
+_DAY = ["%Y-%m-%d"]
+_ASK_HOLDER = "xbrain jev ask"
+
+
+@jev_app.command("ask")
+@_handle_cli_errors
+def jev_ask_cmd(
+    query: str = typer.Argument(..., help="La pregunta, en cualquier idioma"),
+    topic: list[str] | None = typer.Option(
+        None,
+        help="Solo posts de este topic (repetible: de cualquiera de ellos): enrich, o Jev con "
+        "evaluación vigente ≥ \\[jev].threshold",
+    ),
+    since: datetime | None = typer.Option(
+        None, formats=_DAY, help="Solo posts desde este día (AAAA-MM-DD, incluido)"
+    ),
+    until: datetime | None = typer.Option(
+        None, formats=_DAY, help="Solo posts hasta este día (AAAA-MM-DD, incluido)"
+    ),
+    author: str | None = typer.Option(None, help="Solo posts de este autor (@handle)"),
+    only_evaluated: bool = typer.Option(
+        False, "--only-evaluated", help="Solo posts con evaluación vigente de topics"
+    ),
+    limit: int | None = typer.Option(None, help="Máximo de posts a preguntar (pagar)"),
+    minimum: float = typer.Option(
+        0.0,
+        "--min",
+        help="Relevancia mínima: solo resultados con probabilidad ≥ este valor (0 = sin mínimo)",
+    ),
+    top: int | None = typer.Option(
+        None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
+    ),
+    show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+    threshold: float | None = typer.Option(
+        None,
+        "--threshold",
+        hidden=True,
+        help="Retirada: los resultados se ordenan; usa --min",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="No pedir confirmación por encima de \\[jev].ask_max_usd"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Solo cuenta y estima; no llama a Jev"),
+) -> None:
+    """Pregunta al corpus: Jev dice, post a post, si responde a la pregunta.
+
+    Una pregunta sí/no por post (la consulta tal cual, frente a la misma evidencia que `jev
+    topics`); resultados = los posts con respuesta, ordenados de mayor a menor probabilidad
+    (se imprimen los `\\[jev].ask_top` primeros; `--min` descarta los de menos). Guarda las
+    respuestas en `data/jev/asks/<sha>.json` (repetir la consulta no vuelve a pagar un post
+    cuya evidencia no cambió), el historial en `data/jev/asks/index.json` y lo que costó en
+    `data/jev/runs.jsonl`. Antes de preguntar estima el coste, y por encima de
+    `\\[jev].ask_max_usd` pide confirmación. Nunca toca items.json.
+    """
+    if threshold is not None:
+        # The old results cut, typed from habit: said in Spanish, with what replaces it.
+        raise ValueError(
+            "--threshold ya no existe en jev ask: los resultados se ordenan; usa --min P "
+            "(relevancia mínima)"
+        )
+    cfg = _config()
+    shown = _ask_shown(cfg, minimum, top, show_all)
+    ask_query = AskQuery.of(query)
+    filters = _ask_filters(topic, since, until, author, only_evaluated)
+    # Planned WITHOUT the lock: the estimate and the confirmation must never hold it while a
+    # prompt waits (a `jev serve` job, or a terminal, could not run meanwhile).
+    plan = plan_ask(cfg, ask_query, filters, limit)
+    _echo_ask_plan(plan)
+    if dry_run:
+        typer.echo(dry_run_key_line(cfg.repo_root))
+        return
+    confirmed = bool(plan.selection.items) and (
+        yes or _confirm_ask_cost(plan.estimate.usd, cfg.jev_ask_max_usd)
+    )
+    try:
+        with pass_lock(cfg.jev_lock_path, _ASK_HOLDER) as lock:
+            outcome = _jev_ask_locked(
+                cfg,
+                plan,
+                lock,
+                minimum=minimum,
+                top=shown,
+                yes=yes,
+                confirmed=confirmed,
+                limit=limit,
+            )
+    except PassLockBusy as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=75) from exc
+    if outcome is not None and outcome.interrupted:
+        raise typer.Exit(code=130)
+
+
+def _ask_shown(cfg: Config, minimum: float, top: int | None, show_all: bool) -> int | None:
+    """How many results to print (`None`: every one), refusing a `--min` outside [0, 1] and a
+    `--top` below 1. The default is `[jev].ask_top`."""
+    if not 0.0 <= minimum <= 1.0:
+        raise ValueError("--min debe estar en [0.0, 1.0]")
+    shown = cfg.jev_ask_top if top is None else top
+    if shown < 1:
+        raise ValueError("--top debe ser >= 1")
+    return None if show_all else shown
+
+
+def _ask_filters(
+    topic: list[str] | None,
+    since: datetime | None,
+    until: datetime | None,
+    author: str | None,
+    only_evaluated: bool,
+) -> AskFilters:
+    """The flags as `AskFilters` — which refuses the ones that could only select nothing."""
+    return AskFilters(
+        topics=tuple(topic or ()),
+        since=since.date() if since else None,
+        until=until.date() if until else None,
+        author=author,
+        only_evaluated=only_evaluated,
+    )
+
+
+def _echo_ask_plan(plan: AskPlan) -> None:
+    """The funnel, the estimate with the model it came from, and a near-duplicate hint."""
+    typer.echo(_jev_ask_selection_line(plan.selection, plan.dropped))
+    for similar in plan.similar:
+        typer.echo(
+            f"consulta parecida ya hecha: «{similar}» (usa el texto exacto para reaprovechar "
+            "sus respuestas)"
+        )
+    if not plan.selection.items:
+        return
+    estimate = plan.estimate
+    model = estimate.model
+    source = (
+        f"medido en {plural(model.answers, 'respuesta', 'respuestas')}"
+        if model.measured
+        else "a priori"
+    )
+    typer.echo(
+        f"estimación: ~{estimate.tokens} tokens de entrada (~{estimate.usd:.4f} $) · "
+        f"{estimate.chars} caracteres · {source}: {model.per_call:.0f} tokens por petición + "
+        f"{model.chars_per_token:.2f} caracteres por token"
+    )
+
+
+def _jev_ask_selection_line(selection: Selection, dropped: int) -> str:
+    """What the funnel did: the posts to pay for, then every reason a post is not asked."""
+    segments = [plural(len(selection.items), "post por preguntar", "posts por preguntar")]
+    if selection.skipped_current:
+        segments.append(plural(selection.skipped_current, "ya respondido", "ya respondidos"))
+    if selection.skipped_no_evidence:
+        segments.append(f"{selection.skipped_no_evidence} sin evidencia")
+    if selection.remaining:
+        segments.append(f"{selection.remaining} fuera del límite")
+    if dropped:
+        segments.append(
+            plural(dropped, "descartado por los filtros", "descartados por los filtros")
+        )
+    return " · ".join(segments)
+
+
+def _confirm_ask_cost(usd: float, cap: float) -> bool:
+    """Above `[jev].ask_max_usd`, spend only on an explicit yes; a no exits 1 having asked
+    nothing. At or under the cap it does not ask, and returns False: nobody confirmed a
+    price, so a price that moves over the cap before the lock is refused (`_jev_ask_locked`).
+    """
+    if usd <= cap:
+        return False
+    typer.echo(f"La estimación (~{usd:.4f} $) pasa de [jev].ask_max_usd = {cap} $.")
+    if not typer.confirm("¿Preguntar igualmente?", default=False):
+        typer.echo("Cancelado: no se ha preguntado nada.")
+        raise typer.Exit(code=1)
+    return True
+
+
+def _refuse_a_price_not_agreed(
+    cfg: Config, before: AskPlan, plan: AskPlan, *, yes: bool, confirmed: bool
+) -> None:
+    """Refuse the plan made under the lock when its price is not the one agreed: a prompted
+    yes agreed to the estimate it showed, never to whatever the lock finds; with no prompt
+    (under the cap) it must still be under `[jev].ask_max_usd`. `--yes` agreed to spend."""
+    if confirmed and not yes and over_cap(plan.estimate.usd, before.estimate.usd):
+        raise JevError(
+            f"la estimación subió de ~{before.estimate.usd:.4f} $ confirmados a "
+            f"~{plan.estimate.usd:.4f} $: no se ha preguntado nada; vuelve a lanzar la consulta"
+        )
+    if plan.selection.items and not (yes or confirmed) and plan.estimate.usd > cfg.jev_ask_max_usd:
+        raise JevError(
+            f"la estimación subió a ~{plan.estimate.usd:.4f} $, por encima de "
+            f"[jev].ask_max_usd = {cfg.jev_ask_max_usd} $: no se ha preguntado nada; "
+            "vuelve a lanzar la consulta"
+        )
+
+
+def _jev_ask_locked(
+    cfg: Config,
+    before: AskPlan,
+    lock: PassLock,
+    *,
+    minimum: float,
+    top: int | None,
+    yes: bool,
+    confirmed: bool,
+    limit: int | None,
+) -> RunOutcome[Any] | None:
+    """Under the lock: plan AGAIN, refuse if the posts or the price moved since the estimate,
+    ask, record and print. `None` when nothing needed asking.
+
+    The price is held to what was agreed: a prompted yes (`confirmed` without `--yes`) to the
+    estimate it showed; no prompt (under the cap) to `[jev].ask_max_usd`. `--yes` agreed to
+    spend without asking."""
+    plan = plan_ask(cfg, before.query, before.filters, limit)
+    if not same_selection(before, plan):
+        raise JevError(
+            "la selección cambió desde la estimación (otra pasada o un cambio en los datos): "
+            "no se ha preguntado nada; vuelve a lanzar la consulta"
+        )
+    _refuse_a_price_not_agreed(cfg, before, plan, yes=yes, confirmed=confirmed)
+    outcome = _jev_ask_run(cfg, plan, lock) if plan.selection.items else None
+    results = finish_ask(cfg, plan, outcome, minimum=minimum)
+    if outcome is not None and outcome.interrupted:
+        return outcome
+    _echo_ask_results(results, minimum, top)
+    cost = ask_cost(load_runs(cfg.jev_runs_path), plan.query.sha)
+    if cost["runs"]:
+        typer.echo(f"Esta consulta ha costado: {cost_line(cost)}")
+    return outcome
+
+
+def _jev_ask_run(cfg: Config, plan: AskPlan, lock: PassLock) -> RunOutcome[Any]:
+    """The paid part: `run.run_ask`, with `jev topics`' hooks, worded for answers."""
+    path = ask_path(cfg, plan.query)
+
+    def _progress(done: int, total: int) -> None:
+        if done % 50 == 0 or done == total:
+            typer.echo(f"  {done}/{total}")
+
+    return run_ask(
+        cfg,
+        plan,
+        lambda: _jev_client(cfg),
+        lock=lock,
+        on_progress=_progress,
+        on_summary=lambda result: _echo_jev_outcome(result, path, noun=_ASK_NOUN),
+        on_interrupted=lambda banked, stored: _echo_jev_interrupt(
+            banked, stored, force=False, path=path, new=_ASK_NEW
+        ),
+        on_logged=_echo_jev_logged,
+    )
+
+
+def _one_line(text: str, width: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _bar(probability: float) -> str:
+    """The probability drawn in ten cells, one per 0.1, rounded."""
+    full = round(probability * 10)
+    return "█" * full + "·" * (10 - full)
+
+
+def _refine_words(refine: AskFilters) -> str:
+    """A refine's filters in words, as the header names them: «topic a o b, desde …»."""
+    parts = []
+    if refine.topics:
+        noun = "topic" if len(refine.topics) == 1 else "topics"
+        parts.append(f"{noun} {' o '.join(refine.topics)}")
+    if refine.since is not None:
+        parts.append(f"desde {refine.since}")
+    if refine.until is not None:
+        parts.append(f"hasta {refine.until}")
+    if refine.author is not None:
+        parts.append(f"autor @{normalise_author(refine.author)}")
+    return ", ".join(parts)
+
+
+def _echo_ask_results(
+    results: AskResults, minimum: float, top: int | None, refine: AskFilters | None = None
+) -> None:
+    """The results RANKED, the first `top` (every one when None): probability as a number and
+    a bar, id, author, day, the post, its link; then how many more there are.
+
+    The header counts what the list holds: «los 20 primeros de 187 que pasan el refinado
+    (topic …) con relevancia ≥ 0.5 · 808 leídos por Jev» — the refine (`jev asks … --topic`)
+    and the minimum both named, so shown + «y N más» adds up to the number said."""
+    total = len(results.ranked)
+    shown = total if top is None else min(top, total)
+    read = plural(results.answered, "leído por Jev", "leídos por Jev")
+    which = f"los {shown} primeros" if shown < total else f"los {shown}"
+    words = _refine_words(refine) if refine is not None else ""
+    what = f"{total} que pasan el refinado ({words})" if words else f"{total}"
+    if minimum > 0:
+        what += f" con relevancia ≥ {minimum}"
+    of = f"{what} · {read}" if words or minimum > 0 else read
+    typer.echo(f"Resultados: {which} de {of}, de mayor a menor probabilidad")
+    for item, record in results.ranked[:shown]:
+        typer.echo(
+            f"  {record.probability:.2f} {_bar(record.probability)}  {item.id}  "
+            f"@{item.author.handle}  {item.created_at:%Y-%m-%d}  {_one_line(item.text, 70)}  "
+            f"{item.url}"
+        )
+    if shown < total:
+        typer.echo(f"  … y {total - shown} más (--top N o --all para verlos)")
+
+
+@jev_app.command("asks")
+@_handle_cli_errors
+def jev_asks_cmd(
+    which: str | None = typer.Argument(
+        None,
+        help="Una consulta del historial: su número en esta lista (1 = la última) o el "
+        "principio de su sha. Con ella, reimprime sus resultados refinados, gratis",
+    ),
+    topic: list[str] | None = typer.Option(
+        None, help="Refinar: solo posts de este topic (repetible: de cualquiera de ellos)"
+    ),
+    since: datetime | None = typer.Option(None, formats=_DAY, help="Refinar: desde este día"),
+    until: datetime | None = typer.Option(None, formats=_DAY, help="Refinar: hasta este día"),
+    author: str | None = typer.Option(None, help="Refinar: solo posts de este autor"),
+    minimum: float | None = typer.Option(
+        None, "--min", help="Refinar: relevancia mínima (por defecto, la de su último uso)"
+    ),
+    top: int | None = typer.Option(
+        None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
+    ),
+    show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+) -> None:
+    """Las consultas hechas con `jev ask`: cuándo, cuántas veces, su último uso y lo que han
+    costado (del registro de pasadas). Con una consulta (`jev asks 1`), reimprime sus
+    resultados guardados, refinados con --min/--topic/--since/--until/--author/--top: no
+    pregunta nada, no construye cliente y no cuesta nada. Solo lee."""
+    cfg = _config()
+    history = load_history(cfg)
+    entries = sorted(history.queries.values(), key=lambda e: e.last_asked_at, reverse=True)
+    refining = any((topic, since, until, author, minimum is not None, top is not None, show_all))
+    if which is not None:
+        _reprint_ask(
+            cfg,
+            _pick_saved(entries, which),
+            _ask_filters(topic, since, until, author, False),
+            minimum,
+            _ask_shown(cfg, minimum or 0.0, top, show_all),
+        )
+        return
+    if refining:
+        raise ValueError("refinar necesita una consulta: `xbrain jev asks 1 --min 0.5`")
+    _list_asks(cfg, entries)
+
+
+def _list_asks(cfg: Config, entries: list[AskHistoryEntry]) -> None:
+    """`jev asks` with no query: every query, newest first, its last use and its cost."""
+    by_query = ask_cost_by_query(load_runs(cfg.jev_runs_path))
+    if not entries:
+        typer.echo(f"sin consultas en {cfg.jev_asks_dir}")
+        return
+    for number, entry in enumerate(entries, start=1):
+        rebuilt = " · reconstruida desde sus respuestas" if entry.rebuilt else ""
+        # «N. sha8»: what `jev asks N` and `jev asks <sha>` take to reprint it.
+        typer.echo(
+            f"{number}. {entry.query_sha[:8]} «{entry.query}» · "
+            f"{plural(entry.times, 'vez', 'veces')} · "
+            f"{entry.first_asked_at:%Y-%m-%d} → {entry.last_asked_at:%Y-%m-%d}{rebuilt}"
+        )
+        reach = (
+            f", {entry.last_results} ≥ {entry.last_min} (relevancia mínima)"
+            if entry.last_min > 0
+            else ""
+        )
+        typer.echo(
+            f"  último uso: {entry.last_evaluated} con respuesta{reach}"
+            + (f" · filtros {entry.last_filters}" if entry.last_filters else "")
+        )
+        cost = by_query.get(entry.query_sha)
+        typer.echo(f"  {cost_line(cost) if cost else 'sin pasadas registradas'}")
+
+
+def _pick_saved(entries: list[AskHistoryEntry], which: str) -> AskHistoryEntry:
+    """`which` as `jev asks` lists them: a 1-based position (newest first) or a sha prefix."""
+    if which.isdigit() and 1 <= int(which) <= len(entries) and len(which) < 4:
+        return entries[int(which) - 1]
+    found = [entry for entry in entries if entry.query_sha.startswith(which.lower())]
+    if len(which) >= 4 and len(found) == 1:
+        return found[0]
+    raise JevError(
+        f"la consulta {which!r} no está en el historial (usa su número en `xbrain jev asks` "
+        "o el principio de su sha)"
+    )
+
+
+def _reprint_ask(
+    cfg: Config,
+    entry: AskHistoryEntry,
+    refine: AskFilters,
+    minimum: float | None,
+    top: int | None,
+) -> None:
+    """A saved query's results, refined (`ask.refine_results`), from its file: no client."""
+    jev = load_jev_pairs(cfg)
+    found = reopen_results(cfg, entry, jev)
+    used = entry.last_min if minimum is None else minimum
+    refined = refine_results(
+        found, refine, used, store=jev.store, jev=jev, threshold=cfg.jev_threshold
+    )
+    typer.echo(f"«{entry.query}» · {entry.last_asked_at:%Y-%m-%d}")
+    _echo_ask_results(refined, used, top, refine)
+
+
+def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
+    """Refuse BEFORE writing when there is nothing to compare, NAMING the missing input.
+
+    A comparison over nothing is not a comparison of zeros — it is a plausible-looking file of
+    zeros written over the last good one, atomically. `data/` is gitignored, the side-car is
+    not snapshotted and it costs money to regenerate, so there is no copy to fall back to.
+    (The name says "report" because that was the only caller when it was written; it guards
+    `jev.html` on exactly the same argument.)
+
+    The empty-vocabulary case is the sharpest: `build_topic_questions` refuses an empty
+    vocabulary loudly, but only from inside the comparison loop — with an empty side-car the
+    loop never runs, so the behaviour used to FLIP on the contents of an unrelated file. The
+    silent branch was the one where the operator had no other signal.
+
+    Each message names the file and the command that fixes it, and says the previous artifact
+    was left alone — the operator's next question after "why did it stop" is "did it eat my
+    report".
+
+    `artifact` IS THAT FILE, passed in rather than assumed, because more than one command
+    refuses through here and they protect different things in different directories:
+    `jev report` guards `data/jev/topics-report.json`, `jev dashboard` guards
+    `<output_dir>/jev.html`. Hard-coding the report's path sent an operator who ran the
+    dashboard to look at a file that command was never going to write — true, and about the
+    wrong artifact, which in a message whose whole job is "did it eat my work" is the same
+    failure as being wrong. A full path, not a bare filename: where it is, is half the answer.
+    """
+    kept = f"No se sobrescribe {artifact}"
+    if not jev.vocab:
+        raise JevError(
+            f"el vocabulario está vacío o falta {cfg.vocab_path}: ejecuta `xbrain vocab`. {kept}"
+        )
+    if not jev.store:
+        raise JevError(
+            f"no hay items que comparar en {cfg.items_path}: ejecuta `xbrain extract`. {kept}"
+        )
+    if not jev.assessments:
+        raise JevError(
+            f"no hay evaluaciones guardadas en {cfg.jev_topics_path}: "
+            f"ejecuta `xbrain jev topics`. {kept}"
+        )
+    if not jev.pairs:
+        raise JevError(
+            f"0 evaluaciones vigentes de {len(jev.assessments)} guardadas "
+            f"({jev.stale} caducadas, {jev.orphans} huérfanas): ejecuta `xbrain jev topics` "
+            f"(o revisa {cfg.vocab_path} si acabas de cambiarlo). {kept}"
+        )
+    if not any(item.enriched is not None for item, _ in jev.pairs):
+        # The fifth state, and the quietest: the side-car is full and current, and
+        # `report.compare_item` returns None for every record because no item carries an
+        # enrichment. Every bucket is 0, the self-check agrees with a summary of zeros, and
+        # the artifact renders clean — the one empty state that produces no signal at all.
+        # THE WHOLE PHRASE AGREES, not just the noun. `plural` agreed `item evaluado` while
+        # the article and the verb around it stayed hard-coded plural, so a one-item corpus
+        # refused with `los 1 item evaluado no están enriquecidos` — which reads as a bug in
+        # the counting, the exact failure `defaults.plural`'s own docstring says it exists
+        # to prevent. Spanish agrees at 1 ONLY, so each part is a two-way choice on the
+        # same count.
+        count = len(jev.pairs)
+        article = "el" if count == 1 else "los"
+        predicate = "no está enriquecido" if count == 1 else "no están enriquecidos"
+        raise JevError(
+            f"ninguna evaluación vigente tiene con qué compararse: {article} "
+            f"{plural(count, 'item evaluado', 'items evaluados')} {predicate}. "
+            f"Ejecuta `xbrain enrich`. {kept}"
+        )
+
+
+def _jev_threshold(cfg: Config, threshold: float | None) -> float:
+    """The umbral `jev report` compares at: the flag when given, `[jev].threshold` otherwise.
+
+    (`jev dashboard` has no flag: it always compares at `[jev].threshold`, which the config
+    loader has already bounded.) BOTH bounds earn their place, and they fail
+    in opposite directions: above 1.0 nothing is ever backed and every assignment is doubtful;
+    below 0.0 `noul >= t` holds for every pair, so EVERYTHING is backed and every topic Jev was
+    asked about becomes a missing candidate — an artifact that reads as near-perfect agreement.
+    `nan` fails the chain and is refused here too. Either way the result is a plausible-looking
+    file of pure noise written over the last good one, which is why this runs before any write.
+    """
+    resolved = cfg.jev_threshold if threshold is None else threshold
+    if not 0.0 <= resolved <= 1.0:
+        raise ValueError("--threshold debe estar en [0.0, 1.0]")
+    return resolved
+
+
+def _jev_report_line(summary: dict[str, Any]) -> str:
+    """What the comparison found, in one line — every number read from the summary.
+
+    The threshold is read from the summary too, not taken as a second argument: it is the one
+    number the line could otherwise print differently from the two files it announces.
+
+    It carries what the markdown headline carries, because this is the surface the operator
+    actually reads: how much of the side-car is current (`caducadas` — see `JevPairs`), how
+    much was comparable, `sin juzgar` next to `dudosas` (without it, `enrich respaldado 50 %`
+    beside `dudosas 0` is a riddle rather than a summary), and the shared cost fragment with
+    BOTH of its markers.
+
+    `dudosas` / `candidatas` are nouns on purpose: `faltan 1` does not agree, and this file
+    pluralises everything else by hand.
+    """
+    segments = [
+        f"Umbral {summary['threshold']}",
+        f"{plural(summary['assessments_stale'], 'caducada', 'caducadas')}",
+        f"items comparados {summary['items_compared']}/{summary['items_assessed']}",
+        f"enrich respaldado {summary['enrich_backed_pct']} %",
+        f"Jev respaldado {summary['jev_backed_pct']} %",
+        f"dudosas {summary['doubtful_pairs']}",
+        f"sin juzgar {summary['assigned_unjudged']}",
+        f"candidatas {summary['missing_pairs']}",
+        f"primario coincide {summary['primary_agree_pct']} %",
+        plural(summary["posts_with_disagreement"], "post con desacuerdo", "posts con desacuerdo"),
+        cost_fragment(summary),
+    ]
+    if summary["assessments_orphaned"]:
+        segments.insert(2, plural(summary["assessments_orphaned"], "huérfana", "huérfanas"))
+    return " · ".join(segments)
+
+
+@jev_app.command("report")
+@_handle_cli_errors
+def jev_report_cmd(
+    threshold: float | None = typer.Option(
+        # `\[` ESCAPES THE BRACKET FOR RICH, and the raw string is what carries the
+        # backslash to it. Typer renders help through Rich whenever rich is installed, and
+        # Rich reads `[jev]` as a style tag and consumes it: this read `(por defecto
+        # .threshold)` in every terminal, naming a key that exists in no config file.
+        # (`"\["` would also be an invalid Python escape sequence.) Pinned by
+        # `test_threshold_help_names_the_config_key_literally`.
+        None,
+        help=r"Umbral de pertenencia (por defecto \[jev].threshold)",
+    ),
+) -> None:
+    """Compara las evaluaciones de Jev con la asignación de enrich, a un umbral.
+
+    Escribe `<data_dir>/jev/topics-report.json` y `topics-report.md` (por defecto bajo
+    `data/jev/`). No llama a Jev ni gasta nada: solo lee el side-car que `xbrain jev topics`
+    ya pagó. Imprime también el histórico de coste de `data/jev/runs.jsonl`. Las evaluaciones caducadas se excluyen, nunca se comparan como si estuvieran
+    vigentes.
+    """
+    cfg = _config()
+    t = _jev_threshold(cfg, threshold)
+    jev = load_jev_pairs(cfg)
+    _refuse_empty_report(jev, cfg, report_paths(cfg.jev_dir)[0])
+    # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
+    # carry the rows, and a second pass would be a second place the threshold has to match.
+    # The clock is read HERE and handed down, so `build_report` stays a pure function of its
+    # arguments and a caller can pin `generated_at`.
+    summary, comparisons = build_report(
+        jev.pairs,
+        jev.vocab,
+        t,
+        now=datetime.now(timezone.utc),
+        stale=jev.stale,
+        orphans=jev.orphans,
+        unassessed=jev.unassessed,
+    )
+    # The run log is read BEFORE anything is written: a corrupt line refuses the command, and
+    # a refusal after `write_reports` would leave new files behind an exit 1.
+    runs = load_runs(cfg.jev_runs_path)
+    history = run_history(runs, jev.assessments)
+    json_path, md_path = write_reports(summary, comparisons, jev.store, cfg.jev_dir)
+    typer.echo(_jev_report_line(summary))
+    # The line above prices the side-car (the latest answer per item); this one prices every
+    # pass the run log recorded, re-asks included, and names what the log never saw.
+    typer.echo(f"Histórico: {history_fragment(history)}")
+    # `jev ask` passes share the log and are billed on their own line: the topics numbers
+    # above never include them.
+    asks = ask_history_fragment(runs)
+    if asks is not None:
+        typer.echo(f"Consultas (jev ask): {asks}")
+    typer.echo(f"→ {md_path}\n→ {json_path}")
+
+
+@jev_app.command("dashboard")
+@_handle_cli_errors
+def jev_dashboard_cmd() -> None:
+    r"""Escribe `<output_dir>/jev.html`: un navegador de todos los posts con enrich frente a Jev.
+
+    Cada post es una tarjeta (texto, fotos de `_media/`, post citado, enlace) con, debajo, lo
+    que puso enrich y lo que ve Jev al umbral de \[jev].threshold (fijo: la página no lo mueve
+    ni recalcula nada), con los mismos números que imprime `xbrain jev report`. Filtros,
+    topics, búsqueda y el coste de cada pasada (del registro `runs.jsonl`) y de cada post. No
+    llama a Jev ni gasta nada.
+    Corre `xbrain generate` antes para que las fotos y los enlaces a las notas existan.
+    """
+    cfg = _config()
+    jev = load_jev_pairs(cfg)
+    page = cfg.jev_page_path
+    # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
+    # names the missing input, the command that fixes it, and the artifact left alone, which
+    # for THIS command is the page and not the report it never touches.
+    _refuse_empty_report(jev, cfg, page)
+    # Everything the page needs is assembled in ONE place (`jev.dashboard.build_page_data`),
+    # handed the loader's result so currency is not decided twice.
+    data = build_page_data(cfg, now=datetime.now(timezone.utc), jev=jev)
+    # A corrupt run log does not cost the operator the page: the cost strip shows the error,
+    # stderr repeats it, and everything else renders as usual.
+    if "error" in data["cost"]:
+        typer.echo(f"Aviso: {data['cost']['error']}", err=True)
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    # Atomically, like the reports: a page half-written by a full disk or a Ctrl-C would
+    # truncate the last good one into unparseable HTML, which is the failure
+    # `_refuse_empty_report` spends four branches preventing, arriving through the write.
+    _atomic_write(page, render_jev_dashboard_html(data))
+    # The SAME line `jev report` prints, from the same summary: the two commands recap one
+    # side-car, and an operator who runs both must not have to reconcile two sets of numbers.
+    typer.echo(_jev_report_line(data["summary"]))
+    posts = len(data["posts"])
+    compared = data["summary"]["items_compared"]
+    typer.echo(
+        f"{plural(posts, 'post en el dashboard', 'posts en el dashboard')} "
+        f"({plural(compared, 'comparado', 'comparados')} con Jev) → {page.resolve().as_uri()}"
+    )
+
+
+@jev_app.command("serve")
+@_handle_cli_errors
+def jev_serve_cmd(
+    port: int = typer.Option(
+        8765, "--port", min=0, max=65535, help="Puerto en 127.0.0.1 (0 = uno libre cualquiera)"
+    ),
+    no_open: bool = typer.Option(False, "--no-open", help="No abrir el navegador"),
+) -> None:
+    r"""Sirve la página de Jev en 127.0.0.1, en vivo, con una API local para evaluar.
+
+    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local para dos
+    clases de trabajo. Topics (POST /api/topics/estimate → /api/topics/evaluate): pedir a Jev
+    unos posts, un topic, los N siguientes sin evaluar, los posts de un cruce o de una banda;
+    la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Preguntar
+    (la pestaña Preguntar, POST /api/ask/estimate → /api/ask/evaluate): una consulta al
+    corpus, la misma que `xbrain jev ask`. Siempre primero una estimación (posts y $),
+    después la confirmación, y un único trabajo en segundo plano. Cada trabajo gasta, con un
+    tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para: deja que el
+    trabajo guarde lo pagado y sale con 130.
+    """
+    cfg = _config()
+    service = JevService(cfg, lambda: _jev_client(cfg))
+    # Built once BEFORE binding: a corrupt side-car or run log refuses here, like `jev
+    # dashboard`, instead of on the first page load. Nothing is asked and no key is needed.
+    data = service.blob()
+    if "error" in data["cost"]:
+        typer.echo(f"Aviso: {data['cost']['error']}", err=True)
+    try:
+        server = make_server(service, port)
+    except OSError as exc:
+        raise JevError(
+            f"el puerto {port} está ocupado o no se puede usar ({exc}): elige otro con --port"
+        ) from exc
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    typer.echo(f"Página de Jev en {url} (solo este equipo) · Ctrl-C para parar")
+    if not no_open:
+        webbrowser.open(url)
+    code, job = serve_until_interrupted(server, service)
+    _echo_last_job(job)
+    if code:
+        typer.echo("Servidor parado.", err=True)
+        raise typer.Exit(code=code)
+
+
+#: What a finished job saved, per kind: a topics pass evaluations, an ask answers.
+_LAST_JOB_SAVED = {
+    "topics": ("evaluación guardada", "evaluaciones guardadas"),
+    "ask": ("respuesta guardada", "respuestas guardadas"),
+}
+
+
+def _echo_last_job(job: dict[str, Any]) -> None:
+    """The last job the server ran, in the terminal, like `jev topics` ends: what it saved,
+    what it could not, the backup, and a run-log line that has to be appended by hand."""
+    if job["state"] == "idle":
+        return
+    outcome = job.get("outcome") or {}
+    line = f"Último trabajo: {job['state']}"
+    if job.get("reason"):
+        line += f" ({job['reason']})"
+    if outcome:
+        saved = _LAST_JOB_SAVED[job.get("kind", "topics")]
+        line += (
+            f" · {plural(outcome['ok'], *saved)}"
+            f" · {plural(outcome['failed'], 'fallida', 'fallidas')}"
+        )
+        if outcome["unsaved"]:
+            line += f" · {outcome['unsaved']} sin guardar"
+    typer.echo(line, err=True)
+    if job.get("backup"):
+        typer.echo(f"  Copia de seguridad: {job['backup']}", err=True)
+    if job.get("error"):
+        typer.echo(f"  Error: {job['error']}", err=True)
+    if job.get("log_error"):
+        typer.echo(
+            f"  no se pudo registrar la pasada ({job['log_error']}): la línea está en el registro "
+            "del servidor, añádela a mano a runs.jsonl",
+            err=True,
+        )
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")
@@ -3367,6 +4438,8 @@ def search_command(
         typer.echo(render_search(response))
 
 
+# RAW docstring + `\[index]`: see the note on `describe` above — Rich renders this
+# docstring as the command's help and eats an unescaped `[index]`.
 @app.command("get")
 @_handle_cli_errors
 @_handle_index_errors
@@ -3381,13 +4454,13 @@ def get_command(
     cursor: str | None = typer.Option(None, "--cursor", help="Continúa una respuesta truncada."),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
-    """Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
+    r"""Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
 
     Es el invariante 7 del spec §3.7: `get` funciona con `data/index/` borrado, porque un
     índice capaz de contestar `get` sería una copia del corpus que nada invalida, y el día
     que las dos discreparan no habría forma de saber cuál se le enseñó al lector.
 
-    El presupuesto por respuesta sale de `[index].get_char_budget`; por encima de él la
+    El presupuesto por respuesta sale de `\[index].get_char_budget`; por encima de él la
     respuesta se trunca DECLARÁNDOLO y entrega un cursor (spec §9.3), nunca en silencio.
     """
     from typing import Sequence, cast

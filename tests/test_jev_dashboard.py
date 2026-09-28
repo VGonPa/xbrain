@@ -1,0 +1,2463 @@
+# tests/test_jev_dashboard.py
+"""What `jev.html` ships to the browser, and what the page says with it.
+
+The page has ONE job: show, post by post, where enrich's topics and Jev disagree at the
+configured threshold, and what Jev cost. It recomputes nothing — every number in the blob
+comes from `jev/report.py` (`build_report` for the comparison, `run_history` for the cost),
+so the tests below assert WHERE each value comes from, not merely that it appears.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+import typer
+
+from xbrain.config import load_config
+from xbrain.dashboard import _resource
+from xbrain.jev.assess import (
+    CUT_MARKER,
+    Selection,
+    STATE_SURFACE_KEYS,
+    build_topic_state,
+    current_pairs,
+    questions_digest,
+    state_surfaces,
+    topic_contract,
+)
+from xbrain.jev.client import ChoiceQuestion, NoulQuestion
+from xbrain.evidence import SURFACE_KEYS
+from xbrain.cli import app
+from xbrain.jev.dashboard import (
+    ASK_COMMAND,
+    DOCS_CONFIG_URL,
+    DOCS_URL,
+    PAGE_ARTICLE_CHARS,
+    SURFACE_LABELS,
+    TOPIC_MIN,
+    MediaFiles,
+    _cut_at_boundary,
+    _question_row,
+    collect_jev_media,
+    compute_jev_dashboard_data,
+    page_files,
+    render_jev_dashboard_html,
+)
+from xbrain.jev.defaults import INPUT_USD_PER_MTOK, JEV_DEFAULTS, tokens_cost_usd
+from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
+from xbrain.jev.questions import STATE_KEY, build_topic_questions
+from xbrain.jev.report import (
+    build_report,
+    estimate_selection,
+    post_cost_view,
+    run_history,
+    topics_pass_estimate,
+)
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Link,
+    MediaPhotoDescribed,
+    MediaPhotoDownloaded,
+    MediaPhotoFailed,
+    MediaPhotoPending,
+    MediaVideoDownloaded,
+    Topic,
+    VideoFrame,
+)
+
+REPO = Path(__file__).resolve().parent.parent
+DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
+#: A fixed clock. The blob carries `summary["generated_at"]`, so a function that reads the
+#: clock itself cannot be asserted against — and is not the pure function it claims to be.
+NOW = datetime(2026, 9, 22, 18, 30, 5, tzinfo=timezone.utc)
+VOCAB = [
+    Topic(slug="ai-coding", description="IA."),
+    Topic(slug="startups", description="Empresas."),
+]
+FALLBACK = "otro"
+CHAR_LIMIT = 100_000
+#: The one provider `jev.defaults.INPUT_USD_PER_MTOK` prices, so costs are real numbers.
+PRICED_PROVIDER = "typesafe"
+#: Non-default settings, so a test that reads a default back cannot pass by accident.
+MODEL = "jev-9.9.9"
+CONCURRENCY = 3
+
+
+def _item(item_id: str = "1", text: str = "Claude Code hooks", topics=("ai-coding",)) -> Item:
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=text,
+        created_at=DT,
+        captured_at=DT,
+        enriched=Enrichment(
+            enriched_at=DT,
+            executor="claude-code",
+            summary="s",
+            primary_topic=topics[0],
+            topics=list(topics),
+        ),
+    )
+
+
+def _assessment(
+    item: Item,
+    contract: str | None = None,
+    membership: dict[str, float] | None = None,
+    provider: str = PRICED_PROVIDER,
+    vocab: list[Topic] | None = None,
+    choice: str = "ai-coding",
+    input_tokens: int | None = 2000,
+    char_limit: int = CHAR_LIMIT,
+    fallback: str = FALLBACK,
+) -> TopicAssessment:
+    """A record whose contract is the one TODAY'S ask would stamp, so it reads as current.
+
+    Built the way `assess.assess_topics` builds it — the state as sent and the digest of the
+    questions that went with it — so a change to either composition shows up here as a stale
+    fixture instead of a test passing over a contract nobody computes any more.
+    """
+    state, state_chars = build_topic_state(item, char_limit)
+    digest = questions_digest(build_topic_questions(vocab or VOCAB, fallback))
+    return TopicAssessment(
+        item_id=item.id,
+        provider=provider,
+        model="jev-1.13.0",
+        asked_at=DT,
+        contract=contract or topic_contract(state[STATE_KEY], digest),
+        state_chars=state_chars,
+        membership=membership or {"startups": 0.123456, "ai-coding": 0.9},
+        primary=PrimaryChoice(
+            choice=choice,
+            confidence=0.77,
+            probabilities={"ai-coding": 0.7, "startups": 0.2, "otro": 0.1},
+        ),
+        input_tokens=input_tokens,
+        truncated=state_chars > char_limit,
+    )
+
+
+def _run(started: datetime, tokens: int = 4000, requests: int = 2) -> JevRun:
+    return JevRun(
+        started_at=started,
+        finished_at=started + timedelta(seconds=20),
+        models=["jev-1.13.0"],
+        requests=requests,
+        ok=requests,
+        failed=0,
+        input_tokens_by_provider={PRICED_PROVIDER: tokens},
+        input_tokens=tokens,
+        input_tokens_unknown=0,
+        interrupted=False,
+    )
+
+
+def _settings(**over: Any) -> dict[str, Any]:
+    """`Config.jev_settings()` as a test hands it in: the fixture's values, keyed like
+    `JEV_DEFAULTS`, with `over` replacing some."""
+    settings: dict[str, Any] = {
+        "threshold": 0.85,
+        "model": MODEL,
+        "fallback_option": FALLBACK,
+        "concurrency": CONCURRENCY,
+        "state_char_limit": CHAR_LIMIT,
+        "serve_max_usd": 1.0,
+        "ask_max_usd": 0.25,
+        "ask_top": 20,
+    }
+    settings.update(over)
+    return settings
+
+
+#: `_data`'s short names for the settings a test most often moves.
+_SETTING_NAMES = {"fallback": "fallback_option", "char_limit": "state_char_limit"}
+
+
+def _data(
+    items: list[Item],
+    assessments: dict[str, TopicAssessment],
+    vocab: list[Topic] | None = None,
+    **kwargs,
+) -> dict[str, Any]:
+    over = {
+        _SETTING_NAMES.get(key, key): kwargs.pop(key)
+        for key in (
+            "threshold",
+            "fallback",
+            "char_limit",
+            "model",
+            "concurrency",
+            "serve_max_usd",
+            "ask_max_usd",
+            "ask_top",
+        )
+        if key in kwargs
+    }
+    options: dict[str, Any] = {
+        "settings": _settings(**over),
+        "id2note": {},
+        "updated": "2026-09-22",
+        "now": NOW,
+        "runs": [],
+    }
+    options.update(kwargs)
+    return compute_jev_dashboard_data(items, assessments, vocab or VOCAB, **options)
+
+
+def _post(data: dict[str, Any], item_id: str) -> dict[str, Any]:
+    [post] = [post for post in data["posts"] if post["id"] == item_id]
+    return post
+
+
+# --------------------------------------------------------------------------- the numbers
+
+
+def test_the_summary_is_build_reports_at_the_configured_threshold():
+    """The three headline numbers must equal `xbrain jev report`'s. They do by construction
+    only if the blob's summary IS `build_report`'s, at the same threshold, from the same
+    current pairs — so that is what is asserted, whole."""
+    fresh, doubtful = _item("1"), _item("2", topics=("startups",))
+    assessments = {"1": _assessment(fresh), "2": _assessment(doubtful)}
+
+    data = _data([fresh, doubtful], assessments)
+
+    expected, _ = build_report(
+        [(fresh, assessments["1"]), (doubtful, assessments["2"])], VOCAB, 0.85, now=NOW
+    )
+    assert data["summary"] == expected
+    assert data["threshold"] == expected["threshold"] == 0.85
+
+
+# --------------------------------------------------------------------------- the post cards
+
+
+def test_each_card_has_one_row_per_topic_either_side_has_with_its_verdict():
+    """Enrich's topics in enrich's order, then the ones only Jev backs — each with the
+    probability (unrounded) and the verdict read off `build_report`'s comparison."""
+    item = _item("1", topics=("ai-coding",))
+    assessment = _assessment(item, membership={"ai-coding": 0.4, "startups": 0.973456})
+
+    jev = _post(_data([item], {"1": assessment}), "1")["jev"]
+
+    assert jev["topics"] == [
+        {"slug": "ai-coding", "enrich": True, "p": 0.4, "verdict": "solo_enrich"},
+        {"slug": "startups", "enrich": False, "p": 0.973456, "verdict": "solo_jev"},
+    ]
+    assert jev["compared"] is True
+    assert jev["primary"] == "ai-coding" and jev["jev_primary"] == "ai-coding"
+    assert jev["jev_confidence"] == 0.77
+    assert jev["primary_differs"] is False and jev["jev_fallback"] is False
+    assert jev["disagreements"] == 2
+
+
+def test_a_card_ships_only_the_fields_the_page_reads():
+    """No `primary_agrees`, `enrich_only` or `jev_only` counts: the filters are the card's
+    `in` list, and the primary line reads `primary_differs`."""
+    item = _item("1")
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert not {"primary_agrees", "enrich_only", "jev_only"} & set(jev)
+
+
+def test_a_topic_both_sides_hold_is_coinciden():
+    item = _item("1", topics=("ai-coding",))
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert jev["topics"] == [
+        {"slug": "ai-coding", "enrich": True, "p": 0.9, "verdict": "coinciden"}
+    ]
+    assert jev["disagreements"] == 0
+
+
+def test_jevs_primary_is_a_row_when_no_other_row_names_it():
+    """A topic filter must find the post whose primary Jev put on a topic it does not back
+    at the threshold. The row is not a disagreement of its own: the primary line counts it."""
+    item = _item("1", topics=("ai-coding",))
+    assessment = _assessment(
+        item, membership={"ai-coding": 0.9, "startups": 0.3}, choice="startups"
+    )
+
+    jev = _post(_data([item], {"1": assessment}), "1")["jev"]
+
+    assert jev["topics"][-1] == {
+        "slug": "startups",
+        "enrich": False,
+        "p": 0.3,
+        "verdict": "primario_jev",
+    }
+    assert jev["disagreements"] == 1  # the primary, once
+
+
+def test_the_fallback_is_not_a_topic_row():
+    item = _item("1", topics=("ai-coding",))
+
+    jev = _post(_data([item], {"1": _assessment(item, choice="otro")}), "1")["jev"]
+
+    assert [row["slug"] for row in jev["topics"]] == ["ai-coding"]
+    assert jev["jev_primary"] == "otro" and jev["jev_fallback"] is True
+    assert jev["primary_differs"] is True and jev["disagreements"] == 1
+
+
+def test_the_threshold_is_the_one_handed_in_and_nothing_on_the_page_moves_it():
+    item = _item(topics=("ai-coding",))
+
+    high = _data([item], {"1": _assessment(item)}, threshold=0.95)
+
+    # ai-coding at 0.9 is backed at 0.85 and doubtful at 0.95: the page shows what it was given.
+    assert high["summary"]["threshold"] == 0.95
+    assert _post(high, "1")["jev"]["topics"][0]["verdict"] == "solo_enrich"
+
+
+def test_a_topic_that_left_the_vocabulary_is_neither_confirmed_nor_denied():
+    """An assigned slug Jev was never asked about has no probability and its own verdict —
+    a fabricated 0.0 would show as the strongest disagreement in the corpus."""
+    item = _item("1", topics=("ai-coding", "web3"))
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert jev["topics"] == [
+        {"slug": "ai-coding", "enrich": True, "p": 0.9, "verdict": "coinciden"},
+        {"slug": "web3", "enrich": True, "p": None, "verdict": "sin_juzgar"},
+    ]
+    assert jev["disagreements"] == 0
+
+
+def test_posts_are_ordered_most_disagreement_first_then_the_unevaluated():
+    agree = _item("1", topics=("ai-coding",))
+    one = _item("2", topics=("ai-coding",))
+    two = _item("3", topics=("ai-coding",))
+    never = _item("0")
+    assessments = {
+        "1": _assessment(agree),
+        "2": _assessment(one, membership={"ai-coding": 0.4, "startups": 0.1}),
+        "3": _assessment(two, membership={"ai-coding": 0.4, "startups": 0.9}),
+    }
+
+    data = _data([never, agree, one, two], assessments)
+
+    assert [post["id"] for post in data["posts"]] == ["3", "2", "1", "0"]
+
+
+def test_posts_that_disagree_equally_are_ordered_by_id():
+    """Two renders of one side-car must list tied posts in the same order."""
+    items = [_item(i, topics=("ai-coding",)) for i in ("b", "c", "a")]
+    assessments = {
+        i.id: _assessment(i, membership={"ai-coding": 0.4, "startups": 0.1}) for i in items
+    }
+
+    data = _data(items, assessments)
+
+    assert [post["id"] for post in data["posts"]] == ["a", "b", "c"]
+
+
+def test_every_post_is_a_card_and_says_whether_jev_evaluated_it():
+    """The browser shows the whole corpus: an unevaluated post, a stale answer and a post
+    with nothing to compare against are cards too, each with its status."""
+    compared, stale, never, plain = _item("1"), _item("2", text="old"), _item("3"), _item("4")
+    plain.enriched = None
+    assessments = {
+        "1": _assessment(compared),
+        "2": _assessment(stale, contract="e" * 64),
+        "4": _assessment(plain),
+    }
+
+    data = _data([compared, stale, never, plain], assessments)
+
+    status = {post["id"]: post["status"] for post in data["posts"]}
+    assert status == {"1": "compared", "2": "stale", "3": "unevaluated", "4": "not_enriched"}
+    assert _post(data, "2")["jev"] is None and _post(data, "3")["jev"] is None
+    # What enrich said is on the card whether or not Jev was asked.
+    assert _post(data, "3")["enrich"] == {"topics": ["ai-coding"], "primary": "ai-coding"}
+    assert _post(data, "4")["enrich"] is None
+
+
+def test_a_paid_answer_for_a_post_without_enrichment_still_shows_what_jev_sees():
+    """Nothing to compare against is not nothing to show: Jev's own topics at the threshold
+    and its primary, with no verdict against enrich and no disagreement."""
+    plain = _item("1")
+    plain.enriched = None
+    assessment = _assessment(plain, membership={"ai-coding": 0.9, "startups": 0.95})
+
+    jev = _post(_data([plain], {"1": assessment}), "1")["jev"]
+
+    assert jev["compared"] is False
+    assert jev["topics"] == [
+        {"slug": "startups", "enrich": False, "p": 0.95, "verdict": "jev"},
+        {"slug": "ai-coding", "enrich": False, "p": 0.9, "verdict": "jev"},
+    ]
+    assert jev["jev_primary"] == "ai-coding" and jev["primary"] is None
+    assert jev["disagreements"] == 0 and jev["primary_differs"] is False
+    assert jev["model"] == "jev-1.13.0" and jev["surfaces"]
+
+
+def test_a_post_with_no_evidence_says_so_instead_of_offering_a_command():
+    """`jev topics` skips a post with no evidence (`state_chars == 0`, `select_items`'s own
+    test), so a copy-able command for it would do nothing."""
+    empty, never = _item("1", text=" "), _item("2")
+    empty.author = Author(handle="", name="")
+
+    data = _data([empty, never], {})
+
+    assert _post(data, "1")["no_evidence"] is True
+    assert _post(data, "2")["no_evidence"] is False
+    assert build_topic_state(empty, CHAR_LIMIT)[1] == 0
+
+
+def test_a_truncated_assessment_is_flagged_on_its_card():
+    """The page marks the post "recortado": Jev judged a CUT post, the one to distrust."""
+    item = _item()
+    assessment = _assessment(item).model_copy(update={"truncated": True})
+
+    assert _post(_data([item], {"1": assessment}), "1")["jev"]["truncated"] is True
+
+
+def test_the_card_says_who_answered_and_when():
+    item = _item()
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert jev["model"] == "jev-1.13.0"
+    assert jev["asked_at"] == DT.isoformat()
+
+
+def test_each_post_carries_what_its_stored_assessment_cost():
+    """Priced by `report.assessment_cost_usd` — and `None`, not zero, when the usage is
+    unknown or nobody prices the provider. The mean is over the CURRENT posts it can price,
+    and says how many: a stale record (with other tokens) never enters it."""
+    counted, uncounted, foreign, stale = _item("1"), _item("2"), _item("3"), _item("4", text="old")
+    assessments = {
+        "1": _assessment(counted, input_tokens=2500),
+        "2": _assessment(uncounted, input_tokens=None),
+        "3": _assessment(foreign, input_tokens=9000, provider="otro-juez"),
+        "4": _assessment(stale, contract="e" * 64, input_tokens=77_000),
+    }
+
+    data = _data([counted, uncounted, foreign, stale], assessments)
+
+    jev = {post_id: _post(data, post_id)["jev"] for post_id in ("1", "2", "3")}
+    assert jev["1"]["tokens"] == 2500
+    assert jev["1"]["cost_usd"] == tokens_cost_usd(2500, PRICED_PROVIDER)
+    assert jev["2"]["tokens"] is None and jev["2"]["cost_usd"] is None
+    assert jev["3"]["cost_usd"] is None and jev["3"]["unpriced"] is True
+    assert jev["1"]["unpriced"] is False
+    per_post = data["cost"]["per_post"]
+    assert per_post["mean_usd"] == tokens_cost_usd(2500, PRICED_PROVIDER)
+    assert (per_post["n"], per_post["of"]) == (1, 3)
+    assert per_post["unpriced_providers"] == ["otro-juez"]
+
+
+def test_an_item_enrich_left_without_a_primary_is_still_compared():
+    """No primary is not "nothing to compare": its assigned topics still have probabilities."""
+    item = _item("1", topics=("ai-coding",))
+    item.enriched.primary_topic = None
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert jev["primary"] is None and jev["primary_differs"] is True
+    assert jev["topics"][0] == {
+        "slug": "ai-coding",
+        "enrich": True,
+        "p": 0.9,
+        "verdict": "coinciden",
+    }
+
+
+# --------------------------------------------------------------------------- filters = report counts
+
+
+def _corpus() -> tuple[list[Item], dict[str, TopicAssessment]]:
+    """One post per case the filters must tell apart."""
+    agree = _item("agree", topics=("ai-coding",))
+    enrich_only = _item("enrich-only", topics=("ai-coding", "startups"))
+    jev_only = _item("jev-only", topics=("ai-coding",))
+    fallback = _item("fallback", topics=("ai-coding",))
+    other_primary = _item("other-primary", topics=("ai-coding",))
+    stale = _item("stale", text="old")
+    never = _item("never")
+    plain = _item("plain")
+    plain.enriched = None
+    low = {"startups": 0.1}
+    assessments = {
+        "agree": _assessment(agree, membership={"ai-coding": 0.9, **low}),
+        "enrich-only": _assessment(enrich_only, membership={"ai-coding": 0.9, **low}),
+        "jev-only": _assessment(jev_only, membership={"ai-coding": 0.9, "startups": 0.9}),
+        "fallback": _assessment(fallback, membership={"ai-coding": 0.9, **low}, choice="otro"),
+        "other-primary": _assessment(
+            other_primary, membership={"ai-coding": 0.9, **low}, choice="startups"
+        ),
+        "stale": _assessment(stale, contract="e" * 64),
+        "plain": _assessment(plain),
+    }
+    return [agree, enrich_only, jev_only, fallback, other_primary, stale, never, plain], assessments
+
+
+@pytest.mark.parametrize(
+    ("key", "count"),
+    [
+        ("disc", ("summary", "posts_with_disagreement")),
+        ("enrich_only", ("summary", "posts_enrich_only")),
+        ("adds", ("summary", "posts_jev_only")),
+        ("prim", ("summary", "posts_primary_differs")),
+        ("fallback", ("summary", "primary_fallback")),
+        ("uneval", ("summary", "items_unassessed")),
+    ],
+)
+def test_each_filters_cards_are_exactly_the_posts_its_report_count_counts(key, count):
+    """The page filters by `key in card["in"]` and prints the report's number beside it.
+    Decided here, per card, from `ItemComparison` and the status — so the two cannot drift."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+    section, name = count
+
+    members = [post["id"] for post in data["posts"] if key in post["in"]]
+
+    assert len(members) == data[section][name]
+    assert members  # every case is represented in the fixture
+
+
+def test_the_filter_keys_name_the_right_posts():
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    keys = {post["id"]: set(post["in"]) for post in data["posts"]}
+    assert keys["agree"] == set()
+    assert keys["enrich-only"] == {"disc", "enrich_only"}
+    assert keys["jev-only"] == {"disc", "adds"}
+    assert keys["fallback"] == {"disc", "prim", "fallback"}
+    assert keys["other-primary"] == {"disc", "prim"}
+    assert keys["stale"] == keys["never"] == {"uneval"}
+    assert keys["plain"] == set()
+
+
+def test_per_topic_numbers_are_the_cards_topic_rows():
+    """For each topic, the rows the cards carry add up to its `per_topic` row: coinciden =
+    backed, solo Jev = missing, solo enrich + solo Jev = disagreeing. A topic click under
+    "Con discrepancias" lists exactly `disagreeing` posts."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    for row in data["summary"]["per_topic"]:
+        verdicts = [
+            topic["verdict"]
+            for post in data["posts"]
+            if post["jev"] and post["jev"]["compared"]
+            for topic in post["jev"]["topics"]
+            if topic["slug"] == row["slug"]
+        ]
+        assert verdicts.count("coinciden") == row["backed"], row["slug"]
+        assert verdicts.count("solo_jev") == row["missing"], row["slug"]
+        assert verdicts.count("solo_enrich") == row["doubtful"], row["slug"]
+        assert verdicts.count("solo_enrich") + verdicts.count("solo_jev") == row["disagreeing"]
+
+
+def test_each_confusion_pairs_posts_show_that_pair_on_their_cards():
+    """The Topics tab lists a pair's posts from `post_sets`: each of those cards must carry
+    the pair — enrich's topic as solo enrich, Jev's as solo Jev; for a primary pair, the two
+    primaries. The index ships in the page and nowhere in the summary."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+    cards = {post["id"]: post for post in data["posts"]}
+    sets = data["post_sets"]
+
+    assert sets["cx"] and sets["px"]
+    assert all("ids" not in row for row in data["summary"]["topic_confusion"])
+    for key, ids in sets["cx"].items():
+        enrich, jev = (None if side == "-" else side for side in key.split("~"))
+        for post_id in ids:
+            verdicts = {r["slug"]: r["verdict"] for r in cards[post_id]["jev"]["topics"]}
+            if enrich is not None:
+                assert verdicts[enrich] == "solo_enrich", (key, post_id)
+            if jev is not None:
+                assert verdicts[jev] == "solo_jev", (key, post_id)
+    for key, ids in sets["px"].items():
+        enrich, jev = (None if side == "-" else side for side in key.split("~"))
+        for post_id in ids:
+            card = cards[post_id]["jev"]
+            assert (card["primary"], card["jev_primary"]) == (enrich, jev)
+
+
+def test_the_topic_pairs_are_what_the_cards_rows_say_recounted_from_the_cards():
+    """An independent recount: from each card's rows (solo enrich × solo Jev, `-` for a side
+    with none), rebuild the pair index and the counts — they must equal the report's."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    recount: dict[str, set[str]] = {}
+    for post in data["posts"]:
+        if not (post["jev"] and post["jev"]["compared"]):
+            continue
+        rows = post["jev"]["topics"]
+        only_enrich = [r["slug"] for r in rows if r["verdict"] == "solo_enrich"]
+        only_jev = [r["slug"] for r in rows if r["verdict"] == "solo_jev"]
+        if not (only_enrich or only_jev):
+            continue
+        for enrich in only_enrich or ["-"]:
+            for jev in only_jev or ["-"]:
+                recount.setdefault(f"{enrich}~{jev}", set()).add(post["id"])
+
+    assert {k: set(v) for k, v in data["post_sets"]["cx"].items()} == recount
+    counts = {
+        f"{r['enrich'] or '-'}~{r['jev'] or '-'}": r["posts"]
+        for r in data["summary"]["topic_confusion"]
+    }
+    assert counts == {k: len(v) for k, v in recount.items()}
+
+
+#: The Comparar fixture's vocabulary: five topics that carry the data and seven never used,
+#: so the tab's "10 worst" table has more topics than it shows.
+COMPARE_VOCAB = [
+    Topic(slug="alpha", description="Alfa: el grande."),
+    Topic(slug="beta", description="Beta: bajo el suelo."),
+    Topic(slug="gamma", description="Gamma: el peor."),
+    Topic(slug="delta", description="Delta: el del «otro»."),
+    Topic(slug="omega", description="Omega: solo lo pone Jev."),
+] + [Topic(slug=f"f{n:02d}", description=f"Relleno {n}.") for n in range(1, 8)]
+
+
+def _compare_fixture() -> dict[str, Any]:
+    """Every Comparar number non-empty and DIFFERENT from its neighbours, threshold 0.85.
+
+    Bands (pairs/posts): e-lo 5/4 (l00 has two) · e-mid 7/7 · e-near 6/3 (two each) · j-near
+    22/22 (past one page of 20) · j-hi 2/1 (h00 two). Disagreement kinds (posts): enrich asigna
+    y Jev no 14 · Jev añadiría 23 · primario distinto 15. Primary cross, off the diagonal:
+    gamma~omega 7 · delta~otro 5 · -~alpha 2 (no enrich primary) · alpha~beta 1; diagonal:
+    alpha 28 · beta 4 · delta 3 · gamma 3 (a TIE, broken by label). «otro» 5. Default topic
+    order: gamma (0 %), delta (89 %), alpha (91 %), then beta under the floor, then the
+    never-assigned: 12 topics. 53 compared; plus two never-asked posts."""
+    specs: list[tuple[str, tuple[str, ...], dict[str, float], str]] = []
+    # c00 also carries a slug that has left the vocabulary: Jev was never asked about it.
+    specs += [("c00", ("alpha", "retirado"), {"alpha": 0.9}, "alpha")]
+    specs += [(f"c{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(1, 6)]
+    specs += [("l00", ("beta", "delta"), {"beta": 0.1, "delta": 0.05}, "beta")]
+    specs += [(f"l{n:02d}", ("beta",), {"beta": 0.1}, "beta") for n in range(1, 4)]
+    specs += [(f"m{n:02d}", ("gamma",), {"gamma": 0.3}, "omega") for n in range(7)]
+    specs += [
+        (f"n{n:02d}", ("gamma", "alpha"), {"gamma": 0.6, "alpha": 0.8}, "gamma") for n in range(3)
+    ]
+    specs += [(f"j{n:02d}", ("alpha",), {"alpha": 0.9, "omega": 0.9}, "alpha") for n in range(22)]
+    specs += [("h00", ("alpha",), {"alpha": 0.9, "omega": 0.97, "beta": 0.99}, "beta")]
+    specs += [(f"o{n:02d}", ("delta",), {"delta": 0.9}, FALLBACK) for n in range(5)]
+    specs += [(f"s{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(2)]
+    specs += [(f"t{n:02d}", ("delta",), {"delta": 0.9}, "delta") for n in range(3)]
+    items: list[Item] = []
+    assessments: dict[str, TopicAssessment] = {}
+    for item_id, topics, membership, choice in specs:
+        item = _item(item_id, text=f"post {item_id}", topics=topics)
+        if item_id.startswith("s"):
+            item.enriched.primary_topic = None
+        full = {topic.slug: 0.05 for topic in COMPARE_VOCAB} | membership
+        answer = _assessment(item, membership=full, vocab=COMPARE_VOCAB)
+        probabilities = {choice: 0.7} | ({} if choice == FALLBACK else {FALLBACK: 0.1})
+        primary = PrimaryChoice(choice=choice, confidence=0.7, probabilities=probabilities)
+        items.append(item)
+        assessments[item_id] = answer.model_copy(update={"primary": primary})
+    items += [_item(f"u{n:02d}", topics=("alpha",)) for n in range(2)]
+    return compute_jev_dashboard_data(
+        items,
+        assessments,
+        COMPARE_VOCAB,
+        settings=_settings(),
+        id2note={},
+        updated="2026-09-26",
+        runs=[],
+        now=NOW,
+    )
+
+
+def test_the_compare_fixture_tells_every_number_apart():
+    data = _compare_fixture()
+    s = data["summary"]
+
+    assert {r["key"]: (r["pairs"], r["posts"]) for r in s["confidence_bands"]} == {
+        "e-lo": (5, 4),
+        "e-mid": (7, 7),
+        "e-near": (6, 3),
+        "j-near": (22, 22),
+        "j-hi": (2, 1),
+    }
+    assert (s["posts_enrich_only"], s["posts_jev_only"], s["posts_primary_differs"]) == (14, 23, 15)
+    assert [(r["enrich"], r["jev"], r["posts"]) for r in s["primary_confusion"]] == [
+        ("gamma", "omega", 7),
+        ("delta", "otro", 5),
+        (None, "alpha", 2),
+        ("alpha", "beta", 1),
+    ]
+    both = {r["slug"]: r["primary_both"] for r in s["per_topic"] if r["primary_both"]}
+    assert both == {"alpha": 28, "beta": 4, "delta": 3, "gamma": 3}
+    assert (s["primary_fallback"], s["primary_agree"], s["items_compared"]) == (5, 38, 53)
+    assert (s["doubtful_pairs"], s["missing_pairs"]) == (18, 24)
+    assert s["assigned_unjudged"] == 1
+    assert len(data["topics"]) == 12
+
+
+def test_each_bands_posts_show_a_disagreement_in_that_band_on_their_cards():
+    """An independent recount from the cards: a solo-enrich row is an enrich-side
+    disagreement, a solo-Jev row a Jev-side one; its probability picks the band by the
+    edges the summary ships. The posts per band must be the index's, the rows its `pairs`."""
+    data = _compare_fixture()
+    bands = data["summary"]["confidence_bands"]
+    kind_of = {"solo_enrich": "enrich_only", "solo_jev": "jev_only"}
+
+    posts: dict[str, set[str]] = {band["key"]: set() for band in bands}
+    pairs = dict.fromkeys(posts, 0)
+    for post in data["posts"]:
+        for row in (post["jev"] or {}).get("topics", []):
+            if row["verdict"] not in kind_of:
+                continue
+            [band] = [
+                b
+                for b in bands
+                if b["kind"] == kind_of[row["verdict"]]
+                and b["lo"] <= row["p"]
+                and (row["p"] < b["hi"] or (b["top"] and row["p"] == b["hi"]))
+            ]
+            posts[band["key"]].add(post["id"])
+            pairs[band["key"]] += 1
+
+    assert {k: set(v) for k, v in data["post_sets"]["bands"].items()} == posts
+    assert {b["key"]: b["pairs"] for b in bands} == pairs
+    assert {b["key"]: b["posts"] for b in bands} == {k: len(v) for k, v in posts.items()}
+
+
+def test_each_topics_agreeing_primary_posts_are_the_cards_where_both_pick_it():
+    data = _compare_fixture()
+
+    recount: dict[str, set[str]] = {}
+    for post in data["posts"]:
+        jev = post["jev"]
+        if jev and jev["compared"] and not jev["primary_differs"]:
+            assert jev["primary"] == jev["jev_primary"]
+            recount.setdefault(jev["primary"], set()).add(post["id"])
+
+    assert {k: set(v) for k, v in data["post_sets"]["pd"].items()} == recount
+    rows = {r["slug"]: r["primary_both"] for r in data["summary"]["per_topic"]}
+    assert {k: len(v) for k, v in recount.items()} == {k: n for k, n in rows.items() if n}
+
+
+def test_the_fallback_posts_are_the_primary_cross_rows_that_end_in_the_fallback():
+    data = _compare_fixture()
+    fallback_posts = {p["id"] for p in data["posts"] if "fallback" in p["in"]}
+
+    rows = [r for r in data["summary"]["primary_confusion"] if r["jev"] == FALLBACK]
+    from_index = set().union(*(data["post_sets"]["px"][f"{r['enrich']}~{r['jev']}"] for r in rows))
+    assert from_index == fallback_posts
+    assert sum(r["posts"] for r in rows) == data["summary"]["primary_fallback"] == 5
+
+
+def test_the_topic_floor_is_defined_once_and_shipped_to_the_page():
+    assert TOPIC_MIN == 5
+    assert _data([_item()], {})["topic_min"] == TOPIC_MIN
+
+
+def test_a_cards_slugs_are_every_topic_enrich_or_jev_has_on_it():
+    """What a topic filter matches outside the disagreement views."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    assert _post(data, "other-primary")["slugs"] == ["ai-coding", "startups"]
+    assert _post(data, "never")["slugs"] == ["ai-coding"]
+    assert _post(data, "plain")["slugs"] == ["ai-coding"]
+
+
+# --------------------------------------------------------------------------- the share card
+
+
+def test_the_card_carries_the_whole_post_and_who_wrote_it():
+    """The full text (the page collapses a long one), not a snippet — and the links to X and
+    the note, against the SOURCE, not a constant."""
+    long_post = "palabra " * 400
+    item = _item("1", text=long_post)
+
+    data = _data([item], {}, id2note={"1": "1.md"}, notes_dir="/v/items")
+    post = _post(data, "1")
+
+    assert post["text"] == long_post
+    assert post["author"] == {"handle": "alice", "name": "Alice"}
+    assert post["url"] == item.url and post["created"] == item.created_at.isoformat()
+    # The directory once, the file per post: 2.6k copies of one long prefix were 435 KB.
+    assert data["notes_dir"] == "/v/items" and post["note"] == "1.md"
+
+
+def _photo(item_id: str, n: int, description: str | None = None):
+    common = {
+        "url": f"https://pbs.twimg.com/{item_id}-{n}.jpg",
+        "local_path": f"{item_id}/{n}.jpg",
+        "width": 10,
+        "height": 10,
+        "bytes_size": 3,
+        "downloaded_at": DT,
+    }
+    if description is None:
+        return MediaPhotoDownloaded(**common)
+    return MediaPhotoDescribed(
+        **common,
+        is_decorative=False,
+        description=description,
+        description_lang="Spanish",
+        description_version="v1",
+        described_at=DT,
+    )
+
+
+def _files(mirrored=(), downloaded=()) -> MediaFiles:
+    return MediaFiles(mirrored=frozenset(mirrored), downloaded=frozenset(downloaded))
+
+
+def test_a_mirrored_photo_is_a_relative_path_into_the_vaults_media_folder():
+    item = _item("1")
+    item.media = [_photo("1", 0, description="Un gráfico.")]
+
+    media = _post(_data([item], {}, media=_files(mirrored={"1/0.jpg"})), "1")["media"]
+
+    assert media == [{"type": "photo", "src": "_media/1/0.jpg", "desc": "Un gráfico.", "why": None}]
+
+
+def test_a_photo_without_a_file_on_the_page_says_why():
+    """Downloaded but not mirrored yet (`xbrain generate` fixes it), never downloaded,
+    failed, or gone from both places: four different next steps."""
+    item = _item("1")
+    pending = MediaPhotoPending(url="https://pbs.twimg.com/p.jpg")
+    failed = MediaPhotoFailed(
+        url="https://pbs.twimg.com/f.jpg", failure_reason="http_4xx", attempts=1, last_attempt_at=DT
+    )
+    item.media = [_photo("1", 0), _photo("1", 1), pending, failed]
+
+    media = _post(_data([item], {}, media=_files(downloaded={"1/0.jpg"})), "1")["media"]
+
+    assert [(m["src"], m["why"]) for m in media] == [
+        (None, "not_mirrored"),
+        (None, "missing"),
+        (None, "not_downloaded"),
+        (None, "failed"),
+    ]
+
+
+def test_a_photo_caption_is_cut_for_the_tooltip():
+    """The vision caption is the photo's alt text and tooltip; at ~400 characters each over
+    ~1.3k photos, shipping it whole is a sixth of the page."""
+    item = _item("1")
+    item.media = [_photo("1", 0, description="d" * 500)]
+
+    [photo] = _post(_data([item], {}), "1")["media"]
+
+    assert photo["desc"] == "d" * 279 + "…"
+
+
+def _video(n: int) -> MediaVideoDownloaded:
+    return MediaVideoDownloaded(
+        url=f"https://video.twimg.com/{n}.mp4",
+        thumbnail_url="https://pbs.twimg.com/poster.jpg",
+        local_path=f"1/video-{n}.mp4",
+        bytes_size=9,
+        downloaded_at=DT,
+    )
+
+
+def test_each_video_shows_the_first_frame_of_its_own_source():
+    """Videos pair with the post's `x_video` sources in order; a video with no extracted
+    frame of its own is a placeholder, never the other video's still. A non-video source
+    that carries frames is not a video's frame."""
+    item = _item("1")
+    item.media = [_video(0), _video(1)]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://e.com",
+                text="art",
+                frames=[VideoFrame(timestamp=0.0, local_path="1/frames/article.jpg")],
+            ),
+            ContentSourceSuccess(
+                kind="x_video",
+                url=item.url,
+                text="transcript",
+                frames=[
+                    VideoFrame(timestamp=1.0, local_path="1/frames/0.jpg"),
+                    VideoFrame(timestamp=2.0, local_path="1/frames/1.jpg"),
+                ],
+            ),
+            ContentSourceSuccess(kind="x_video", url=item.url, text="second, no frames"),
+        ],
+    )
+
+    media = _post(
+        _data([item], {}, media=_files(mirrored={"1/frames/0.jpg", "1/frames/article.jpg"})), "1"
+    )["media"]
+
+    assert media == [
+        {"type": "video", "src": "_media/1/frames/0.jpg", "desc": "", "why": None},
+        {"type": "video", "src": None, "desc": "", "why": "no_frame"},
+    ]
+
+
+def test_at_most_four_media_per_card():
+    item = _item("1")
+    item.media = [_photo("1", n) for n in range(6)]
+
+    assert len(_post(_data([item], {}), "1")["media"]) == 4
+
+
+def _quoted_source(text: str) -> ContentSourceSuccess:
+    return ContentSourceSuccess(
+        kind="quoted_tweet",
+        url="https://x.com/karpathy/status/9",
+        text=text,
+        author=Author(handle="karpathy", name="Andrej Karpathy"),
+    )
+
+
+def test_the_quoted_post_is_the_one_jev_read_cut_for_the_page():
+    """`quoted_source` — the same quoted post the evidence carries — cut at 600 characters."""
+    item = _item("1")
+    item.content = Content(fetched_at=DT, sources=[_quoted_source("q" * 601)])
+
+    assert _post(_data([item], {}), "1")["quoted"] == {
+        "handle": "karpathy",
+        "name": "Andrej Karpathy",
+        "url": "https://x.com/karpathy/status/9",
+        "text": "q" * 600,
+        "cut": True,
+        "missing": False,
+        "why": None,
+    }
+
+
+def test_a_quoted_post_of_exactly_600_characters_is_not_cut():
+    item = _item("1")
+    item.content = Content(fetched_at=DT, sources=[_quoted_source("q" * 600)])
+
+    quoted = _post(_data([item], {}), "1")["quoted"]
+
+    assert quoted["text"] == "q" * 600 and quoted["cut"] is False
+
+
+def test_a_quoted_post_that_could_not_be_read_is_still_shown_as_missing():
+    """30 of 911 quote-tweets have no readable quoted source: the card says so and links to
+    X, instead of looking like a post that quotes nothing."""
+    failed = _item("1")
+    failed.quoted_id = "77"
+    failed.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceFailure(
+                kind="quoted_tweet", url="https://x.com/b/status/77", failure_reason="not_found"
+            )
+        ],
+    )
+    bare = _item("2")
+    bare.quoted_id = "88"
+
+    data = _data([failed, bare], {})
+
+    assert _post(data, "1")["quoted"] == {
+        "handle": None,
+        "name": None,
+        "url": "https://x.com/b/status/77",
+        "text": "",
+        "cut": False,
+        "missing": True,
+        "why": "failed",
+    }
+    # Never fetched is a different next step from a fetch that failed.
+    assert _post(data, "2")["quoted"]["url"] == "https://x.com/i/status/88"
+    assert _post(data, "2")["quoted"]["missing"] is True
+    assert _post(data, "2")["quoted"]["why"] == "not_fetched"
+
+
+def test_the_link_card_is_the_fetched_article_labelled_with_its_kind():
+    """An `x_article` source may hold scraped replies rather than an article: the card
+    names the kind so the page does not pass it off as one."""
+    item = _item("1")
+    item.links = [Link(url="https://blog.example.com/post", domain="blog.example.com")]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceSuccess(
+                kind="x_article", url="https://x.com/i/article/5", title="Un artículo", text="c"
+            )
+        ],
+    )
+
+    assert _post(_data([item], {}), "1")["link"] == {
+        "url": "https://x.com/i/article/5",
+        "domain": "x.com",
+        "title": "Un artículo",
+        "kind": "x_article",
+        "failed": False,
+    }
+
+
+def test_a_link_whose_fetch_failed_says_it_could_not_be_read():
+    item = _item("1")
+    item.links = [Link(url="https://blog.example.com/post", domain="blog.example.com")]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://blog.example.com/post",
+                failure_reason="not_found",
+            )
+        ],
+    )
+
+    assert _post(_data([item], {}), "1")["link"] == {
+        "url": "https://blog.example.com/post",
+        "domain": "blog.example.com",
+        "title": None,
+        "kind": "external_article",
+        "failed": True,
+    }
+
+
+def test_without_a_fetch_the_link_card_is_the_first_link():
+    item = _item("1")
+    item.links = [Link(url="https://www.example.com/a", domain="example.com")]
+
+    assert _post(_data([item], {}), "1")["link"] == {
+        "url": "https://www.example.com/a",
+        "domain": "example.com",
+        "title": None,
+        "kind": None,
+        "failed": False,
+    }
+    assert _post(_data([_item("2")], {}), "2")["link"] is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://x.com/i/article/1909295899274039296", True),
+        ("https://twitter.com/i/article/5/", True),
+        ("https://www.x.com/i/article/5", True),
+        ("https://x.com/a/status/5", False),
+        ("https://blog.example.com/i/article/5", False),
+        ("https://x.com/i/articles", False),
+    ],
+)
+def test_a_post_linking_an_x_article_is_marked_for_the_page(url, expected):
+    """X's embed of an Article is its bare link: the page opens such a post on the saved copy.
+    The mark comes from the post's own links (every Article post in the corpus has one)."""
+    item = _item("1")
+    item.links = [Link(url="https://blog.example.com/a", domain="blog.example.com")]
+    item.links.append(Link(url=url, domain="x.com"))
+
+    assert _post(_data([item], {}), "1")["x_article"] is expected
+    assert _post(_data([_item("2")], {}), "2")["x_article"] is False
+
+
+def _article_item(body: str, url: str = "https://x.com/i/article/9") -> Item:
+    item = _item("1", text="https://t.co/x")
+    item.links = [Link(url=url, domain="x.com")]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[ContentSourceSuccess(kind="x_article", url=url, title="Un artículo", text=body)],
+    )
+    return item
+
+
+def test_an_x_articles_body_ships_whole_when_it_fits():
+    body = "Primer párrafo.\n\nSegundo párrafo."
+
+    assert _post(_data([_article_item(body)], {}), "1")["article"] == {
+        "text": body,
+        "cut": False,
+        "chars": len(body),
+        "url": "https://x.com/i/article/9",
+    }
+
+
+def test_a_long_x_article_body_is_cut_at_a_boundary_to_the_one_cap():
+    paragraph = "Una frase de relleno que se repite. " * 20  # ~720 chars, sentences inside
+    body = "\n\n".join([paragraph.strip()] * 6)  # ~4,300 chars
+    article = _post(_data([_article_item(body)], {}), "1")["article"]
+
+    assert article["cut"] is True
+    assert article["chars"] == len(body)
+    assert len(article["text"]) <= PAGE_ARTICLE_CHARS
+    # A paragraph boundary is found before the cap: the text is whole paragraphs, marked.
+    assert article["text"].endswith(" …")
+    kept = article["text"][: -len(" …")]
+    assert body.startswith(kept)
+    assert body[len(kept) : len(kept) + 2] == "\n\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Whole: nothing to cut, no marker.
+        ("corto.", "corto."),
+        # A paragraph end in the second half of the window wins over a later sentence end.
+        ("a" * 11 + ". " + "\n\n" + "b" * 20, "a" * 11 + ". …"),
+        ("a" * 12 + "\n\nb. c" + "d" * 20, "a" * 12 + " …"),
+        # No paragraph end: the last sentence end in the second half.
+        ("Uno dos tres. Cuatro cinco seis", "Uno dos tres. …"),
+        # A boundary in the first half is too early: the next rule is tried.
+        ("Uno. dos tres cuatro cinco", "Uno. dos tres …"),
+        # No sentence end: the last space in the second half.
+        ("palabra " * 5, "palabra palabra …"),
+        # Nothing to cut at: a hard cut, still marked.
+        ("x" * 40, "x" * 19 + "…"),
+    ],
+)
+def test_the_article_cut_prefers_a_paragraph_then_a_sentence_then_a_word(text, expected):
+    cut = _cut_at_boundary(text, 20)
+
+    assert cut == expected
+    assert len(cut) <= 20
+
+
+def test_an_x_articles_body_of_exactly_the_cap_ships_whole_and_unmarked():
+    body = "a" * PAGE_ARTICLE_CHARS
+    article = _post(_data([_article_item(body)], {}), "1")["article"]
+
+    assert (article["text"], article["cut"]) == (body, False)
+    assert _cut_at_boundary(body + "b", PAGE_ARTICLE_CHARS).endswith("…")
+
+
+def test_an_x_articles_link_is_https_whatever_the_stored_scheme():
+    """«sigue en X» goes to X over https: a body fetched from `http://x.com/…` keeps its
+    path, not its scheme."""
+    item = _article_item("texto", url="http://x.com/i/article/9?s=20")
+
+    assert _post(_data([item], {}), "1")["article"]["url"] == "https://x.com/i/article/9?s=20"
+
+
+#: Graphemes of several code points, each put right across the hard cut.
+_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
+_FLAG = "\U0001f1ea\U0001f1f8"
+_THUMB = "\U0001f44d\U0001f3fd"
+_HEART = "\u2764\ufe0f"
+_ACUTE = "e\u0301"
+
+
+@pytest.mark.parametrize("grapheme", [_FAMILY, _FLAG, _THUMB, _HEART, _ACUTE])
+@pytest.mark.parametrize("offset", range(8))
+def test_a_hard_cut_never_splits_a_grapheme(grapheme, offset):
+    """No space to cut at: the hard cut steps back to the start of the grapheme it would
+    split (a ZWJ sequence, a flag's pair, a skin tone, a variation selector, an accent)."""
+    text = "x" * offset + grapheme * 60
+    cut = _cut_at_boundary(text, 40)
+
+    assert cut.endswith("…") and len(cut) <= 40
+    kept = cut[:-1]
+    assert text.startswith(kept)
+    assert kept[offset:] == grapheme * ((len(kept) - offset) // len(grapheme))
+
+
+def test_only_an_x_article_ships_a_body():
+    """A post whose fetched link is another site's article keeps its link card and no body:
+    the page's own share card is the rule there."""
+    item = _article_item("texto", url="https://blog.example.com/i/article/9")
+
+    assert _post(_data([item], {}), "1")["article"] is None
+    assert _post(_data([_item("2")], {}), "2")["article"] is None
+
+
+# --------------------------------------------------------------------------- media on disk
+
+
+def test_the_media_collector_is_the_only_place_that_looks_at_the_disk(tmp_path):
+    """`collect_jev_media` stats each photo and frame in the page's `_media/` mirror and in
+    `data/media/`; the blob builder only reads its answer, so it stays pure."""
+    page_dir, media_root = tmp_path / "vault", tmp_path / "data-media"
+    item = _item("1")
+    item.media = [_photo("1", 0), _photo("1", 1), _photo("1", 2)]
+    for root, name in (
+        (page_dir / "_media", "0.jpg"),
+        (media_root, "0.jpg"),
+        (media_root, "1.jpg"),
+    ):
+        (root / "1").mkdir(parents=True, exist_ok=True)
+        (root / "1" / name).write_bytes(b"jpg")
+
+    files = collect_jev_media([item], page_dir, media_root)
+
+    assert files == _files(mirrored={"1/0.jpg"}, downloaded={"1/0.jpg", "1/1.jpg"})
+    media = _post(_data([item], {}, media=files), "1")["media"]
+    assert [m["why"] for m in media] == [None, "not_mirrored", "missing"]
+    assert (page_dir / media[0]["src"]).is_file()
+
+
+# --------------------------------------------------------------------------- what Jev saw
+
+
+def test_what_jev_saw_is_the_state_split_into_its_surfaces():
+    """From `assess.state_surfaces`, with Spanish labels, sizes and what the cut kept. The
+    tweet and the author are already on the card, so their text is not shipped twice."""
+    item = _item("1", text="Claude Code hooks")
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert jev["surfaces"] == [
+        {
+            "key": "tweet",
+            "label": "Tweet",
+            "chars": 17,
+            "kept": 17,
+            "text": None,
+            "same_as": "post",
+        },
+        {
+            "key": "author",
+            "label": "Autor",
+            "chars": 11,
+            "kept": 11,
+            "text": None,
+            "same_as": "author",
+        },
+    ]
+    assert jev["state_chars"] == _assessment(item).state_chars == 17 + 1 + 11
+
+
+def test_the_quoted_surface_points_at_the_quoted_card():
+    item = _item("1")
+    item.content = Content(fetched_at=DT, sources=[_quoted_source("citado")])
+
+    surfaces = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]["surfaces"]
+
+    [quoted] = [s for s in surfaces if s["key"] == "quoted"]
+    assert quoted["text"] is None and quoted["same_as"] == "quoted"
+
+
+def test_a_surface_ships_at_most_600_characters_but_says_its_full_size():
+    item = _item("1")
+    item.content = Content(
+        fetched_at=DT,
+        sources=[ContentSourceSuccess(kind="thread", url=item.url, text="y" * 1500)],
+    )
+
+    surfaces = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]["surfaces"]
+
+    [thread] = [s for s in surfaces if s["key"] == "thread"]
+    assert thread["text"] == "y" * 600 and thread["same_as"] is None
+    assert (thread["chars"], thread["kept"]) == (1500, 1500)
+
+
+def test_what_the_cut_left_out_is_on_the_surface():
+    """Tweet (50) + author (11) under a 53-character limit: the tweet whole, 2 of the author's
+    11 characters — the figures `state_surfaces` computes for the state that was sent."""
+    item = _item("1", text="x" * 50)
+    assessment = _assessment(item, char_limit=53)
+
+    jev = _post(_data([item], {"1": assessment}, char_limit=53), "1")["jev"]
+
+    assert assessment.truncated is True and jev["truncated"] is True
+    assert [(s["key"], s["chars"], s["kept"]) for s in jev["surfaces"]] == [
+        ("tweet", 50, 50),
+        ("author", 11, 2),
+    ]
+
+
+def test_an_evaluated_card_stays_within_its_byte_budget():
+    """The page ships every post; an evaluated card is the heavy one. A 280-character tweet,
+    a quoted post, a 2,000-character article and two topics: the tweet travels once (the
+    surfaces point at it) and the card stays under 3 KB (2,852 bytes when this was written;
+    most of it is the article surface's 600 characters)."""
+    item = _item("1", text="t" * 280, topics=("ai-coding", "startups"))
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            _quoted_source("q" * 300),
+            ContentSourceSuccess(
+                kind="external_article", url="https://e.com/a", title="A", text="a" * 2000
+            ),
+        ],
+    )
+
+    card = _post(_data([item], {"1": _assessment(item)}), "1")
+    size = len(json.dumps(card, ensure_ascii=False).encode())
+
+    assert json.dumps(card).count("t" * 280) == 1
+    assert size <= 3000, size
+
+
+def test_the_copy_command_is_the_jev_topics_id_option_the_cli_really_has():
+    """The static page's "copiar comando" completes `ASK_COMMAND` with a post id; the line
+    must be one `xbrain jev topics` accepts, not a remembered spelling."""
+    topics = typer.main.get_command(app).commands["jev"].commands["topics"]  # type: ignore[attr-defined]
+
+    assert ASK_COMMAND == "xbrain jev topics --id"
+    assert any("--id" in param.opts for param in topics.params)
+    assert _data([_item()], {})["ask_command"] == ASK_COMMAND
+
+
+def test_every_surface_the_state_can_carry_has_a_spanish_label():
+    assert set(SURFACE_KEYS["topics"]) <= set(SURFACE_LABELS)
+    assert SURFACE_LABELS["quoted"] == "Post citado"
+    assert SURFACE_LABELS["video_transcript"] == "Transcripción del vídeo"
+
+
+# --------------------------------------------------------------------------- cost & runs
+
+
+def test_the_cost_block_is_report_run_history_over_the_whole_side_car():
+    """Total and per-pass history come from `report.run_history` — the RAW side-car, stale
+    records included, because they were paid for too."""
+    fresh, stale = _item("1"), _item("2", text="old")
+    assessments = {"1": _assessment(fresh), "2": _assessment(stale, contract="e" * 64)}
+    runs = [_run(datetime(2026, 9, 20, tzinfo=timezone.utc))]
+
+    data = _data([fresh, stale], assessments, runs=runs)
+
+    history = run_history(runs, assessments)
+    assert {key: data["cost"][key] for key in history} == history
+    assert data["cost"]["total"]["requests"] == 2
+
+
+def test_assessments_outside_the_log_are_announced_not_hidden():
+    """The first real run predates the log: 20 records, an empty `runs.jsonl`. The page
+    must say they exist instead of showing a total that silently omits them."""
+    item = _item("1")
+
+    data = _data([item], {"1": _assessment(item)}, runs=[])
+
+    assert data["cost"]["out_of_log"]["assessments"] == 1
+    assert data["cost"]["total"]["runs"] == 0
+
+
+def test_the_stored_answers_card_counts_and_prices_the_current_ones_only():
+    """With a stale record, the card's number and its cost describe the same set."""
+    fresh, stale = _item("1"), _item("2", text="old")
+    assessments = {
+        "1": _assessment(fresh, input_tokens=2000),
+        "2": _assessment(stale, contract="e" * 64, input_tokens=50_000),
+    }
+
+    current = _data([fresh, stale], assessments)["cost"]["current"]
+
+    assert current["assessments"] == 1
+    assert current["input_tokens"] == 2000
+    assert current["cost_usd"] == pytest.approx(tokens_cost_usd(2000, PRICED_PROVIDER))
+
+
+def test_a_run_log_that_cannot_be_read_replaces_the_cost_strip_not_the_page():
+    """One torn line must not cost the operator the whole disagreement table."""
+    item = _item()
+
+    data = _data([item], {"1": _assessment(item)}, runs=[], runs_error="runs.jsonl: línea 3")
+
+    assert data["cost"]["error"] == "runs.jsonl: línea 3"
+    assert "total" not in data["cost"] and "runs" not in data["cost"]
+    assert [post["id"] for post in data["posts"]] == ["1"]
+
+
+# --------------------------------------------------------------------------- side-car accounting
+
+
+def test_stale_and_orphaned_records_are_excluded_and_counted():
+    fresh, stale, gone = _item("1"), _item("2", text="old"), _item("3")
+
+    data = _data(
+        [fresh, stale],
+        {
+            "1": _assessment(fresh),
+            "2": _assessment(stale, contract="e" * 64),
+            "3": _assessment(gone),
+        },
+    )
+
+    # The stale one is still a card (marked, with no comparison); the orphan has no post.
+    assert [(post["id"], post["status"]) for post in data["posts"]] == [
+        ("1", "compared"),
+        ("2", "stale"),
+    ]
+    totals = data["totals"]
+    assert totals["models"] == data["summary"]["models"] == {"jev-1.13.0": 1}
+    assert (totals["current"], totals["stale"], totals["orphans"]) == (1, 1, 1)
+    assert totals["assessed"] == totals["current"] + totals["stale"] + totals["orphans"]
+
+
+def test_the_summary_carries_the_clock_it_was_handed_and_never_reads_one():
+    item = _item()
+
+    assert _data([item], {"1": _assessment(item)})["summary"]["generated_at"] == NOW.isoformat()
+
+
+def test_the_caller_may_hand_in_the_currency_it_already_computed():
+    fresh, stale = _item("1"), _item("2", text="old")
+    assessments = {"1": _assessment(fresh), "2": _assessment(stale, contract="e" * 64)}
+    current = current_pairs(
+        [fresh, stale], assessments, VOCAB, fallback=FALLBACK, char_limit=CHAR_LIMIT
+    )
+
+    handed_in = _data([fresh, stale], assessments, current=current)
+
+    assert handed_in == _data([fresh, stale], assessments)
+
+
+def test_a_handed_in_currency_computed_under_another_fallback_is_refused():
+    item = _item()
+    assessments = {"1": _assessment(item)}
+    elsewhere = current_pairs(
+        [item], assessments, VOCAB, fallback="otra-cosa", char_limit=CHAR_LIMIT
+    )
+
+    with pytest.raises(ValueError, match="otra-cosa"):
+        _data([item], assessments, current=elsewhere)
+
+
+def test_a_handed_in_currency_computed_under_another_char_limit_is_refused():
+    item = _item()
+    assessments = {"1": _assessment(item)}
+    elsewhere = current_pairs([item], assessments, VOCAB, fallback=FALLBACK, char_limit=17)
+
+    with pytest.raises(ValueError, match="17"):
+        _data([item], assessments, current=elsewhere)
+
+
+# --------------------------------------------------------------------------- the page
+
+
+def _page() -> str:
+    item = _item()
+    return render_jev_dashboard_html(_data([item], {"1": _assessment(item)}))
+
+
+def test_the_page_is_self_contained_and_leaves_no_sentinel():
+    html = _page()
+
+    assert "/*__DATA__*/" not in html and "/*__ECHARTS__*/" not in html
+    assert "let DATA = " in html
+    # No charting library any more: the page is a table. Fonts are the only fetch.
+    assert "echarts" not in html.lower()
+    fetched = re.findall(r'<(?:script|link|img|iframe)[^>]*\s(?:src|href)="(https?://[^"]*)"', html)
+    assert fetched and all(url.startswith("https://fonts.g") for url in fetched)
+
+
+def test_the_page_has_no_slider_and_no_threshold_input():
+    """The threshold is FIXED (`[jev].threshold`). A control that moves it would show numbers
+    `xbrain jev report` does not print."""
+    template = _resource("jev.template.html")
+
+    assert 'type="range"' not in template
+    assert 'id="threshold"' not in template
+    assert "derive(" not in template and "selfCheck" not in template
+    # The only input is the search box; sort is a select; filters are buttons.
+    inputs = re.findall(r"<input[^>]*>", template)
+    assert len(inputs) == 1 and 'type="search"' in inputs[0]
+    assert '<select id="sort"' in template
+
+
+def test_the_word_noul_appears_nowhere_on_the_page():
+    """Vendor jargon: the reader sees "probabilidad"."""
+    template = _resource("jev.template.html")
+
+    assert "noul" not in template.lower()
+    assert "probabilidad" in template
+
+
+def test_the_page_names_the_threshold_as_config_and_links_the_docs():
+    template = _resource("jev.template.html")
+
+    # The header's threshold is a link to where Configuración explains it (its row), not a
+    # «(config)» that names a file.
+    assert "'\">Umbral de topics '" in template and "(config)" not in template
+    assert 'data-cfg="threshold"' in template and "tr.id = 'cfg-' + C.settings[i].key" in template
+    assert "DATA.threshold" in template
+    assert "DATA.docs_url" in template
+    assert _data([_item()], {"1": _assessment(_item())})["docs_url"] == DOCS_URL
+    assert DOCS_URL.startswith("https://github.com/VGonPa/xbrain/") and DOCS_URL.endswith(
+        "docs/jev.md"
+    )
+
+
+def test_the_page_shows_the_three_numbers_from_the_summary_keys():
+    """The headline reads `summary` fields by name — the ones `jev report` prints."""
+    template = _resource("jev.template.html")
+
+    for key in (
+        "assigned_backed",
+        "assigned_pairs",
+        "enrich_backed_pct",
+        "missing_pairs",
+        "primary_agree_pct",
+    ):
+        assert f"S.{key}" in template, key
+
+
+def test_the_page_says_what_it_is_for():
+    template = _resource("jev.template.html")
+
+    assert "Qué es esto" in template
+    assert "Coste y peticiones" in template
+    assert "Histórico por pasada" in template
+    # The pre-log line: "N evaluaciones anteriores" + " al registro de pasadas".
+    assert "fuera del registro de pasadas" in template
+
+
+def test_scraped_text_cannot_close_the_script_tag_or_break_the_parse():
+    vocab = [
+        Topic(slug="ai-coding", description="IA. Fin.</script><img src=x>"),
+        Topic(slug="startups", description="Empresas."),
+    ]
+    item = _item("1", text="cierra aquí </script><img src=x onerror=alert(1)>")
+    data = compute_jev_dashboard_data(
+        [item],
+        {"1": _assessment(item, vocab=vocab)},
+        vocab,
+        settings=_settings(),
+        id2note={},
+        updated="2026-09-22",
+        now=NOW,
+        runs=[],
+    )
+
+    html = render_jev_dashboard_html(data)
+
+    assert html.count("</script>") == 1  # the page's own script tag, and no other
+    assert " " not in html
+    assert "<img src=x" not in html
+    assert json.loads(json.dumps(data))["posts"][0]["text"].startswith("cierra aquí </script>")
+
+
+def test_hostile_strings_in_every_scraped_field_survive_the_page_parse_intact():
+    """Author, quoted post, link title, photo caption and an evidence surface each carry a
+    script-closer, markup and a JavaScript line separator (U+2028/U+2029): the page's DATA,
+    parsed back out of the HTML, equals the blob — nothing broke out, nothing was mangled."""
+    hostile = "</script><img src=x onerror=alert(1)>\u2028\u2029'\"&"
+    item = _item("1", text="post " + hostile)
+    item.author = Author(handle="h" + hostile, name="N" + hostile)
+    item.media = [_photo("1", 0, description="foto " + hostile)]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            _quoted_source("citado " + hostile),
+            ContentSourceSuccess(
+                kind="external_article", url="https://e.com", title="T" + hostile, text="a"
+            ),
+            ContentSourceSuccess(kind="thread", url=item.url, text="hilo " + hostile),
+        ],
+    )
+    data = _data([item], {"1": _assessment(item)})
+
+    html = render_jev_dashboard_html(data)
+
+    assert html.count("</script>") == 1
+    assert "\u2028" not in html and "\u2029" not in html
+    payload = html.rsplit("let DATA = ", 1)[1].split(";\n", 1)[0]
+    assert json.loads(payload) == json.loads(json.dumps(data))
+    card = json.loads(payload)["posts"][0]
+    assert card["quoted"]["text"].endswith(hostile)
+    assert card["link"]["title"].endswith(hostile)
+    assert card["media"][0]["desc"].endswith(hostile)
+    assert any(s["text"] and s["text"].endswith(hostile) for s in card["jev"]["surfaces"])
+
+
+def test_the_boot_guard_is_registered_before_anything_that_can_throw():
+    """A guard installed after the work it guards is not a guard: an uncaught throw at script
+    evaluation would leave the header and an empty table, which reads as "nothing to fix"."""
+    template = _resource("jev.template.html")
+    guard = template.index("addEventListener('error'")
+
+    for later in ("let DATA = ", "function boot("):
+        assert guard < template.index(later), later
+    assert template.count("boot();") == 1
+    assert "<noscript>" in template
+
+
+def _script_section(template: str, start: str, end: str) -> str:
+    return template[template.index(start) : template.index(end)]
+
+
+def test_the_page_has_three_top_tabs_and_revisar_has_three_sub_tabs_all_hash_routed():
+    """Top: «Revisar topics» (`#revisar/…`, the default), «Preguntar» (`#ask`) and
+    «Configuración» (`#config`); inside Revisar, Posts, Topics and Comparar — all built; nothing
+    on the page promises a later PR any more. The old `#posts`, `#topics`, `#compare` are read
+    as the same views (`routeOf`), so bookmarks keep working."""
+    template = _resource("jev.template.html")
+
+    for tab, route in (
+        ("posts", "revisar/posts"),
+        ("topics", "revisar/topics"),
+        ("compare", "revisar/compare"),
+        ("config", "config"),
+    ):
+        assert f'href="#{route}" data-tab="{tab}"' in template, tab
+        assert f'id="tab-{tab}"' in template, tab
+    for top in ("revisar", "ask", "config"):
+        assert f'id="top-{top}"' in template, top
+        assert f'data-tab="{top}"' in template, top
+    assert "if (REVISAR.includes(path)) return {tab: path, old: true};" in template
+    assert 'class="soon"' not in template and ".soon" not in template
+    for promise in ("siguiente PR", "PR posterior", "llega en", "llegan en"):
+        assert promise not in template, promise
+    assert "addEventListener('hashchange'" in template
+
+
+def test_the_posts_view_lives_in_the_hash_so_it_can_be_bookmarked():
+    template = _resource("jev.template.html")
+    hash_code = _script_section(template, "function readHash(", "function writeHash(")
+    write_code = _script_section(template, "function writeHash(", "/* end hash */")
+
+    for key in ("f", "t", "q", "s"):
+        assert f"get('{key}')" in hash_code, key
+        assert f"'{key}'" in write_code, key
+    # The default filter, when the hash names none, is "Con discrepancias".
+    assert "|| 'disc'" in hash_code
+
+
+def test_each_filter_is_a_card_key_with_the_reports_count_beside_it():
+    """The rail's views are `(key, name, report count)` triples: the page tests membership
+    with `p.in.includes(key)` — decided in Python — and prints the report's number for it.
+    Every key the blob can put on a card has exactly one view, with its own name."""
+    template = _resource("jev.template.html")
+    rail = _script_section(template, "const FILTERS = [", "function railButton(")
+
+    views = re.findall(r"\{key: '(\w+)', name: '([^']*)'[^}]*count: \(\) => (DATA\.[\w.]+)\}", rail)
+    assert {key: (name, count) for key, name, count in views} == {
+        "all": ("Todos", "DATA.totals.items"),
+        "disc": ("Con discrepancias", "DATA.summary.posts_with_disagreement"),
+        "enrich_only": ("Enrich asigna y Jev no", "DATA.summary.posts_enrich_only"),
+        "adds": ("Jev añadiría topic", "DATA.summary.posts_jev_only"),
+        "prim": ("Primario distinto", "DATA.summary.posts_primary_differs"),
+        "uneval": ("Sin evaluar por Jev", "DATA.summary.items_unassessed"),
+    }
+    # The fallback's view is named after `DATA.fallback`, read when drawn (a getter), so data
+    # handed in later through `loadData` renames it.
+    assert (
+        "{key: 'fallback', get name() { return 'Jev eligió «' + DATA.fallback + '»'; }, "
+        "count: () => DATA.summary.primary_fallback}"
+    ) in rail
+    matches = _script_section(template, "function matches(", "function sorted(")
+    assert "p.in.includes(view.f)" in matches
+
+
+def test_a_topic_under_a_disagreement_view_lists_the_posts_its_number_counts():
+    """Under "Con discrepancias" a topic lists the cards whose row for it is solo enrich or
+    solo Jev — its `per_topic.disagreeing`; under the one-direction views, that direction."""
+    template = _resource("jev.template.html")
+
+    assert (
+        "const TOPIC_VERDICTS = {disc: ['solo_enrich', 'solo_jev'], "
+        "enrich_only: ['solo_enrich'], adds: ['solo_jev']};" in template
+    )
+    assert (
+        "const TOPIC_COUNT = {disc: 'disagreeing', enrich_only: 'doubtful', adds: 'missing'};"
+        in template
+    )
+
+
+def test_the_verdict_chips_name_each_verdict_the_blob_can_send():
+    template = _resource("jev.template.html")
+    chips = _script_section(template, "const VERDICT = {", "function probBar(")
+
+    assert dict(re.findall(r"(\w+): \['\w+', '([^']+)'", chips)) == {
+        "coinciden": "coinciden",
+        "solo_enrich": "solo enrich",
+        "solo_jev": "solo Jev",
+        "sin_juzgar": "sin juzgar",
+        "primario_jev": "primario de Jev",
+        "jev": "Jev lo ve",
+    }
+
+
+def test_the_cards_are_built_from_text_nodes_never_from_html_strings():
+    """Scraped post text, quoted posts, article titles and evidence reach the DOM as TEXT:
+    the card code has no HTML-parsing sink at all, and every href comes from `httpUrl`, the
+    http(s) regex in `linkified`, or the note link built from DATA."""
+    template = _resource("jev.template.html")
+    cards = _script_section(template, "/* cards */", "/* end cards */")
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in cards, sink
+    assert "textContent" in cards
+    assert cards.count(".href = ") == 1 and "a.href = href;" in cards
+    hrefs = re.findall(r"\blink\(([^,]+),", cards)
+    assert set(hrefs) == {
+        "x",
+        "url",
+        "href",
+        "'obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note)",
+        "topicHref(r.slug)",
+    }
+    assert "const x = httpUrl(p.url);" in cards and cards.count("const href = httpUrl(") == 2
+    assert "text.replace(/https?:\\/\\/[^\\s]+/g" in cards
+
+
+def test_an_unread_quoted_post_names_the_command_that_reads_it():
+    """`not_fetched`: nothing has tried to read it yet, and `xbrain refresh-quoted` is the
+    command that fills quoted posts in (`xbrain fetch` fetches linked articles, not these)."""
+    cards = _script_section(_resource("jev.template.html"), "/* cards */", "/* end cards */")
+
+    assert "q.why === 'not_fetched'" in cards
+    assert "Sin leer todavía: corre xbrain refresh-quoted" in cards
+
+
+def test_the_topic_index_reads_each_column_from_the_per_topic_row():
+    """Every number in the index is a `per_topic` field; the page computes none of them."""
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+    columns = _script_section(topics, "const TOPIC_COLUMNS = [", "];")
+
+    assert re.findall(r"key: '(\w+)'", columns) == [
+        "label",
+        "assigned",
+        "backed",
+        "backed_pct",
+        "missing",
+        "disagreeing",
+        "enrich_primary",
+        "jev_primary",
+    ]
+    assert "noul" not in topics.lower()
+
+
+def test_the_topic_index_opens_on_the_worst_agreement_among_topics_with_enough_posts():
+    """The default order is `per_topic`'s own (worst backing first, by the exact ratio),
+    with topics enrich put on fewer than `TOPIC_MIN` posts moved to the end — and the page
+    says what N is."""
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    assert "let TOPIC_MIN;" in topics
+    assert "  TOPIC_MIN = DATA.topic_min;" in _script_section(
+        _resource("jev.template.html"),
+        "function loadData(",
+        "/* ---------------------------------------------------------------- header */",
+    )
+    assert "DATA.summary.per_topic.map(r => r.slug)" in topics
+    assert "nf(TOPIC_MIN)" in topics
+
+
+def test_the_topic_detail_reads_the_confusion_the_report_computed():
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    assert "DATA.summary.topic_confusion" in topics
+    assert "DATA.summary.primary_confusion" in topics
+    for words in ("Coinciden", "Solo enrich", "Solo Jev", "ver en Posts", "Con qué se confunde"):
+        assert words in topics, words
+
+
+def test_the_topics_code_builds_text_nodes_and_only_links_inside_the_page():
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in topics, sink
+    assert ".href = " not in topics
+    # Every link's href is `topicHref(slug)` or a variable built by `hashHref` — both
+    # `#<tab>?<URLSearchParams>`, so nothing scraped ever becomes a URL here.
+    for arg in set(re.findall(r"\blink\(([^,]+),", topics)):
+        assert (
+            arg in ("topicHref(slug)", "row.href")
+            or f"const {arg} = hashHref(" in topics
+            or f"const {arg} = indexHref();" in topics
+        ), arg
+    # `linkList` links each `row.href`; every row handed to it carries an `href` built by
+    # `hashHref` a line above.
+    assert set(re.findall(r"\bhref: (\w+)", topics)) == {"href"}
+    assert "return '#' + ROUTE[tab] + (qs ? '?' + qs : '');" in topics
+
+
+def test_the_topics_words_that_carry_meaning_are_pinned():
+    """A pair's other side: nothing instead, no primary, Jev's «none of these», and an
+    enrich primary that has since left the vocabulary — four different facts, four labels."""
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    for words in (
+        "'sin principal'",
+        "'nada en su lugar'",
+        "' (ninguno del vocabulario)'",
+        "' (ya no está en el vocabulario)'",
+        "'Enrich no lo pone en ningún post comparado.'",
+        "'Enrich nunca lo elige como principal.'",
+        "'Jev nunca lo elige como principal.'",
+        "'Ese cruce ya no existe en estos datos; abajo, todos los posts del topic.'",
+        "no está en el vocabulario actual",
+        "'La pestaña Topics no pudo dibujarse: '",
+        "no suman en la columna «Principal según Jev».",
+        "'pocos datos'",
+    ):
+        assert words in topics, words
+
+
+def test_the_posts_rail_names_what_the_topics_tab_names():
+    """The rail says which Topics-tab number its list matches — by that tab's own names."""
+    template = _resource("jev.template.html")
+    rail = _script_section(template, "function renderRail(", "/* end rail */")
+    topics = _script_section(template, "/* topics */", "/* end topics */")
+
+    for name in ("Discrepancias", "Jev lo añadiría"):
+        assert f"«{name}»" in rail and f"name: '{name}'" in topics, name
+    assert "«Solo enrich»" in rail and "name: 'Solo enrich'" in topics
+    assert "ficha del topic →" in rail
+
+
+def test_the_topics_view_lives_in_the_hash():
+    template = _resource("jev.template.html")
+    reader = _script_section(template, "function readTopicsHash(", "function writeTopicsSort(")
+
+    for key in ("t", "cx", "px", "o", "d"):
+        assert f"get('{key}')" in reader, key
+
+
+def _compare_code() -> str:
+    return _script_section(_resource("jev.template.html"), "/* compare */", "/* end compare */")
+
+
+def test_the_compare_code_builds_text_nodes_and_only_links_inside_the_page():
+    compare = _compare_code()
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in compare, sink
+    assert ".href = " not in compare
+    for arg in set(re.findall(r"\blink\(([^,]+),", compare)):
+        assert arg == "topicHref(slug)" or f"const {arg} = hashHref(" in compare, arg
+    assert set(re.findall(r"\bhref: (\w+)", compare)) == {"href"}
+
+
+def test_the_compare_tab_reads_every_number_from_the_report():
+    """Counts from the summary (and the Posts filters' own counts), lists from `post_sets`,
+    the topic order from the Topics tab's default: nothing tallied from the cards."""
+    compare = _compare_code()
+
+    for source in (
+        "S.confidence_bands",
+        "S.primary_confusion",
+        "S.per_topic",
+        "r.primary_both",
+        "S.primary_fallback",
+        "sets.bands",
+        "sets.px",
+        "sets.pd",
+        "defaultTopicOrder()",
+        "f.count()",
+    ):
+        assert source in compare, source
+    assert "DATA.posts.filter" not in compare and ".jev.topics" not in compare
+
+
+def test_the_compare_words_that_carry_meaning_are_pinned():
+    compare = _compare_code()
+
+    for words in (
+        "'Los tres tipos de desacuerdo'",
+        "'Acuerdo por topic, peores primero'",
+        "'Cruce del topic principal'",
+        "'Qué seguro estaba Jev en los desacuerdos'",
+        "probable hueco del vocabulario",
+        "cada tramo incluye su borde inferior",
+        "'probabilidad < '",
+        "'probabilidad ≥ '",
+        "'Ese grupo ya no existe en estos datos; en esta pestaña, la comparación completa.'",
+        "'Ningún post comparado todavía: ",
+        "'Fuera de estas cifras: '",
+        "'La pestaña Comparar no pudo dibujarse: '",
+    ):
+        assert words in compare, words
+
+
+def test_every_value_derived_from_the_blob_is_set_in_loaddata():
+    """A page handed new data (a local server) calls `loadData` and re-draws: every value the
+    page derives from the blob is set there, not frozen at script load."""
+    template = _resource("jev.template.html")
+    loader = _script_section(
+        template,
+        "function loadData(",
+        "/* ---------------------------------------------------------------- header */",
+    )
+
+    for line in (
+        "DATA = blob;",
+        "LABEL = Object.fromEntries(",
+        "DESC = Object.fromEntries(",
+        "TOPIC_MIN = DATA.topic_min;",
+        "PDIGITS = ",
+    ):
+        assert line in loader, line
+    assert "let DATA = /*__DATA__*/;" in template and "  loadData(DATA);" in template
+    assert "const LABEL" not in template and "const DESC" not in template
+    assert "get why() { return 'de esos, en cuántos lo ve también Jev" in template
+
+
+def test_the_topics_and_comparar_lists_share_one_helper_that_names_its_unit():
+    template = _resource("jev.template.html")
+    compare = _compare_code()
+
+    assert template.count("function linkList(") == 1
+    assert "linkList(title, items, TOPIC_PAIRS_SHOWN, ['cruce más', 'cruces más'])" in template
+    assert compare.count("['topic más', 'topics más']") == 2
+    assert compare.count("['cruce más', 'cruces más']") == 1
+    assert "cruces más" not in compare.replace("['cruce más', 'cruces más']", "")
+
+
+def test_the_compare_view_lives_in_the_hash():
+    template = _resource("jev.template.html")
+    reader = _script_section(template, "function readCompareHash(", "function compareHref(")
+
+    # One list at a time, resolved band → pair → diagonal; the others are dropped.
+    assert "const COMPARE_KEYS = ['b', 'px', 'pd'];" in template
+    assert "COMPARE_KEYS.find(k => params.get(k))" in reader
+    assert "if (view.tab === 'compare') readCompareHash(params);" in template
+
+
+def test_the_band_edges_the_page_states_are_the_ones_the_report_ships():
+    """The page prints `lo`/`hi` from each summary band; the edges themselves exist only in
+    `report.py`."""
+    compare = _compare_code()
+
+    assert "pfmt(b.lo)" in compare and "pfmt(b.hi)" in compare
+    # One precision for the threshold everywhere it is printed.
+    assert "dec(DATA.threshold" not in _resource("jev.template.html")
+    for edge in ("0.2", "0.5", "0.95", "0,2", "0,5", "0,95"):
+        assert edge not in compare, edge
+
+
+def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():
+    template = _resource("jev.template.html")
+    cards = _script_section(template, "/* cards */", "/* end cards */")
+
+    for words in (
+        "coinciden",
+        "solo enrich",
+        "solo Jev",
+        "probabilidad",
+        "Lo que vio Jev",
+        "recortado",
+        "topics sin revisar por Jev",
+        "sin evidencia",
+        "copiar comando",
+        "DATA.ask_command",
+        "DATA.surface_chars",
+    ):
+        assert words in cards, words
+
+
+def test_the_keyboard_moves_by_card_and_by_disagreement():
+    template = _resource("jev.template.html")
+    keys = _script_section(template, "function onKey(", "/* end keys */")
+
+    for key in ("'j'", "'k'", "'n'", "'p'"):
+        assert key in keys, key
+    assert "const disagrees = (p) => p.in.includes('disc');" in keys
+
+
+def test_the_cards_render_incrementally():
+    """~2.6k posts: fifty at a time, more when the reader reaches the end."""
+    template = _resource("jev.template.html")
+
+    assert "const PAGE = 50" in template
+    assert "IntersectionObserver" in template
+
+
+def test_the_topic_list_starts_folded_on_a_narrow_screen():
+    """45 topics above the first card is a screen and a half on a phone."""
+    rail = _script_section(_resource("jev.template.html"), "function renderRail(", "/* end rail */")
+
+    assert "createElement('details')" in rail and "box.open = topicsOpen" in rail
+    assert "let topicsOpen = !matchMedia('(max-width: 900px)').matches" in _resource(
+        "jev.template.html"
+    )
+
+
+def test_the_page_follows_the_systems_light_or_dark_theme():
+    assert "prefers-color-scheme: light" in _resource("jev.template.html")
+
+
+def test_the_page_handles_the_cost_error_the_unpriced_row_and_an_empty_table():
+    template = _resource("jev.template.html")
+
+    assert "c.error" in template  # the run log could not be read: say so in the strip
+    assert "sin tarifa" in template  # a card whose provider nobody prices
+    assert "Ningún post coincide" in template
+    assert "per_post.n" in template and "per_post.of" in template  # "media de K de las N"
+    assert "posts_with_disagreement" in template  # the report's count, not the page's
+    # One money format across the strip: the shared Python sentence is not shipped.
+    assert "side_car_text" not in template
+
+
+# --------------------------------------------------------------------------- the Config tab
+
+
+def _config(data: dict[str, Any]) -> dict[str, Any]:
+    return data["config"]
+
+
+def test_the_config_block_states_every_jev_setting_with_its_default():
+    """One row per `[jev]` key config.toml accepts, in a fixed order, each with the value this
+    page was built with and the default from `jev.defaults` — the page says which one moved."""
+    item = _item()
+    data = _data([item], {"1": _assessment(item)}, threshold=0.875)
+
+    settings = _config(data)["settings"]
+
+    assert [row["key"] for row in settings] == [
+        "threshold",
+        "model",
+        "fallback_option",
+        "concurrency",
+        "state_char_limit",
+        "serve_max_usd",
+        "ask_max_usd",
+        "ask_top",
+    ]
+    assert set(JEV_DEFAULTS) == {row["key"] for row in settings}
+    values = {row["key"]: row["value"] for row in settings}
+    assert values == {
+        "threshold": 0.875,
+        "model": MODEL,
+        "fallback_option": FALLBACK,
+        "concurrency": CONCURRENCY,
+        "state_char_limit": CHAR_LIMIT,
+        "serve_max_usd": 1.0,
+        "ask_max_usd": 0.25,
+        "ask_top": 20,
+    }
+    assert {row["key"]: row["default"] for row in settings} == JEV_DEFAULTS
+
+
+def test_the_models_that_answered_are_the_current_answers_most_first():
+    """Counted over the CURRENT answers, like every other number on the page (a stale record
+    is outside the numbers), and ordered by count, then name — so the list reads the same in
+    every render. The fixture's name order is the reverse of its count order."""
+    items = [_item(str(n), text=f"post {n}") for n in range(4)]
+    answers = {i.id: _assessment(i) for i in items}
+    answers["0"] = answers["0"].model_copy(update={"model": "jev-2.0.0"})
+    stale = _item("viejo", text="otro texto")
+    answers["viejo"] = _assessment(stale, contract="0" * 64).model_copy(
+        update={"model": "jev-0.1.0"}
+    )
+
+    data = _data([*items, stale], answers)
+
+    assert _config(data)["models_answered"] == [["jev-1.13.0", 3], ["jev-2.0.0", 1]]
+
+
+def test_the_page_is_built_from_one_settings_dict_keyed_like_the_defaults():
+    item = _item()
+
+    with pytest.raises(ValueError, match="state_char_limit"):
+        compute_jev_dashboard_data(
+            [item],
+            {},
+            VOCAB,
+            settings={k: v for k, v in _settings().items() if k != "state_char_limit"},
+            id2note={},
+            updated="2026-09-22",
+            runs=[],
+            now=NOW,
+        )
+
+
+def test_the_prices_are_the_one_pricing_table():
+    item = _item()
+
+    prices = _config(_data([item], {"1": _assessment(item)}))["prices"]
+
+    assert prices == INPUT_USD_PER_MTOK
+
+
+def _wire(shipped: list[dict[str, Any]]) -> dict[str, Any]:
+    """The shipped questions rebuilt as the client's question types, in shipped order."""
+    kinds = {"yes_no": NoulQuestion, "choice": ChoiceQuestion}
+    return {
+        q["key"]: kinds[q["type"]](instructions=q["instructions"], criteria=dict(q["criteria"]))
+        for q in shipped
+    }
+
+
+def test_the_questions_on_the_page_are_the_ones_jev_is_sent():
+    """`build_topic_questions` itself, in wire order — never a copy of its text."""
+    item = _item()
+    config = _config(_data([item], {"1": _assessment(item)}))
+
+    expected = build_topic_questions(VOCAB, FALLBACK)
+    shipped = _wire(config["questions"])
+
+    assert shipped == expected
+    assert list(shipped) == list(expected)
+    for q, question in zip(config["questions"], expected.values(), strict=True):
+        assert [k for k, _ in q["criteria"]] == list(question.criteria)
+    assert config["questions_digest"] == questions_digest(expected)
+
+
+def test_what_jev_reads_is_listed_in_the_order_the_state_carries_it():
+    """The surfaces of `evidence.py` for target "topics", tweet first (the state's order), each
+    with the page's Spanish name — and the cut rule's marker as `build_topic_state` writes it."""
+    item = _item()
+    config = _config(_data([item], {"1": _assessment(item)}))
+
+    assert [s["key"] for s in config["surfaces"]] == list(STATE_SURFACE_KEYS)
+    assert sorted(STATE_SURFACE_KEYS) == sorted(SURFACE_KEYS["topics"])
+    assert STATE_SURFACE_KEYS[0] == "tweet"
+    assert [s["label"] for s in config["surfaces"]] == [
+        SURFACE_LABELS[k] for k in STATE_SURFACE_KEYS
+    ]
+    assert config["cut_marker"] == CUT_MARKER.format(dropped="N")
+
+
+def test_the_state_carries_its_surfaces_in_the_order_the_page_lists():
+    """Five surfaces, so an order that only happens to agree for tweet + author cannot pass:
+    the state is `STATE_SURFACE_KEYS` filtered to what the post has."""
+    item = _item("1", text="Claude Code hooks")
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            _quoted_source("citado"),
+            ContentSourceSuccess(
+                kind="x_article", url="https://x.com/i/article/5", title="Un artículo", text="c"
+            ),
+        ],
+    )
+
+    keys = [part.key for part in state_surfaces(item, CHAR_LIMIT)]
+
+    assert len(keys) >= 4
+    assert keys == [k for k in STATE_SURFACE_KEYS if k in keys]
+    assert keys == ["tweet", "author", "article_title", "article", "quoted"]
+
+
+def test_a_question_of_an_unknown_kind_is_refused_not_labelled():
+    with pytest.raises(TypeError):
+        _question_row("x", object())  # type: ignore[arg-type]
+
+
+def test_the_cut_is_signposted_with_the_marker_the_page_quotes():
+    item = _item("1", text="x" * 50)
+
+    state, chars = build_topic_state(item, 20)
+
+    assert state[STATE_KEY].endswith("\n" + CUT_MARKER.format(dropped=chars - 20))
+
+
+def test_a_pure_call_ships_no_file_paths():
+    item = _item()
+
+    assert _config(_data([item], {"1": _assessment(item)}))["files"] is None
+
+
+def _estimate_fixture() -> tuple[dict[str, Any], dict[str, TopicAssessment]]:
+    asked = [_item(str(n)) for n in range(3)]
+    never = [_item(f"n{n}") for n in range(4)]
+    empty = _item("vacio", text=" ")
+    empty.author = Author(handle="", name="")
+    stale = _item("viejo", text="cambió")
+    tokens = {"0": 1000, "1": 3000, "2": None}
+    assessments = {i.id: _assessment(i, input_tokens=tokens[i.id]) for i in asked}
+    assessments["viejo"] = _assessment(stale, contract="0" * 64)
+    return _data([*asked, *never, empty, stale], assessments), assessments
+
+
+def test_the_estimate_is_the_mean_per_post_times_what_jev_topics_would_ask():
+    """Pending = `assess.select_items`'s own selection (the `jev topics --dry-run` count);
+    corpus = every post with evidence. The means are the current answers' — the same
+    `post_cost_view` the cost strip shows, computed once."""
+    data, assessments = _estimate_fixture()
+    estimate = _config(data)["estimate"]
+    current = [a for k, a in assessments.items() if k != "viejo"]
+
+    per_post = post_cost_view(current)
+    assert per_post["mean_tokens"] == 2000 and per_post["tokens_n"] == 2
+    assert estimate["per_post"] == per_post == data["cost"]["per_post"]
+    assert (
+        estimate["pending"]
+        == topics_pass_estimate(per_post, 5)
+        == {
+            "posts": 5,
+            "tokens": 10000,
+            "usd": pytest.approx(5 * tokens_cost_usd(2000, PRICED_PROVIDER)),
+        }
+    )
+    assert estimate["corpus"] == topics_pass_estimate(per_post, 8)
+
+
+def test_the_estimates_pending_posts_are_the_unassessed_ones_with_evidence():
+    """The estimate runs its OWN currency pass (`select_items`) beside the page's; the two
+    must agree: pending = `items_unassessed` − the evidence-free posts, which the cards
+    already mark."""
+    data, _ = _estimate_fixture()
+
+    evidence_free = sum(post["no_evidence"] for post in data["posts"])
+    assert evidence_free == 1
+    assert (
+        _config(data)["estimate"]["pending"]["posts"]
+        == data["summary"]["items_unassessed"] - evidence_free
+    )
+
+
+def test_an_estimate_is_built_from_a_selection():
+    """`report.estimate_selection` takes any `Selection`: pending is what it would ask
+    (limit or not), the corpus adds what it skipped as current."""
+    per_post = post_cost_view([_assessment(_item(), input_tokens=1000)])
+    selection = Selection(
+        items=(_item("a"),), skipped_current=3, skipped_no_evidence=2, remaining=4
+    )
+
+    assert estimate_selection(selection, per_post) == {
+        "pending": topics_pass_estimate(per_post, 5),
+        "corpus": topics_pass_estimate(per_post, 8),
+    }
+
+
+def test_an_estimate_with_nothing_to_average_says_so():
+    assert topics_pass_estimate(post_cost_view([]), 5) == {
+        "posts": 5,
+        "tokens": None,
+        "usd": None,
+    }
+
+
+def _config_code() -> str:
+    return _script_section(_resource("jev.template.html"), "/* config */", "/* end config */")
+
+
+def test_the_config_code_builds_text_nodes_and_only_links_inside_the_page():
+    config = _config_code()
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in config, sink
+    assert ".href = " not in config
+    for arg in set(re.findall(r"\blink\(([^,]+),", config)):
+        assert arg in ("topicHref(t.slug)", "docs"), arg
+    assert "const docs = httpUrl(C.docs_url);" in config
+
+
+def test_the_config_tab_reads_every_value_from_the_blob():
+    """Settings, prices, models, questions, digest, surfaces, the cut marker, the files and the
+    estimate are `config`'s; the vocabulary is `DATA.topics`. Nothing is typed into the page."""
+    config = _config_code()
+
+    for source in (
+        "C.settings",
+        "C.models_answered",
+        "C.prices",
+        "C.questions",
+        "C.questions_digest",
+        "C.surfaces",
+        "C.cut_marker",
+        "C.docs_url",
+        "f.label",
+        "f.exists",
+        "f.snapshotted",
+        "f.served",
+        "C.files",
+        "C.estimate.per_post",
+        "C.estimate.pending",
+        "C.estimate.corpus",
+        "DATA.topics",
+    ):
+        assert source in config, source
+    # The wire text is shipped, never written here: no fragment of it is in the template.
+    template = _resource("jev.template.html")
+    for wire in (
+        "Is the post in",
+        "The post is about something else",
+        "Which single topic",
+        "A topic that is not in this list",
+        "evidencia recortada",
+    ):
+        assert wire not in template, wire
+    assert "dec(DATA.threshold" not in template
+
+
+def test_every_jev_setting_has_its_plain_words_on_the_tab():
+    config = _config_code()
+    table = config[config.index("const CONFIG_SETTINGS = {") : config.index("};")]
+
+    assert set(re.findall(r"^  (\w+): \{", table, re.M)) == set(JEV_DEFAULTS)
+
+
+def test_the_config_words_that_carry_meaning_are_pinned():
+    config = _config_code()
+
+    for words in (
+        "'Ajustes'",
+        "'Las preguntas exactas'",
+        "'El vocabulario'",
+        "'Qué ve Jev de cada post'",
+        "'Ficheros'",
+        "'Coste de una pasada (estimación)'",
+        "sí/no por topic = pertenencia, varios posibles",
+        "elección = el principal, uno solo; sus probabilidades suman 1",
+        "'Los tokens de salida son gratis.'",
+        "data/ no está en git.",
+        "Las evaluaciones de Jev (jev/topics.json) y su registro (jev/runs.jsonl) no entran en "
+        "los snapshots; el topics.json de enrich y vocab.yaml sí.",
+        "Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo "
+        "devuelve; runs.jsonl es el histórico de costes.",
+        "El tweet va primero: un corte solo llega a él si el propio tweet pasa del límite.",
+        "como si se volviera a preguntar todo",
+        "(aún no existe: lo crea ",
+        "'Modelo que se pedirá'",
+        "'Cambian lo que ves en esta página: '",
+        "'Se usan en la próxima pasada (`xbrain jev topics` o un trabajo de `xbrain jev serve`): '",
+        "'Se cambian en config.toml, nunca aquí.'",
+        "'Tope por trabajo de xbrain jev serve'",
+        "el servidor rechaza un trabajo cuya estimación lo pase",
+        "no envía un post más cuando lo gastado y lo reservado",
+        "las evaluaciones guardadas no registran qué modelo se pidió",
+        "el $ solo promedia proveedores con tarifa",
+        "la que ves la dibuja el servidor en vivo",
+        "'La pestaña Configuración no pudo dibujarse: '",
+    ):
+        assert words in config, words
+
+
+def test_each_tab_guard_logs_the_error_it_hides():
+    """The in-tab message shows `err.message`; the stack goes to the console, where a reader
+    who reports it can find it."""
+    template = _resource("jev.template.html")
+
+    for tab in ("Topics", "Comparar", "Configuración"):
+        guard = template[: template.index(f"'La pestaña {tab} no pudo dibujarse: '")]
+        catch = guard[guard.rindex("} catch (err) {") :]
+        assert "console.error(err);" in catch, tab
+
+
+def test_the_docs_link_lands_on_the_configuracion_section():
+    """GitHub's anchor for a heading: lower case, spaces to hyphens, accents kept."""
+    doc = (REPO / "docs" / "jev.md").read_text(encoding="utf-8")
+    anchors = {
+        "#" + line[4:].strip().lower().replace(" ", "-")
+        for line in doc.splitlines()
+        if line.startswith("### ")
+    }
+    item = _item()
+
+    url = _config(_data([item], {"1": _assessment(item)}))["docs_url"]
+
+    assert url == DOCS_CONFIG_URL and url.startswith(DOCS_URL + "#")
+    assert url[len(DOCS_URL) :] in anchors
+
+
+def test_the_tab_describes_exactly_the_files_page_files_ships(tmp_path):
+    """One description per `page_files` key, and no fallback: a file the page has no words for
+    throws into the tab's guard instead of drawing a row that says nothing."""
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "h"\n',
+        encoding="utf-8",
+    )
+    config = _config_code()
+    table = config[config.index("const CONFIG_FILES = {") :]
+    table = table[: table.index("\n};")]
+
+    described = set(re.findall(r"^  (\w+): \{", table, re.M))
+
+    assert described == {f["key"] for f in page_files(load_config(tmp_path))}
+    assert "CONFIG_FILES[f.key] ||" not in config
+    assert "if (!spec) throw new Error(" in config
+
+
+# --------------------------------------------------------------------------- serve mode (PR 10b)
+
+
+def test_the_static_blob_says_it_is_not_served():
+    """`serve` is null in the file `jev dashboard` writes: the page keeps «copiar comando».
+    The server sets it (`jev.serve`: token and cap) — tests/test_jev_serve.py."""
+    item = _item()
+
+    assert _data([item], {})["serve"] is None
+
+
+def _serve_code() -> str:
+    return _script_section(_resource("jev.template.html"), "/* serve */", "/* end serve */")
+
+
+def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_server():
+    serve = _serve_code()
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in serve, sink
+    # Relative URLs only, all in ONE table: the API is this page's own server. Each kind of
+    # pass has its routes; the job slot is one for every kind.
+    assert (
+        "const API = {\n"
+        "  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},\n"
+        "  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate', counts: '/api/ask/counts'},\n"
+        "  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',\n"
+        "};" in serve
+    )
+    assert re.findall(r"\bapi\('", serve) == []
+    assert sorted(set(re.findall(r"\bapi\((API[^,)]*)", serve))) == [
+        "API.ask.counts + (query ? '?' + query : ''",
+        "API.cancel",
+        "API.data",
+        "API.job",
+        # A followed ask's poll: the same relative route, with its stream cursor.
+        "API.job + (askLive ? '?since=' + encodeURIComponent(askLive.cursor",
+        "API[mine.kind].estimate",
+        "API[mine.kind].evaluate",
+    ]
+    assert "'X-Xbrain-Token': DATA.serve.token" in serve
+    assert "http" not in re.sub(r"//.*|/\*.*?\*/", "", serve, flags=re.S)
+
+
+def test_the_serve_words_that_carry_meaning_are_pinned():
+    serve = _serve_code()
+
+    for words in (
+        "'Evaluar este post'",
+        "'Re-evaluar'",
+        "'Evaluar estos posts'",
+        "'Evaluar este topic ('",
+        "' sin evaluar)'",
+        "'Evaluar los '",
+        "' siguientes sin evaluar'",
+        "'Evaluar y pagar'",
+        "words.go + ' ' + usd(e.usd, 5)",
+        "'Preguntar y pagar'",
+        "'Ver resultados (gratis)'",
+        "'No se puede preguntar: '",
+        "' (gratis)'",
+        "'Aún sin preguntas pagadas: cifras de partida.'",
+        "' tokens por llamada, más el texto de los posts ('",
+        "'; el historial no se pudo escribir: '",
+        "'Pregunta en curso'",
+        "'Cancelar'",
+        "' Coste estimado: '",
+        "' (coste medio por post de '",
+        "'Tope: '",
+        "' $. Al llegar se para; lo que ya esté en vuelo termina y puede '",
+        "'pasarlo por poco (como mucho '",
+        "'Volver a evaluar también los posts que ya tienen evaluación vigente: se pagan '",
+        "'otra vez y se sustituye su evaluación (antes se guarda una copia)'",
+        "'Parar (se guarda lo ya pagado)'",
+        "'lo paraste desde la página'",
+        "'Recargar la página'",
+        "'No se puede evaluar: '",
+    ):
+        assert words in serve, words
+
+
+def test_the_ask_tab_builds_text_nodes_and_calls_no_server_itself():
+    """The Preguntar tab draws the history and the results from DATA, as text nodes; it asks
+    the server nothing — launching goes through the serve panel (`openAsk`)."""
+    ask = _script_section(_resource("jev.template.html"), "/* ask tab */", "/* end ask tab */")
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in ask, sink
+    assert "fetch(" not in ask and "api(" not in ask
+    assert "SERVED() ? askFormBox() : askLaunchLine()" in ask
+    assert "openAsk('ask', askBody()" in ask
+    assert "'Esta consulta no está en el historial.'" in ask
+    assert "{missing: askView.q}" in ask
+
+
+def test_the_page_draws_serve_controls_only_when_served():
+    """Every serve control is behind `SERVED()`; the static page keeps «copiar comando»."""
+    template = _resource("jev.template.html")
+
+    assert "const SERVED = () => !!(DATA && DATA.serve);" in template
+    assert "SERVED() ? evalButton(" in template
+
+
+def test_no_two_top_level_functions_share_a_name():
+    """The page is one script: a second `function x(` silently REPLACES the first everywhere.
+    The serve section's `estimateText` did exactly that to the Configuración tab's."""
+    names = re.findall(r"^function (\w+)\(", _resource("jev.template.html"), re.M)
+
+    assert sorted(n for n in set(names) if names.count(n) > 1) == []

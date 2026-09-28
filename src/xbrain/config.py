@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,10 @@ from xbrain.video_frames import (
 # navigation-first behaviour; `hashtag` emits Obsidian tags so the line pivots
 # into the tag pane. Frontmatter `tags:` are unaffected by this toggle.
 SUPPORTED_TOPIC_STYLES: tuple[str, ...] = ("wikilink", "hashtag")
+
+
+#: The Jev page's file name under `<output_dir>` (`Config.jev_page_path`).
+JEV_PAGE = "jev.html"
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,17 @@ class Config:
     index_dir: Path
     index_max_matches_per_item: int
     index_get_char_budget: int
+    # `[jev]` — the Jev (TypeSafe AI) topic-assessment side-car (`xbrain jev …`).
+    # `jev_model` is an alias by default ("jev-latest"): updates are allowed on purpose,
+    # and every stored assessment records the concrete `model` the API answered with.
+    jev_model: str
+    jev_threshold: float
+    jev_fallback_option: str
+    jev_concurrency: int
+    jev_state_char_limit: int
+    jev_serve_max_usd: float
+    jev_ask_max_usd: float
+    jev_ask_top: int
 
     @property
     def payload_dir(self) -> Path:
@@ -118,6 +134,48 @@ class Config:
     @property
     def topics_path(self) -> Path:
         return self.data_dir / "topics.json"
+
+    @property
+    def vocab_path(self) -> Path:
+        return self.data_dir / "vocab.yaml"
+
+    @property
+    def jev_page_path(self) -> Path:
+        """`jev.html`, beside `dashboard.html`: where `jev dashboard` writes it and where
+        `generate` looks for it before linking it from `_index.md`."""
+        return self.output_dir / JEV_PAGE
+
+    def jev_settings(self) -> dict[str, str | float | int]:
+        """Every `[jev]` setting in effect, keyed and ordered like `jev.defaults.JEV_DEFAULTS`
+        — the one dict the dashboard is built from. A key the loader accepts but this cannot
+        read raises here instead of being shown as its default forever."""
+        from xbrain.jev.defaults import JEV_DEFAULTS
+
+        return {key: getattr(self, f"jev_{key}") for key in JEV_DEFAULTS}
+
+    @property
+    def jev_dir(self) -> Path:
+        """Side-car for Jev assessments and reports — never inside `items.json`."""
+        return self.data_dir / "jev"
+
+    @property
+    def jev_topics_path(self) -> Path:
+        return self.jev_dir / "topics.json"
+
+    @property
+    def jev_lock_path(self) -> Path:
+        """The pass lock (`jev/lock.pass_lock`): held by a paid pass from load to save."""
+        return self.jev_dir / ".lock"
+
+    @property
+    def jev_asks_dir(self) -> Path:
+        """`jev ask`'s answers, one `<query_sha>.json` per query, and `index.json` (history)."""
+        return self.jev_dir / "asks"
+
+    @property
+    def jev_runs_path(self) -> Path:
+        """Append-only log of every paid Jev pass — topics and ask (`jev/store.append_run`)."""
+        return self.jev_dir / "runs.jsonl"
 
     @property
     def storage_state_path(self) -> Path:
@@ -158,6 +216,92 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
     if char_budget < 1:
         raise ValueError("config.toml: [index].get_char_budget must be >= 1")
     return index_dir, max_matches, char_budget
+
+
+def _jev_number(jev: dict, key: str, default: float, message: str) -> float:
+    """A `[jev]` numeric setting, type-checked BEFORE coercion.
+
+    `float(...)`/`int(...)` would accept a bool and a numeric string: `threshold = true`
+    coerces to 1.0, passes every range check, and silently makes the bar "probability
+    exactly 1.0" so nothing is ever backed by Jev. A bool is not a number here.
+    """
+    value = jev.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"config.toml: {message}")
+    return float(value)
+
+
+def _jev_text(jev: dict, key: str, default: str) -> str:
+    """A `[jev]` string setting: present, a string, and not blank."""
+    value = jev.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"config.toml: [jev].{key} must be a non-empty string")
+    return value.strip()
+
+
+def _jev_max_usd(jev: dict, key: str, default: float) -> float:
+    """A `[jev].*_max_usd` cap: a finite number above 0. `inf` would make the cap no cap, and
+    `nan` compares false with everything, so every estimate would pass under it."""
+    message = f"[jev].{key} must be a number > 0"
+    value = _jev_number(jev, key, default, message)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"config.toml: {message}")
+    return value
+
+
+def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, float, int]:
+    """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit,
+    serve_max_usd, ask_max_usd, ask_top)`.
+
+    THE DEFAULTS ARE IMPORTED FROM `xbrain.jev.defaults`, NEVER RETYPED (rule 5) — the same
+    rule `_index_settings` above shouts about, and the import is LOCAL for the same reason:
+    `config.py` is loaded on every `xbrain` invocation.
+
+    Range-checked here so a bad value fails when the config loads, not mid-run, and unknown
+    keys are REFUSED: a silently ignored `threshhold = 0.99` would leave the operator
+    reading a report computed at the default while the file says otherwise.
+    """
+    from xbrain.jev.defaults import (
+        DEFAULT_ASK_MAX_USD,
+        DEFAULT_ASK_TOP,
+        DEFAULT_CONCURRENCY,
+        DEFAULT_FALLBACK_OPTION,
+        DEFAULT_MODEL,
+        DEFAULT_SERVE_MAX_USD,
+        DEFAULT_STATE_CHAR_LIMIT,
+        DEFAULT_THRESHOLD,
+        JEV_DEFAULTS,
+    )
+
+    jev = settings.get("jev", {})
+    if not isinstance(jev, dict):
+        raise ValueError(f"config.toml: [jev] must be a table, got {jev!r}")
+    allowed = tuple(sorted(JEV_DEFAULTS))
+    unknown = sorted(jev.keys() - set(allowed))
+    if unknown:
+        raise ValueError(
+            f"config.toml: [jev] unknown key {unknown[0]!r} (allowed: {', '.join(allowed)})"
+        )
+    threshold_message = "[jev].threshold must be a number in [0.0, 1.0]"
+    threshold = _jev_number(jev, "threshold", DEFAULT_THRESHOLD, threshold_message)
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"config.toml: {threshold_message}")
+    counts = []
+    for key, default in (
+        ("concurrency", DEFAULT_CONCURRENCY),
+        ("state_char_limit", DEFAULT_STATE_CHAR_LIMIT),
+        ("ask_top", DEFAULT_ASK_TOP),
+    ):
+        message = f"[jev].{key} must be an integer >= 1"
+        value = jev.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"config.toml: {message}")
+        counts.append(value)
+    fallback = _jev_text(jev, "fallback_option", DEFAULT_FALLBACK_OPTION)
+    max_usd = _jev_max_usd(jev, "serve_max_usd", DEFAULT_SERVE_MAX_USD)
+    ask_max_usd = _jev_max_usd(jev, "ask_max_usd", DEFAULT_ASK_MAX_USD)
+    model = _jev_text(jev, "model", DEFAULT_MODEL)
+    return model, threshold, fallback, counts[0], counts[1], max_usd, ask_max_usd, counts[2]
 
 
 def load_config(repo_root: Path) -> Config:
@@ -217,6 +361,16 @@ def load_config(repo_root: Path) -> Config:
         )
     data_dir = repo_root / paths["data_dir"]
     index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
+    (
+        jev_model,
+        jev_threshold,
+        jev_fallback,
+        jev_concurrency,
+        jev_char_limit,
+        jev_max_usd,
+        jev_ask_max_usd,
+        jev_ask_top,
+    ) = _jev_settings(settings)
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -244,4 +398,12 @@ def load_config(repo_root: Path) -> Config:
         index_dir=index_dir,
         index_max_matches_per_item=index_max_matches,
         index_get_char_budget=index_char_budget,
+        jev_model=jev_model,
+        jev_threshold=jev_threshold,
+        jev_fallback_option=jev_fallback,
+        jev_concurrency=jev_concurrency,
+        jev_state_char_limit=jev_char_limit,
+        jev_serve_max_usd=jev_max_usd,
+        jev_ask_max_usd=jev_ask_max_usd,
+        jev_ask_top=jev_ask_top,
     )

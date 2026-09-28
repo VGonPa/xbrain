@@ -6,8 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from tests.conftest import plain_output
+from xbrain import cli
 from xbrain.cli import app
 from xbrain.models import (
     Author,
@@ -25,22 +28,12 @@ from xbrain.verification import VerdictWriteResult
 runner = CliRunner()
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-# Rich panel/box-drawing chrome (Unicode block U+2500–U+257F): ╭ ╮ ╰ ╯ ─ │ etc.
-_BOX_RE = re.compile("[─-╿]")
 
 
-def _plain_output(output: str) -> str:
-    """Normalize CliRunner output for substring assertions on Rich/Typer error boxes.
-
-    When color is enabled (as in CI, but not in pytest's captured output), Rich styles
-    each flag with the leading dash in its own ANSI span (``-`` + ``-apply``), so the
-    literal ``--apply`` never appears contiguously; the narrow box also wraps the message
-    onto several lines, with box borders (``│``) landing between words. Stripping the ANSI
-    escapes rejoins the split flag, dropping the box-drawing chrome and collapsing
-    whitespace rejoins words wrapped across lines — making the assertion fully
-    terminal-width independent.
-    """
-    return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
+#: The shared CliRunner-output normaliser lives in `tests/conftest.py`, where any test
+#: module can reach it; today this file's help battery is its only caller. Re-exported under
+#: the old private name so the call sites below stay as they were.
+_plain_output = plain_output
 
 
 def _write_tally(output: str) -> str:
@@ -1381,6 +1374,109 @@ def test_vocab_apply_regenerate_marks_items(tmp_path, monkeypatch):
     from xbrain.store import load_store as _ls
 
     assert _ls(tmp_path / "data" / "items.json")["1"].enriched is None
+
+
+def _seed_jev_sidecar(tmp_path, count: int = 3) -> None:
+    """`count` assessments in `data/jev/topics.json`, so a vocab edit has something to retire."""
+    from datetime import datetime, timezone
+
+    from xbrain.jev.models import PrimaryChoice, TopicAssessment
+    from xbrain.jev.store import save_assessments
+
+    save_assessments(
+        {
+            str(n): TopicAssessment(
+                item_id=str(n),
+                provider="typesafe",
+                model="jev-1.13.0",
+                asked_at=datetime(2026, 9, 22, tzinfo=timezone.utc),
+                contract="a" * 64,
+                state_chars=10,
+                membership={"misc": 0.9},
+                primary=PrimaryChoice(choice="misc", confidence=0.9, probabilities={"misc": 0.9}),
+            )
+            for n in range(1, count + 1)
+        },
+        tmp_path / "data" / "jev" / "topics.json",
+    )
+
+
+def test_vocab_apply_says_how_many_jev_assessments_it_retires(tmp_path, monkeypatch):
+    """Rewriting `vocab.yaml` retires EVERY Jev record, and it did so in silence.
+
+    The side-car's contract hashes the questions, and the questions are built from the
+    vocabulary — so any vocab write, however cosmetic, expires all of it. The next
+    `xbrain jev report` then says `0 vigentes` over a full file and the operator reads it as
+    "nobody ever ran this", which is a re-bill of the whole corpus to discover otherwise.
+    No contract arithmetic is needed to say so: the count is the number of records, because
+    the answer is always "all of them".
+    """
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _seed_jev_sidecar(tmp_path, count=3)
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps({"topics": [{"slug": "misc", "description": "Ruido."}]}), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["vocab", "--apply", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "3 evaluaciones de Jev quedan caducadas" in result.stdout
+    # And the remedy is a PLAIN re-run. A retired record is not current, so `select_items`
+    # picks it up on its own; pointing the operator at `--force` would teach them to reach
+    # for the one flag that ALSO re-bills every record that is still current.
+    assert "--force" not in result.stdout, result.stdout
+    assert "`xbrain jev topics` las vuelve a pedir" in result.stdout
+
+
+def test_vocab_regenerate_says_it_too_and_agrees_in_number(tmp_path, monkeypatch):
+    """`1 evaluaciones` reads as a bug in the counting — `defaults.plural` is the repo rule."""
+    from xbrain.models import Topic as _Topic
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _seed_jev_sidecar(tmp_path, count=1)
+    monkeypatch.setattr(cli, "induce_vocab", lambda *a, **k: [_Topic(slug="misc", description="d")])
+
+    result = runner.invoke(app, ["vocab", "--executor", "api", "--regenerate"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 evaluación de Jev queda caducada" in result.stdout
+
+
+def test_vocab_says_nothing_about_jev_when_there_is_no_side_car(tmp_path, monkeypatch):
+    """The overwhelming case is a vault that has never run `jev topics`. A line about a file
+    that does not exist sends the reader looking for it."""
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps({"topics": [{"slug": "misc", "description": "Ruido."}]}), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["vocab", "--apply", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "Jev" not in result.stdout
+
+
+def test_a_worksheet_export_retires_nothing_and_says_nothing(tmp_path, monkeypatch):
+    """`xbrain vocab --executor claude-code` EXPORTS; it does not write `vocab.yaml`. Warning
+    about retired assessments there would be false, and the operator who believes it re-bills
+    a corpus whose side-car is untouched."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _seed_jev_sidecar(tmp_path, count=3)
+
+    result = runner.invoke(app, ["vocab", "--executor", "claude-code"])
+
+    assert result.exit_code == 0, result.output
+    assert "caducada" not in result.stdout
 
 
 def test_vocab_apply_with_no_valid_topics_fails(tmp_path, monkeypatch):
@@ -4949,26 +5045,57 @@ def test_redescribe_frames_missing_vision_command_names_the_operation(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
-def test_redescribe_frames_help_renders_vision_config_key_literally():
-    """M3: `redescribe-frames --help` must show `[vision].command` literally.
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        (["redescribe-frames"], "[vision].command"),
+        (["digest-video"], "[vision].command"),
+        (["digest-video"], "[vision].model"),
+        (["digest-video"], "[transcribe].command"),
+        (["digest-video"], "[frames].footage_max_frames"),
+        (["describe"], "[describe].version"),
+        (["describe"], "[describe].model"),
+        (["get"], "[index].get_char_budget"),
+        (["jev", "report"], "[jev].threshold"),
+        (["jev", "dashboard"], "[jev].threshold"),
+    ],
+    ids=lambda v: " ".join(v) if isinstance(v, list) else v,
+)
+def test_command_help_renders_its_config_key_literally(command: list[str], key: str):
+    """Every `[section].key` a command's help names must survive Rich's markup parser.
 
-    Unescaped, Rich's markup parser treats `[vision]` as a (bogus) style tag,
-    strips it, and renders `.command` on its own — the operator loses the one
-    clue telling them which config section to set."""
-    result = runner.invoke(app, ["redescribe-frames", "--help"])
+    ONE test for the whole class. The repo has been bitten by this five times — `[vision]`
+    twice in #90, then `[jev]`, `[describe]`/`[index]` and `[transcribe]` in #211 — and had
+    the assertion in three variants across two files, the weakest of which could not see a
+    half-fix. Typer renders help through Rich, Rich reads `[section]` as a style tag and
+    eats it, and the result names a key that exists in no config file.
+
+    Three assertions, each catching what the others cannot:
+
+    * the key appears — the escape is there at all;
+    * NO occurrence of the bare `.key` is unprefixed — a second, unescaped occurrence
+      beside an escaped one would otherwise pass, which is exactly how a half-fix survives.
+      Expressed as "every `.key` is preceded by `]`" rather than as a count of the two
+      spellings, because two sections may legitimately share a suffix: `digest-video` names
+      both `[vision].command` and `[transcribe].command`, and a count assertion reads the
+      second as a half-fix of the first;
+    * no backslash is visible — the escape is Rich's, so a build whose markup mode is not
+      `"rich"` would render `\[vision]` literally and the first two would still pass. It
+      also catches a `\\[` that a docstring turned raw carries over from its non-raw life,
+      which is a mistake made while writing this very test.
+
+    Asserted on the RENDERED output, never the source: the backslash is in the source
+    either way, so a source assertion stays green after someone deletes it.
+    """
+    bare = key.split("]", 1)[1]
+
+    result = runner.invoke(app, [*command, "--help"])
+
     assert result.exit_code == 0, result.output
-    assert "[vision].command" in _plain_output(result.output)
-
-
-def test_digest_video_help_renders_vision_config_keys_literally():
-    """M3, the sibling surface: `digest-video --help` mentions `[vision]` twice
-    — once in `--frames`'s help (`[vision].command`) and once in
-    `--vision-model`'s (`[vision].model`) — and both must survive rendering."""
-    result = runner.invoke(app, ["digest-video", "--help"])
-    assert result.exit_code == 0, result.output
-    out = _plain_output(result.output)
-    assert "[vision].command" in out
-    assert "[vision].model" in out
+    out = plain_output(result.output)
+    assert key in out
+    assert re.search(rf"(?<!\]){re.escape(bare)}", out) is None
+    assert "\\[" not in out
 
 
 def test_redescribe_frames_limit_help_says_items_not_videos():
@@ -4987,3 +5114,69 @@ def test_redescribe_frames_limit_help_says_items_not_videos():
     limit_help = match.group(0)
     assert "items" in limit_help
     assert "vídeos" not in limit_help
+
+
+def test_an_explicit_exit_code_survives_the_error_wrapper():
+    """A command's own `typer.Exit(code=N)` must reach the shell as N.
+
+    `click.exceptions.Exit` subclasses `RuntimeError`, which `_OPERATOR_ERRORS` lists. So
+    without an explicit re-raise the wrapper CATCHES a deliberate exit and re-reports it as
+    an operator error, replacing the code the command chose with 1.
+
+    The message it prints depends on call STYLE, which is worth knowing before predicting
+    it: `Exit.__init__` never calls `super().__init__`, so `args` comes from
+    `BaseException.__new__` — `str(Exit(code=130))` is `''` (hence a bare "Error: ") while
+    `str(Exit(130))` is `'130'`. Every call site in `cli.py` uses the keyword form; typer's
+    own `core.py` uses the positional one.
+
+    `xbrain jev topics` uses 130 for an interrupted run.
+    """
+
+    @cli._handle_cli_errors
+    def _command() -> None:
+        raise typer.Exit(code=130)
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _command()
+    assert excinfo.value.exit_code == 130
+
+
+@pytest.mark.parametrize(
+    "error",
+    # `RuntimeError` is the one that matters: `typer.Exit` and `typer.Abort` ARE
+    # `RuntimeError` subclasses, which is the whole reason the bug existed, so a re-raise
+    # clause widened to `(typer.Exit, typer.Abort, RuntimeError)` must go red here. The
+    # other two pin that the wrapper still covers the rest of `_OPERATOR_ERRORS`.
+    [ValueError("vocabulario vacío"), RuntimeError("no hay vocabulario"), OSError("disco lleno")],
+    ids=["ValueError", "RuntimeError", "OSError"],
+)
+def test_the_error_wrapper_still_converts_a_real_operator_error(error: Exception):
+    """The re-raise above must not punch a hole in the wrapper's actual job."""
+
+    @cli._handle_cli_errors
+    def _command() -> None:
+        raise error
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _command()
+    assert excinfo.value.exit_code == 1
+
+
+def test_an_abort_reaches_click_instead_of_the_operator_error_wrapper():
+    """`click.Abort` subclasses `RuntimeError` exactly as `Exit` does, so the wrapper ate it.
+
+    Live call site: `download-videos` asks `typer.confirm(..., abort=True)` before a large
+    download. Answering "n" must print Click's own "Aborted!" — not a bare "Error: ", which
+    is what `str(Abort())` renders as once `_OPERATOR_ERRORS` catches it.
+    """
+    probe = typer.Typer()
+
+    @probe.command()
+    @cli._handle_cli_errors
+    def _cmd() -> None:
+        raise typer.Abort()
+
+    result = CliRunner().invoke(probe, [])
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert "Error:" not in result.output

@@ -645,12 +645,152 @@ generates an Obsidian wiki.
   LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
   life of the corpus it described, and it is the worst kind of wrong in this file, because
   this file is read first and acted on.
+- Jev topic assessment (`xbrain jev topics|report|dashboard|serve|ask|asks`, `src/xbrain/jev/`) — a SIDE-CAR,
+  not a pipeline stage. One TypeSafe call per item carries one Noul per vocabulary slug plus a
+  primary Choice with an escape option; the probabilities land in `data/jev/topics.json` and
+  `jev report` compares them with `enrich` at `[jev].threshold` (default `0.85`), both
+  directions. **It never writes `items.json`, never issues a verdict, never re-renders a note,
+  and takes no snapshot** — a second opinion you can run, read or throw away. Currency is a
+  `contract` hash over the state and the QUESTIONS: re-enriching an item keeps its assessment
+  (that is the event the report exists to look at), while new evidence, a moved vocabulary or a
+  changed `fallback_option` retires it; retired records are excluded from every reader and
+  COUNTED, because a side-car a `vocab` edit just retired must never read like one nobody
+  wrote. The file is PAID, gitignored and outside `snapshot._ARTIFACTS`, so `snapshot restore`
+  leaves it behind — and because a restore reverts `vocab.yaml` as well as `items.json`, one
+  from before a `vocab --regenerate` moves the questions digest and retires EVERY record at
+  once (a full re-bill); only a restore leaving both the evidence and the vocabulary
+  untouched leaves an assessment current. `--force` overwrites paid records, so a run that
+  actually re-asks a current one copies the side-car to `data/jev/topics.<UTC stamp>.bak`
+  first (echoed, never pruned) — that is the file's OWN reversibility, standing in for the
+  snapshot it does not get. ONE ASSESSMENT PER ITEM: the side-car is keyed by `item_id`
+  alone, so a second judge OVERWRITES the first's records; `provider`/`model` are provenance,
+  not a panel. Every pass that SENT a request appends one `JevRun` line to
+  `data/jev/runs.jsonl` (requests, ok, failed, unsaved, tokens per provider, interrupted),
+  counted at the client seam (`CountingJevClient`) and appended from `jev.run.run_pass`'
+  `finally` — every exit path (`ok` = what a save persisted; a failed final save books the
+  rest `unsaved`), 402s and Ctrl-C included, and the log step never becomes the
+  verdict; tokens, never dollars (priced at read time by `report.run_history`, which also
+  prices assessments no logged pass covers as "fuera del registro"). `jev dashboard` compares at the FIXED
+  `[jev].threshold`, recomputes nothing in the browser (no slider, no JS mirror, no node in
+  CI) and is a post browser (every post as a card, Jev vs enrich under it, filters + topic
+  navigator + j/k/n/p, view in the URL hash; photos by relative path into `_media/`, never
+  base64). Each card shows the post through X's own embed: a sandboxed `<iframe>` to
+  `platform.twitter.com/embed/Tweet.html` (`dnt=true`, `no-referrer`), NEVER `widgets.js` (X's
+  script in the page origin, next to the serve token); ids must match `^\d{1,25}$`; resize
+  messages are matched by `event.source` from X's origin only; «copia guardada» per post (every
+  card of it follows), page-wide «Vista: X | copia guardada» / `?embed=0`, auto fallback after
+  8 s or `no_results`; an X Article (`x_article`, Python) opens saved, with its body cut to
+  `PAGE_ARTICLE_CHARS` at a boundary in Python (ARCHITECTURE.md, jev · The X embed). Page
+  tests run with no network (`_NO_NETWORK`); the embed tests run Chrome in real time
+  (virtual time starves the IntersectionObserver) and dispatch X's messages as real
+  `MessageEvent`s. Which filter a card is in is decided in Python (`in` keys, tested equal to
+  the report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
+  disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
+  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Three top
+  tabs: «Revisar topics» (cost strip, three numbers, sub-tabs Posts · Topics · Comparar under
+  `#revisar/…`), «Preguntar» (`#ask`, its own cost line `asks.cost` = `report.ask_cost_total`),
+  «Configuración» (`#config`); old `#posts|#topics|#compare` are rewritten in place. The
+  estimate → confirm → progress block is INLINE under what opened it (`placePanel`, anchor
+  selectors re-found after every redraw; `closePanel` forgets the anchor when no job is
+  followed), never `position: fixed`; an ask estimate is held when the form changes after it
+  (`askEstimateStill`). `DATA.updated` is an ISO day the page words. The three numbers live
+  once, above the Revisar sub-tabs, with their Posts links (Comparar does not repeat them). Topics tab
+  (`#revisar/topics`, `?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
+  `primary_confusion` in report.py (counts only; the post lists are `report.post_sets`,
+  page-only, never in topics-report.json); the page never tallies cards into a number. Comparar
+  tab (`#revisar/compare`, `?b=`/`?px=`/`?pd=`): `confidence_bands` (edges defined ONCE in
+  `report._BAND_SPECS`, cut at `ItemComparison.threshold`) and `per_topic.primary_both`, lists
+  from `post_sets.bands` / `pd` / `px`; the template's `loadData(blob)` is the one place derived
+  values are set. Configuración tab (`#config`, read-only): the blob's `config` block from
+  `dashboard.config_view` — `[jev]` keys from `defaults.JEV_DEFAULTS`, the wire questions from
+  `build_topic_questions` (never copied into the template), `STATE_SURFACE_KEYS`/`CUT_MARKER`
+  from assess.py, the pass estimate from `report.estimate_selection` (topics-only means:
+  `topics_pass_estimate`); settings through `Config.jev_settings()`. Plus
+  cost total / per pass / per post. `jev topics` and `jev ask` spend, and so does a job
+  started through `jev serve`'s API (`jev/picks.py` → `jev/service.py` → `jev/serve.py`,
+  refusals `jev/errors.py`'s `ServeError`: the page live on
+  127.0.0.1 ONLY; routes `/api/<kind>/estimate|evaluate`, ONE job slot for every kind; the
+  estimate = `select_items` + `topics_pass_estimate` over the blob's `cost.per_post`; a
+  single-use, 10-minute confirmation bound to the pick as asked; the job re-selects and
+  re-prices under the lock; `[jev].serve_max_usd` is a HARD bound by reservation — each post's
+  expected cost reserved before sending, unpriced/None-token answers charged it, never $0;
+  every stop is SOFT: in-flight calls are waited for, saved and logged; Host on every route,
+  Origin + token + JSON on every POST; Ctrl-C → 503, drain, exit 130; the page's buttons live
+  in the template's `/* serve */` section, behind `SERVED()` — `blob.serve` is null in the
+  static file; `force` is never pre-ticked, «Parar» is `POST /api/job/cancel` (soft stop,
+  reason `cancelado`), a job that did not end cleanly un-hides the panel, and an idle page
+  watches `/api/job`'s `number` against `blob.serve.finished_job` — never `finished_at`, a
+  time to the second that two jobs can share). A paid pass holds
+  `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
+  `run_topics`/`run_ask` require the `PassLock` handle — so the terminal and the server never
+  lose each other's records; `jev topics` and `jev ask` refused by it exit 75. `jev ask "<query>"` (`jev/ask.py`)
+  asks ONE Noul per post (query verbatim as `true`, same state as topics), caches answers per
+  query in `data/jev/asks/<sha>.json` by contract, keeps each query's last use + the cost-model
+  sums in `asks/index.json`, logs `kind: "ask"` + `query_sha` in runs.jsonl (topics cost views
+  filter it out; `report.ask_cost` prices a query; `jev asks` lists them). Flow shared with the
+  server (`service._AskKind`): `ask.plan_ask` (no lock) → confirm above `[jev].ask_max_usd` →
+  lock, plan again, `same_selection` and the price agreed (a prompted yes holds its estimate)
+  → `run.run_ask` → `ask.finish_ask` (history rule). Estimate = `CostModel.tokens`: posts ×
+  per_call + chars / chars_per_token, fitted on paid answers (prior 1,000 and 4.0); the
+  server's per-post price uses the same method. An unknown `--topic` is `JevFilterRefused`.
+  The page reads the history with `load_history(skip_unreadable=True)`. `--topic`
+  (repeatable, OR) judges Jev at `[jev].threshold` (`ask.post_topics`); results are RANKED,
+  never cut at it — only `--min` cuts (`last_min`, just the refine's default: the page ships
+  every answer, and its ask sends no min so it keeps the last one), `[jev].ask_top` is how
+  many show first; an old entry's `last_threshold` is read, never used. A saved query is
+  refined for free (`ask.refine_results`; `jev asks N --min/--topic/--since/--until/--author/--top`;
+  the page's «Refinar resultados» over `asks.keys`, fields in `ASK_REFINE_FIELDS`, topic
+  counts by `askTopicCounts`, state in the hash). Every answer reaches the page through
+  `ask.answer_view`, as columns (`dashboard.answer_columns`: `{ids, p}` + model/minute once).
+  A running ask STREAMS its answers (`GET /api/job?since=<cursor>`, `<number>-<index>`; at most
+  `service.STREAM_PAGE` per reply): the query's current answers first, then each one
+  `run.run_pass`' `on_answer` banks, each `dashboard.streamed_answer` (the same `answer_view`),
+  from the job's memory, in ARRIVAL order; the page ranks by `askOrder` (`_rank`'s key) and
+  refills the one list (`askFillList`, cards kept by id, `askKeepAnchor`), then refills the
+  SAME list with the reloaded row at the end. `more` is honoured only for a reply `askAbsorb`
+  took; a job-number change under a follower `switched`s to the new job (no 0 ms loop). The
+  status line is sticky, under the title, and stays one line at the end; «muy relevantes» =
+  `[jev].threshold` over this job's answers. An X slot is never empty: the saved copy stands in
+  (`xWait`) until X's first height (`xHeight`), and stays if X never answers (`xSettle`).
+  The server lets an ended job's stream go after `STREAM_KEEP_S`. It shares — never copies — the
+  pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`),
+  contract shape (`assess.contract`) and
+  lock with topics. The server runs that same flow as a second kind (`service._AskKind`
+  beside `_TopicsKind`: parse/price/refusal/view/same/run; the slot, confirmation, re-check,
+  cap and end are shared): `POST /api/ask/estimate|evaluate` (query + `jev ask`'s filters;
+  capped by `serve_max_usd`, not `ask_max_usd`; an all-cached query runs free and is still
+  recorded), `GET /api/asks` and `/api/ask/<sha>` = the blob's `asks` (`dashboard.asks_view`:
+  history, results recomputed at build, `report.ask_cost_by_query`, `topic_counts`);
+  `GET /api/ask/counts?since=&until=&author=&only_evaluated=` (per-topic counts, read-only,
+  from the cached `JevPairs` — `JevService._pairs` — never a blob rebuild). The page's Preguntar tab
+  (`#ask`, `/* ask tab */`) draws only `DATA.asks` — static page included; the job panel is
+  `#jobp`. `report` and `dashboard` re-read what was paid for, free. Key from
+  `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
+  never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
+  collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:
+  `docs/jev.md`, ARCHITECTURE.md § jev.
+- Error messages pick their language by AUDIENCE, not by exception type. `JevError` and the
+  operator-facing `ValueError`s are Spanish sentences (``el vocabulario está vacío: ejecuta
+  `xbrain vocab`…``); only a `config.toml` schema fault stays English, because `config.py`
+  is. `_handle_cli_errors` surfaces both as one `Error: …` line and exit 1 — and **re-raises
+  `typer.Exit` / `typer.Abort` first**, since both subclass `RuntimeError`: without that, a
+  command's chosen exit code became a bare `Error:` and exit 1. That is what lets
+  `xbrain jev topics` exit 130 on Ctrl-C, and it is why `xbrain index …` no longer prints a
+  second empty `Error:` line and `download-videos` prints `Aborted!` on `n`.
 
 ## Conventions
 - TDD: every module has a `tests/test_*.py`. Run `uv run pytest -v`.
 - The X GraphQL parser anchors on key names, not paths — X's private API drifts.
-- Never commit personal data: `auth/storage_state.json`, `data/`, `config.toml`.
-  All are gitignored.
+- Never commit personal data or secrets: `auth/storage_state.json`, `data/`, `config.toml`,
+  `.env`. All are gitignored. `.env` holds `TYPESAFE_API_KEY` (`xbrain jev`); `.env.example`
+  is the committed template and carries no value.
+- **`git add` BEFORE `uv run poe check`.** The gate's `detect-secrets scan src/xbrain tests
+  scripts` only sees files git TRACKS, so a new, unstaged file is invisible to it. Probed on
+  2026-09-22 with a DUMMY value in AWS's format (what detect-secrets' `AWSKeyDetector` matches
+  on — not a credential): untracked, `src/xbrain/_probe_secret.py` is absent from the scan's
+  results; `git add` it and the same scan reports it. The probe file was deleted afterwards. So a secrets gate that went
+  green over a new file did not look at it. (Only this check resolves its files through git —
+  ruff, mypy and pytest walk the directories — which is exactly why it is the one to remember.)
 
 ## Git workflow
 - `develop` is the integration branch: `feature-branch → PR → develop`. Branch

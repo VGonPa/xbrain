@@ -1,0 +1,932 @@
+"""`xbrain jev ask`: ask the corpus a question; Jev says, post by post, whether it answers it.
+
+ONE NOUL PER POST (`questions.build_ask_questions`): the user's query verbatim as the true
+criterion, over the SAME state a topics pass sends (`assess.build_topic_state`). Each post is
+judged alone, so its probability does not depend on the company it was asked in. The results
+are the posts with a CURRENT answer RANKED by probability, best first (ties by post id): a
+search ranks, it does not cut. `[jev].threshold` is a TOPIC-membership bar and never touches
+them; an optional minimum is the only cut — `jev ask --min` (recorded as `last_min`) or a free
+refine (`refine_results`, `jev asks N --min`, the page's «Relevancia mínima»). `last_min` is
+only a refine's DEFAULT: the page ships every current answer ranked, and an ask that sends no
+minimum (the page's) keeps the query's last one. How many are shown first is the caller's
+(`[jev].ask_top`).
+
+THE FLOW, shared by `xbrain jev ask` and the server's ask job: `plan_ask` (load, filter,
+select, estimate — nothing paid, no lock needed) → the caller confirms → under the pass lock,
+`plan_ask` again and `same_selection` (refuse if the posts moved) → `run.run_ask` (the pass:
+pool, checkpoint, save, run log — `run.run_pass`, the same loop as `jev topics`) →
+`finish_ask` (the results, and the history under the one rule of what is recorded).
+
+What this module owns:
+
+* the query (`AskQuery`: normalised text, its sha — the file name — and its question digest);
+* the contract (`ask_contract` = `assess.contract` under its own version), so a repeated
+  query never re-pays an unchanged post and new evidence re-asks it;
+* the pre-filters (`AskFilters`, `filter_posts`), the funnel (`select_ask_items`, which is
+  `assess.select_by_contract`), the cost model and estimate (`cost_model`, `estimate_ask`,
+  priced by `defaults.tokens_cost_usd`), the results and the history (`load_history`).
+
+What a query has COST is not here: it is the run log's (`report.ask_cost`).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, overload
+
+from pydantic import ValidationError
+
+from xbrain.config import Config
+from xbrain.jev.assess import (
+    Selection,
+    build_topic_state,
+    contract,
+    record_refusal,
+    sha256,
+    questions_digest,
+    select_by_contract,
+)
+from xbrain.jev.client import JevClient, JevError, NoulAnswer, Question
+from xbrain.jev.defaults import (
+    DEFAULT_ASK_TOKENS_PER_CALL,
+    DEFAULT_CHARS_PER_TOKEN,
+    DEFAULT_PROVIDER,
+    tokens_cost_usd,
+)
+from xbrain.jev.load import JevPairs, load_jev_pairs
+from xbrain.jev.models import (
+    AskAssessment,
+    AskCalibration,
+    AskFile,
+    AskHistoryEntry,
+    AskIndex,
+    TopicAssessment,
+)
+from xbrain.jev.questions import ASK_KEY, STATE_KEY, build_ask_questions, normalize_query
+from xbrain.jev.report import jev_assigned
+from xbrain.jev.store import (
+    ASK_INDEX,
+    ask_files,
+    load_ask_file,
+    load_ask_index,
+    load_asks,
+    save_ask_index,
+)
+from xbrain.models import Item
+from xbrain.store import load_store
+
+if TYPE_CHECKING:
+    from xbrain.jev.run import RunOutcome
+
+#: Bumped only when the COMPOSITION of the contract changes (see `assess._CONTRACT_VERSION`).
+#: Distinct from the topics version, so a topics contract can never pass for an ask one.
+_CONTRACT_VERSION = "xbrain-jev-ask/v1"
+
+
+@dataclass(frozen=True)
+class AskQuery:
+    """One query, as asked and as filed. Build it with `AskQuery.of(raw)`.
+
+    `text` is `normalize_query(raw)` — what Jev receives and what the file stores; `sha` is
+    its sha256, the file name under `data/jev/asks/` and the run log's `query_sha`; `digest`
+    is `assess.questions_digest` of `questions`, hashed into every answer's contract.
+    """
+
+    text: str
+    sha: str
+    questions: dict[str, Question] = field(compare=False)
+    digest: str
+
+    @classmethod
+    def of(cls, raw: str) -> AskQuery:
+        text = normalize_query(raw)
+        questions = build_ask_questions(text)
+        return cls(
+            text=text, sha=sha256(text), questions=questions, digest=questions_digest(questions)
+        )
+
+
+def ask_contract(state_text: str, digest: str) -> str:
+    """sha256(version ∥ state as sent ∥ question digest) — `assess.topic_contract`'s shape.
+
+    The judge is outside it, as for topics: re-pointing `[jev].model` does not retire answers.
+    """
+    return contract(_CONTRACT_VERSION, state_text, digest)
+
+
+def question_chars(questions: dict[str, Question]) -> int:
+    """The characters of the question text sent with every post: instructions plus criteria.
+
+    Part of `prompt_chars`, so an estimate can account for a long query as well as a long post.
+    """
+    total = 0
+    for question in questions.values():
+        total += len(question.instructions)
+        total += sum(len(text or "") for text in (question.criteria or {}).values())
+    return total
+
+
+def assess_post(
+    item: Item,
+    query: AskQuery,
+    client: JevClient,
+    *,
+    char_limit: int,
+    now: datetime | None = None,
+) -> AskAssessment:
+    """One call for one post; total with respect to `JevError` for everything Jev answered."""
+    state, state_chars = build_topic_state(item, char_limit)
+    result = client.ask(state, query.questions)
+    answer = result.answers.get(ASK_KEY)
+    if not isinstance(answer, NoulAnswer):
+        raise JevError(f"Jev no contestó la pregunta {ASK_KEY!r}")
+    try:
+        return AskAssessment(
+            item_id=item.id,
+            provider=result.provider,
+            model=result.model,
+            asked_at=now or datetime.now(timezone.utc),
+            contract=ask_contract(state[STATE_KEY], query.digest),
+            state_chars=state_chars,
+            truncated=state_chars > char_limit,
+            prompt_chars=len(state[STATE_KEY]) + question_chars(query.questions),
+            probability=answer.noul,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+        )
+    except ValidationError as exc:
+        raise record_refusal(exc) from exc
+
+
+def _is_current(record: AskAssessment | None, state_text: str, query: AskQuery) -> bool:
+    """THE ONE definition of "this stored answer still answers this query about this post"."""
+    return record is not None and record.contract == ask_contract(state_text, query.digest)
+
+
+# --------------------------------------------------------------------------- pre-filters
+
+#: `topic` is the LEGACY single-topic key (history written before topics were multi-select);
+#: `from_json` reads it as `topics=(topic,)`, `as_json` never writes it.
+_FILTER_KEYS = ("topics", "topic", "since", "until", "author", "only_evaluated")
+
+
+@dataclass(frozen=True)
+class AskFilters:
+    """What narrows the posts BEFORE anything is paid for. Every field is optional.
+
+    `topics` keeps a post that is in ANY of them (OR within topics; AND with every other
+    filter): in a topic when enrich assigned it (primary or not) OR its CURRENT Jev topics
+    answer backs it at `[jev].threshold` (`post_topics`) — the topic bar, never anything about
+    results, so nothing but the filters can widen, and re-bill, the posts asked. Kept sorted
+    and once, so two picks of the same topics compare equal. `since`/`until` are calendar days,
+    both INCLUDED, read on `created_at` in UTC (every stored instant is UTC); `author` is a
+    handle, `@` and case ignored; `only_evaluated` keeps posts with a current topics answer.
+
+    Refused on construction when they could only select nothing by mistake: `since` after
+    `until`, a blank `author` or topic (`ValueError`, which the CLI prints as an operator
+    error). `from_json` is how a caller that received them as data (the server) builds them.
+    """
+
+    topics: tuple[str, ...] = ()
+    since: date | None = None
+    until: date | None = None
+    author: str | None = None
+    only_evaluated: bool = False
+
+    def __post_init__(self) -> None:
+        if self.since is not None and self.until is not None and self.since > self.until:
+            raise ValueError(f"--since {self.since} es posterior a --until {self.until}")
+        if self.author is not None and not normalise_author(self.author):
+            raise ValueError("--author está vacío")
+        if any(not topic.strip() for topic in self.topics):
+            raise ValueError("--topic está vacío")
+        object.__setattr__(self, "topics", tuple(sorted(set(self.topics))))
+
+    @property
+    def needs_jev(self) -> bool:
+        """Whether applying these filters needs the topics side-car (`load_jev_pairs`)."""
+        return bool(self.topics) or self.only_evaluated
+
+    def as_json(self) -> dict[str, str | bool | list[str]]:
+        """The filters that are set, as the history stores them (dates as `AAAA-MM-DD`)."""
+        out: dict[str, str | bool | list[str]] = {}
+        if self.topics:
+            out["topics"] = list(self.topics)
+        if self.since is not None:
+            out["since"] = self.since.isoformat()
+        if self.until is not None:
+            out["until"] = self.until.isoformat()
+        if self.author is not None:
+            out["author"] = self.author
+        if self.only_evaluated:
+            out["only_evaluated"] = True
+        return out
+
+    @classmethod
+    def from_json(cls, data: object) -> AskFilters:
+        """`as_json`'s inverse, refusing (`ValueError`) an unknown key or a value of the wrong
+        type — a filter silently dropped would pay for more posts than were asked for."""
+        if not isinstance(data, dict):
+            raise ValueError("los filtros deben ser un objeto")
+        unknown = sorted(set(data) - set(_FILTER_KEYS))
+        if unknown:
+            raise ValueError(f"filtro desconocido: {unknown[0]}")
+        text: dict[str, str | None] = {}
+        for key in ("author", "since", "until"):
+            value = data.get(key)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"el filtro {key} debe ser un texto")
+            text[key] = value
+        only = data.get("only_evaluated", False)
+        if not isinstance(only, bool):
+            raise ValueError("el filtro only_evaluated debe ser true o false")
+        return cls(
+            topics=_topics(data),
+            since=_day(text["since"], "since"),
+            until=_day(text["until"], "until"),
+            author=text["author"],
+            only_evaluated=only,
+        )
+
+
+def _topics(data: dict) -> tuple[str, ...]:
+    """`topics` (a list of texts), or an old history entry's single `topic` — never both."""
+    if "topic" in data:
+        if "topics" in data:
+            raise ValueError("usa topics (una lista), no topic y topics a la vez")
+        single = data["topic"]
+        if not isinstance(single, str):
+            raise ValueError("el filtro topic debe ser un texto")
+        return (single,)
+    many = data.get("topics", [])
+    if not isinstance(many, list) or not all(isinstance(topic, str) for topic in many):
+        raise ValueError("el filtro topics debe ser una lista de textos")
+    return tuple(many)
+
+
+def _day(value: str | None, key: str) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"el filtro {key} debe ser un día AAAA-MM-DD, no {value!r}") from exc
+
+
+def _enrich_topics(item: Item) -> set[str]:
+    if item.enriched is None:
+        return set()
+    topics = set(item.enriched.topics)
+    if item.enriched.primary_topic:
+        topics.add(item.enriched.primary_topic)
+    return topics
+
+
+def _known_topics(store: dict[str, Item], jev: JevPairs | None) -> set[str]:
+    known = {slug for item in store.values() for slug in _enrich_topics(item)}
+    if jev is not None:
+        known |= {topic.slug for topic in jev.vocab}
+    return known
+
+
+def post_topics(item: Item, assessment: TopicAssessment | None, threshold: float) -> set[str]:
+    """THE topics a post is in for the `topics` filter: enrich's (primary or not) plus those
+    its CURRENT Jev topics answer backs at `threshold` (`[jev].threshold`)."""
+    topics = _enrich_topics(item)
+    if assessment is not None:
+        topics |= set(jev_assigned(assessment.membership, threshold))
+    return topics
+
+
+def _on_topic(
+    item: Item, assessment: TopicAssessment | None, filters: AskFilters, threshold: float
+) -> bool:
+    """`only_evaluated` and `topics`: the two filters that read the topics side-car."""
+    if filters.only_evaluated and assessment is None:
+        return False
+    return not filters.topics or not post_topics(item, assessment, threshold).isdisjoint(
+        filters.topics
+    )
+
+
+def _in_days(item: Item, filters: AskFilters) -> bool:
+    day = item.created_at.astimezone(timezone.utc).date()
+    return (filters.since is None or day >= filters.since) and (
+        filters.until is None or day <= filters.until
+    )
+
+
+def normalise_author(handle: str) -> str:
+    """THE one reading of a handle, typed or stored: trimmed, leading «@» dropped, trimmed
+    again, casefolded. The `author` filter, the refine keys' `a` and the page's refine
+    (`askAuthor`) all compare through it."""
+    return handle.strip().lstrip("@").strip().casefold()
+
+
+def _by_author(item: Item, author: str | None) -> bool:
+    return author is None or normalise_author(item.author.handle) == normalise_author(author)
+
+
+class JevFilterRefused(JevError):
+    """A filter the corpus cannot apply (`filter_posts`): a `topic` nobody uses. Its own type,
+    so the page tells it from any other failure without reading the message."""
+
+
+def _refuse_unusable(store: dict[str, Item], filters: AskFilters, jev: JevPairs | None) -> None:
+    """A caller that forgot the side-car (a bug), or a `topic` nobody uses (a typo)."""
+    if filters.needs_jev and jev is None:
+        raise ValueError("filter_posts: --topic y --only-evaluated necesitan las evaluaciones")
+    unknown = [topic for topic in filters.topics if topic not in _known_topics(store, jev)]
+    if unknown:
+        raise JevFilterRefused(
+            f"topic desconocido: {unknown[0]!r} (ni en el vocabulario ni en enrich)"
+        )
+
+
+def filter_posts(
+    store: dict[str, Item],
+    filters: AskFilters,
+    *,
+    jev: JevPairs | None,
+    threshold: float,
+) -> tuple[list[Item], int]:
+    """The posts `filters` keep, in store order, and how many they dropped.
+
+    `jev` is required when `filters.needs_jev`; only its CURRENT pairs count (a stale topics
+    answer describes other evidence). `threshold` is the TOPIC bar — `plan_ask` passes
+    `[jev].threshold`. A `topic` nobody uses — not in the vocabulary and never assigned by
+    enrich — is refused: it would select nothing and look like "no post answers".
+    """
+    _refuse_unusable(store, filters, jev)
+    current = jev.current_by_id() if jev else {}
+    kept = [
+        item
+        for item in store.values()
+        if _on_topic(item, current.get(item.id), filters, threshold)
+        and _in_days(item, filters)
+        and _by_author(item, filters.author)
+    ]
+    return kept, len(store) - len(kept)
+
+
+def topic_counts(
+    store: dict[str, Item],
+    filters: AskFilters,
+    *,
+    jev: JevPairs | None,
+    threshold: float,
+) -> dict[str, int]:
+    """How many posts each topic would keep under `filters`' OTHER filters (its own `topics`
+    ignored): what the page shows beside each topic it offers, so a reader sees what ticking
+    it adds. Every topic in use (vocabulary and enrich), by slug. The same rule as
+    `filter_posts` with that one topic — `post_topics`, `_in_days`, `_by_author` — counted in
+    one pass instead of one filter per topic."""
+    others = replace(filters, topics=())
+    kept, _ = filter_posts(store, others, jev=jev, threshold=threshold)
+    current = jev.current_by_id() if jev else {}
+    counts = dict.fromkeys(sorted(_known_topics(store, jev)), 0)
+    for item in kept:
+        for topic in post_topics(item, current.get(item.id), threshold):
+            if topic in counts:
+                counts[topic] += 1
+    return counts
+
+
+# --------------------------------------------------------------------------- the funnel
+
+
+def select_ask_items(
+    candidates: Sequence[Item],
+    records: dict[str, AskAssessment],
+    query: AskQuery,
+    *,
+    char_limit: int,
+    limit: int | None,
+    state_of: Callable[[Item], tuple[str, int]] | None = None,
+) -> Selection:
+    """The posts to pay for: every candidate with evidence and no current answer to `query`,
+    cut by `limit` (below 1 is refused). The same funnel as topics
+    (`assess.select_by_contract`), never forced: a current answer is the cache, and re-asking
+    it would pay for the same probability."""
+
+    def _current(item: Item, state_text: str) -> bool:
+        return _is_current(records.get(item.id), state_text, query)
+
+    return select_by_contract(
+        candidates, _current, limit=limit, force=False, char_limit=char_limit, state_of=state_of
+    )
+
+
+# --------------------------------------------------------------------------- estimate
+
+
+@dataclass(frozen=True)
+class CostModel:
+    """`tokens = posts × per_call + chars / chars_per_token` — how an ask is billed.
+
+    `measured` is False while it is the prior (`defaults.DEFAULT_ASK_TOKENS_PER_CALL`,
+    `DEFAULT_CHARS_PER_TOKEN`); `answers` is how many paid answers it was fitted on.
+    """
+
+    per_call: float
+    chars_per_token: float
+    measured: bool
+    answers: int
+
+    def tokens(self, chars: int, posts: int = 1) -> float:
+        """The input tokens `posts` calls sending `chars` characters in all are billed: THE
+        formula, for the estimate (`estimate_ask`) and each post's planned price (the
+        server's reservation) alike. Unrounded: the caller rounds when it reports."""
+        return posts * self.per_call + chars / self.chars_per_token
+
+
+_PRIOR = CostModel(
+    per_call=float(DEFAULT_ASK_TOKENS_PER_CALL),
+    chars_per_token=DEFAULT_CHARS_PER_TOKEN,
+    measured=False,
+    answers=0,
+)
+
+
+def cost_model(calibration: AskCalibration) -> CostModel:
+    """The least-squares line through the paid answers' `(prompt_chars, input_tokens)`, or the
+    prior until it means something.
+
+    A real provider bills a fixed prompt around the state and question on every call, so a
+    ratio alone (tokens ∝ chars) underestimates short posts; the intercept is that fixed part.
+    Two DIFFERENT sizes are needed to separate the two terms — one size (or none) keeps the
+    prior. A slope at or below zero (a bill that shrinks with longer posts) is noise, never a
+    model, and keeps the prior too. A negative intercept is refitted through zero.
+    """
+    n = calibration.answers
+    spread = n * calibration.chars_sq - calibration.chars**2
+    if n < 2 or spread <= 1e-9 * max(1.0, calibration.chars_sq * n):
+        return _PRIOR
+    slope = (n * calibration.chars_tokens - calibration.chars * calibration.tokens) / spread
+    if slope <= 0:
+        return _PRIOR
+    intercept = (calibration.tokens - slope * calibration.chars) / n
+    if intercept < 0:
+        intercept, slope = 0.0, calibration.chars_tokens / calibration.chars_sq
+    return CostModel(per_call=intercept, chars_per_token=1 / slope, measured=True, answers=n)
+
+
+@dataclass(frozen=True)
+class AskEstimate:
+    """What asking `posts` posts will cost: tokens by `model` from the characters that will be
+    sent (each post's state as cut + the question), priced by THE price formula. An estimate,
+    never a bill."""
+
+    posts: int
+    chars: int
+    tokens: int
+    usd: float
+    model: CostModel
+
+
+def estimate_ask(prompt_chars: Sequence[int], model: CostModel) -> AskEstimate:
+    """The estimate for posts whose calls will send `prompt_chars` characters each."""
+    chars = sum(prompt_chars)
+    tokens = round(model.tokens(chars, posts=len(prompt_chars)))
+    return AskEstimate(
+        posts=len(prompt_chars),
+        chars=chars,
+        tokens=tokens,
+        usd=tokens_cost_usd(tokens, DEFAULT_PROVIDER),
+        model=model,
+    )
+
+
+# --------------------------------------------------------------------------- results
+
+
+@dataclass(frozen=True)
+class AskResults:
+    """The candidates with a current answer at or above the minimum, RANKED (probability
+    descending, then post id); how many candidates have a current answer at all; and whether
+    this use of the query was written to the history. How many to show is the caller's."""
+
+    ranked: tuple[tuple[Item, AskAssessment], ...]
+    answered: int
+    recorded: bool = False
+
+
+def check_minimum(minimum: float) -> float:
+    """A minimum probability for results: a number in [0, 1] (0 = no minimum)."""
+    if not 0.0 <= minimum <= 1.0:
+        raise ValueError(f"la relevancia mínima debe estar entre 0 y 1, no {minimum}")
+    return minimum
+
+
+def _rank(
+    candidates: Sequence[Item],
+    records: dict[str, AskAssessment],
+    query: AskQuery,
+    state_text: Callable[[Item], str | None],
+    minimum: float,
+) -> AskResults:
+    check_minimum(minimum)
+    current: list[tuple[Item, AskAssessment]] = []
+    for item in candidates:
+        record = records.get(item.id)
+        if record is None:
+            continue
+        text = state_text(item)
+        if text is not None and _is_current(record, text, query):
+            current.append((item, record))
+    ranked = sorted(
+        ((item, record) for item, record in current if record.probability >= minimum),
+        key=lambda pair: (-pair[1].probability, pair[0].id),
+    )
+    return AskResults(ranked=tuple(ranked), answered=len(current))
+
+
+def saved_results(
+    store: dict[str, Item],
+    jev: JevPairs | None,
+    query: AskQuery,
+    filters: AskFilters,
+    records: dict[str, AskAssessment],
+    *,
+    topic_threshold: float,
+    minimum: float,
+    state_text: Callable[[Item], str | None],
+) -> AskResults:
+    """The results of a query asked before, over the filters it was asked with: what the page
+    shows and `finish_ask` ranked. `topic_threshold` is `[jev].threshold`, the bar `--topic`
+    and `--only-evaluated` judge Jev's topics answers at (as `plan_ask` does) and NOTHING
+    else; `minimum` is the use's own `--min` (0 = none). `state_text` is each post's state as
+    sent, so a caller ranking many queries builds it once."""
+    candidates, _ = filter_posts(store, filters, jev=jev, threshold=topic_threshold)
+    return _rank(candidates, records, query, state_text, minimum)
+
+
+def refine_results(
+    results: AskResults,
+    refine: AskFilters,
+    minimum: float,
+    *,
+    store: dict[str, Item],
+    jev: JevPairs | None,
+    threshold: float,
+) -> AskResults:
+    """A saved query's results REFINED for free: its ranked answers kept at or above
+    `minimum` and passing `refine` (topics, days, author — `filter_posts`' own rules, topics at
+    `threshold`), in the ranking's order. Nothing is asked and nothing re-ranked; `answered` is
+    unchanged. What `jev asks <query> --min … --topic …` prints, and what the page's
+    «Refinar resultados» must agree with (it filters the same order by `refine_keys`)."""
+    check_minimum(minimum)
+    kept: set[str] | None = None
+    if refine != AskFilters():
+        kept = {item.id for item in filter_posts(store, refine, jev=jev, threshold=threshold)[0]}
+    ranked = tuple(
+        (item, record)
+        for item, record in results.ranked
+        if record.probability >= minimum and (kept is None or item.id in kept)
+    )
+    return AskResults(ranked=ranked, answered=results.answered, recorded=results.recorded)
+
+
+def reopen_results(cfg: Config, entry: AskHistoryEntry, jev: JevPairs) -> AskResults:
+    """A saved query's results as its file holds them NOW: every current answer over the
+    filters it was last asked with, ranked, no minimum — read only, nothing asked."""
+    query = AskQuery.of(entry.query)
+    char_limit = cfg.jev_state_char_limit
+    return saved_results(
+        jev.store,
+        jev,
+        query,
+        AskFilters.from_json(entry.last_filters),
+        load_asks(ask_path(cfg, query), query),
+        topic_threshold=cfg.jev_threshold,
+        minimum=0.0,
+        state_text=lambda item: build_topic_state(item, char_limit)[0][STATE_KEY],
+    )
+
+
+def refine_keys(
+    item: Item, assessment: TopicAssessment | None, threshold: float
+) -> dict[str, str | list[str]]:
+    """What the page refines a result post by, computed HERE so the browser only compares:
+    its day in UTC (`d`, as `since`/`until` read it), its handle normalised (`a`,
+    `normalise_author`, as `author` matches it) and its topics (`t`, `post_topics` at `threshold`)."""
+    return {
+        "d": item.created_at.astimezone(timezone.utc).date().isoformat(),
+        "a": normalise_author(item.author.handle),
+        "t": sorted(post_topics(item, assessment, threshold)),
+    }
+
+
+@dataclass(frozen=True)
+class AnswerView:
+    """ONE saved answer as a reader of results sees it: the post, its probability, who
+    answered and when, and the post's refine keys (`refine_keys`). The page's blob builds every
+    answer through `answer_view` (and a stream of answers mid-job goes through it too), so an
+    answer can never reach the page without the keys «Refinar resultados» compares on."""
+
+    id: str
+    p: float
+    model: str
+    asked_at: datetime
+    keys: dict[str, str | list[str]]
+
+
+def answer_view(
+    item: Item, record: AskAssessment, assessment: TopicAssessment | None, threshold: float
+) -> AnswerView:
+    """`record` (the answer about `item`) as an `AnswerView`; `assessment` is the post's
+    CURRENT topics answer, if any, judged at `threshold` (`[jev].threshold`) for its topics."""
+    return AnswerView(
+        id=item.id,
+        p=record.probability,
+        model=record.model,
+        asked_at=record.asked_at,
+        keys=refine_keys(item, assessment, threshold),
+    )
+
+
+# --------------------------------------------------------------------------- history
+
+
+def _similar_key(text: str) -> str:
+    """A query with case, punctuation and spacing taken out: what makes two queries "the same
+    question" to a reader, and two different paid files to the cache."""
+    return "".join(char for char in text.casefold() if char.isalnum())
+
+
+def similar_queries(index: AskIndex, query: AskQuery) -> tuple[str, ...]:
+    """Queries already asked that differ from `query` only in case, punctuation or spacing."""
+    key = _similar_key(query.text)
+    return tuple(
+        sorted(
+            entry.query
+            for sha, entry in index.queries.items()
+            if sha != query.sha and _similar_key(entry.query) == key
+        )
+    )
+
+
+def _rebuilt_entry(stored: AskFile, sha: str) -> AskHistoryEntry:
+    """An entry the index lost, from the query's file: `last_evaluated` and `last_results`
+    count EVERY answer in the file, current or not (no filters, no minimum are known), as
+    `AskHistoryEntry.rebuilt` says; what the page and `jev asks` show is recomputed from the
+    current answers anyway."""
+    records = list(stored.assessments.values())
+    moments = [record.asked_at for record in records] or [datetime.now(timezone.utc)]
+    return AskHistoryEntry(
+        query_sha=sha,
+        query=stored.query,
+        first_asked_at=min(moments),
+        last_asked_at=max(moments),
+        times=1,
+        last_evaluated=len(records),
+        last_results=len(records),
+        last_filters={},
+        rebuilt=True,
+    )
+
+
+def _calibrate(calibration: AskCalibration, records: Iterable[AskAssessment]) -> AskCalibration:
+    for record in records:
+        if record.input_tokens:
+            calibration = calibration.add(record.prompt_chars, record.input_tokens)
+    return calibration
+
+
+def _mtime(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def _newer(file: Path, written: int | None) -> bool:
+    """Whether `file` was written after the history (`written`: its mtime; `None`: absent)."""
+    return written is None or (_mtime(file) or 0) > written
+
+
+def _unseen(stored: AskFile, entry: AskHistoryEntry | None) -> list[AskAssessment]:
+    """The answers the calibration has not folded: all of them for a query with no entry,
+    else those asked after the entry's last use."""
+    return [
+        record
+        for record in stored.assessments.values()
+        if entry is None or record.asked_at > entry.last_asked_at
+    ]
+
+
+@overload
+def load_history(cfg: Config) -> AskIndex: ...
+
+
+@overload
+def load_history(cfg: Config, *, skip_unreadable: Literal[True]) -> tuple[AskIndex, list[str]]: ...
+
+
+def load_history(
+    cfg: Config, *, skip_unreadable: bool = False
+) -> AskIndex | tuple[AskIndex, list[str]]:
+    """`asks/index.json`, with what it lost put back from the answer files.
+
+    `finish_ask` writes the history AFTER the pass saved the query's file, so a file NEWER
+    than `index.json` (or any file, when there is no index) holds answers the history never
+    recorded: a crash between the two writes. Only those files are opened — a history in step
+    costs one read and a `stat` per query. From each:
+
+    * a query with no entry gets one rebuilt from its file (`AskHistoryEntry.rebuilt`);
+    * the answers the calibration has not seen are folded in: every answer of a query with no
+      entry, or those asked after its entry's `last_asked_at` (the older ones were folded when
+      they were paid).
+
+    An entry missing from a NEWER index (removed by hand) is rebuilt too, but its answers are
+    not re-counted. A file that cannot be read is refused and named as another query's
+    (`store.load_ask_file`) — unless `skip_unreadable`: the page's read, which leaves that
+    file out and returns `(index, skipped)`, why each file left out could not be read, so one
+    broken file never blanks the tab. An unreadable `index.json` is refused either way.
+    Nothing is written here: the next `finish_ask` saves it, under the lock.
+    """
+    path = cfg.jev_asks_dir / ASK_INDEX
+    index = load_ask_index(path)
+    written = _mtime(path)
+    queries = dict(index.queries)
+    calibration = index.calibration
+    skipped: list[str] = []
+    for file in ask_files(cfg.jev_asks_dir):
+        entry = queries.get(file.stem)
+        newer = _newer(file, written)
+        if entry is not None and not newer:
+            continue
+        try:
+            stored = load_ask_file(file)
+        except JevError as exc:
+            if not skip_unreadable:
+                raise
+            skipped.append(str(exc))
+            continue
+        if newer:
+            calibration = _calibrate(calibration, _unseen(stored, entry))
+        if entry is None:
+            queries[file.stem] = _rebuilt_entry(stored, file.stem)
+    history = AskIndex(queries=queries, calibration=calibration)
+    return (history, skipped) if skip_unreadable else history
+
+
+# --------------------------------------------------------------------------- plan / finish
+
+
+@dataclass(frozen=True)
+class AskPlan:
+    """Everything one use of a query decided before paying: THE shared first half of
+    `jev ask` and of the server's ask job.
+
+    `records` is the query's file in memory — `run.run_ask` updates it in place. `states`
+    holds each candidate's state text AS SENT, for every candidate with evidence: built once
+    and reused for the funnel, the estimate and the results. `history` is the validated
+    index (lost entries rebuilt), which `finish_ask` extends and saves. `similar` names
+    queries already asked that differ only in case, punctuation or spacing.
+    """
+
+    query: AskQuery
+    filters: AskFilters
+    candidates: tuple[Item, ...]
+    dropped: int
+    records: dict[str, AskAssessment]
+    selection: Selection
+    estimate: AskEstimate
+    states: dict[str, str]
+    history: AskIndex
+    similar: tuple[str, ...]
+
+
+def ask_path(cfg: Config, query: AskQuery) -> Path:
+    """`data/jev/asks/<sha>.json` — where one query's answers live."""
+    return cfg.jev_asks_dir / f"{query.sha}.json"
+
+
+def plan_ask(
+    cfg: Config,
+    query: AskQuery,
+    filters: AskFilters,
+    limit: int | None,
+    *,
+    jev: JevPairs | None = None,
+) -> AskPlan:
+    """Load, filter, select and estimate — everything before a confirmation, nothing paid.
+
+    Reads only; safe without the lock (a CLI plans, confirms, then takes the lock and plans
+    AGAIN — `same_selection` — so a prompt never holds the lock). The history is validated
+    here, so a corrupt one refuses before any confirmation. The Jev side of `--topic` and
+    `--only-evaluated` is judged at `[jev].threshold` over CURRENT topics answers; `jev` is
+    loaded when those filters need it and not handed in.
+    """
+    char_limit = cfg.jev_state_char_limit
+    if filters.needs_jev and jev is None:
+        jev = load_jev_pairs(cfg)
+    store = jev.store if jev is not None else load_store(cfg.items_path)
+    candidates, dropped = filter_posts(store, filters, jev=jev, threshold=cfg.jev_threshold)
+    history = load_history(cfg)
+    records = load_asks(ask_path(cfg, query), query)
+    built = {item.id: build_topic_state(item, char_limit) for item in candidates}
+    cut = {item_id: (state[STATE_KEY], chars) for item_id, (state, chars) in built.items()}
+    selection = select_ask_items(
+        candidates,
+        records,
+        query,
+        char_limit=char_limit,
+        limit=limit,
+        state_of=lambda item: cut[item.id],
+    )
+    per_question = question_chars(query.questions)
+    estimate = estimate_ask(
+        [len(cut[item.id][0]) + per_question for item in selection.items],
+        cost_model(history.calibration),
+    )
+    return AskPlan(
+        query=query,
+        filters=filters,
+        candidates=tuple(candidates),
+        dropped=dropped,
+        records=records,
+        selection=selection,
+        estimate=estimate,
+        states={item_id: text for item_id, (text, chars) in cut.items() if chars},
+        history=history,
+        similar=similar_queries(history, query),
+    )
+
+
+def same_selection(before: AskPlan, after: AskPlan) -> bool:
+    """Whether a plan re-made under the lock would pay for exactly the posts confirmed."""
+    return [item.id for item in before.selection.items] == [
+        item.id for item in after.selection.items
+    ]
+
+
+def finish_ask(
+    cfg: Config,
+    plan: AskPlan,
+    outcome: RunOutcome[AskAssessment] | None,
+    *,
+    minimum: float | None = 0.0,
+    now: datetime | None = None,
+) -> AskResults:
+    """The results of this use, and its line in the history. THE CALLER HOLDS THE LOCK.
+
+    `outcome` is `run.run_ask`'s, or `None` when nothing needed asking (every answer cached).
+    The ONE rule for what is recorded: this use goes into the history — and its paid answers
+    into the cost calibration — whenever it can say something true, i.e. unless it was
+    interrupted before banking anything (Ctrl-C or a soft cancel with nothing kept). A pass
+    whose every call failed raises out of `run_ask` and never gets here: it banked nothing.
+    An interrupted pass that banked answers IS recorded, so the history never lags the file.
+    `minimum` is the use's `--min` (0 = none), recorded as `last_min` — the default of the
+    page's free refine, never a cut of what the page ships. `None` (the page's ask, which
+    sends none) keeps the query's last minimum (0 for a new query).
+    """
+    previous = plan.history.queries.get(plan.query.sha)
+    minimum = use_minimum(plan, minimum)
+    results = _rank(plan.candidates, plan.records, plan.query, _state_lookup(plan), minimum)
+    banked = outcome.assessed if outcome is not None else ()
+    if outcome is not None and outcome.interrupted and not banked:
+        return results
+    moment = now or datetime.now(timezone.utc)
+    entry = AskHistoryEntry(
+        query_sha=plan.query.sha,
+        query=plan.query.text,
+        first_asked_at=previous.first_asked_at if previous else moment,
+        last_asked_at=moment,
+        times=(previous.times + 1) if previous else 1,
+        last_evaluated=results.answered,
+        last_results=len(results.ranked),
+        last_min=minimum,
+        last_filters=plan.filters.as_json(),
+    )
+    index = AskIndex(
+        queries={**plan.history.queries, plan.query.sha: entry},
+        calibration=_calibrate(plan.history.calibration, banked),
+    )
+    save_ask_index(index, cfg.jev_asks_dir / ASK_INDEX)
+    return AskResults(ranked=results.ranked, answered=results.answered, recorded=True)
+
+
+def _state_lookup(plan: AskPlan) -> Callable[[Item], str | None]:
+    return lambda item: plan.states.get(item.id)
+
+
+def use_minimum(plan: AskPlan, minimum: float | None) -> float:
+    """The minimum this use of `plan.query` is recorded with: `minimum` when sent, else the
+    query's last one (0 for a new query) — `finish_ask`'s rule, and the default a served ask's
+    live results open at, so the list never re-cuts when the job ends."""
+    if minimum is not None:
+        return minimum
+    previous = plan.history.queries.get(plan.query.sha)
+    return previous.last_min if previous else 0.0
+
+
+def current_answers(plan: AskPlan) -> AskResults:
+    """Every candidate's CURRENT answer as `plan.records` holds it now, ranked, no minimum:
+    `finish_ask`'s results before its cut. Called before the pass, it is what a served ask's
+    live results open with (answers already paid, which the pass will not ask again)."""
+    return _rank(plan.candidates, plan.records, plan.query, _state_lookup(plan), 0.0)

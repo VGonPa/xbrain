@@ -28,6 +28,17 @@ from xbrain.store import _atomic_write
 # first (the source of truth), then derived stores.
 _ARTIFACTS = ("items.json", "state.json", "vocab.yaml", "topics.json")
 
+
+def is_snapshotted(path: Path, data_dir: Path) -> bool:
+    """Whether a snapshot of `data_dir` carries `path` — a store file directly under it.
+
+    The question a reader asks about a file it lists (the Jev page's Configuración tab), put
+    to the one list that answers it: `data/topics.json` is snapshotted, `data/jev/topics.json`
+    is not, and a name alone cannot tell them apart.
+    """
+    return path.resolve().parent == data_dir.resolve() and path.name in _ARTIFACTS
+
+
 _MANIFEST_FILENAME = "snapshot.json"
 _SNAPSHOTS_DIRNAME = "snapshots"
 

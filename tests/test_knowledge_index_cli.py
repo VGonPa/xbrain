@@ -114,6 +114,20 @@ def test_search_without_an_index_names_the_build_command(workspace: Path) -> Non
     assert "Traceback" not in result.stderr
 
 
+def test_an_index_error_prints_exactly_one_error_line(workspace: Path) -> None:
+    """One failure, one `Error:` line — the user-visible half of a wrapper fix.
+
+    `_handle_index_errors` reports the fault and then raises `typer.Exit(code=1)`, and it is
+    stacked UNDER `_handle_cli_errors`. `click.exceptions.Exit` subclasses `RuntimeError`,
+    which the outer wrapper's `_OPERATOR_ERRORS` lists — so that deliberate exit was caught
+    and re-reported as a second, EMPTY `Error: ` line after the real message. The exit code
+    was 1 either way, which is exactly why no existing test saw it.
+    """
+    result = runner.invoke(app, ["search", "retrieval"])
+    assert result.exit_code == 1
+    assert result.stderr.count("Error:") == 1, result.stderr
+
+
 # ---------------------------------------------------------------------------
 # index build / update / status
 # ---------------------------------------------------------------------------

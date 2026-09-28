@@ -1,0 +1,1711 @@
+# tests/test_jev_report.py
+import json
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from xbrain.jev.assess import build_topic_state, questions_digest, topic_contract
+from xbrain.jev.defaults import jev_cost_fragment, tokens_cost_usd
+from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
+from xbrain.jev.questions import STATE_KEY, build_topic_questions
+from xbrain.jev.report import (
+    Band,
+    Pair,
+    band_of,
+    build_report,
+    confidence_bands,
+    compare_item,
+    assessment_cost_usd,
+    current_assessments,
+    history_fragment,
+    pair_key,
+    post_cost_view,
+    post_sets,
+    render_report_markdown,
+    run_history,
+    summarize,
+    write_reports,
+)
+from xbrain.models import Author, Enrichment, Item, Topic
+
+DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
+VOCAB = [
+    Topic(slug="ai-coding", description="Construir software con IA."),
+    Topic(slug="startups", description="Fundar empresas."),
+    Topic(slug="misc", description="Lo demás."),
+]
+FALLBACK = "otro"
+CHAR_LIMIT = 100_000
+#: The price `jev.defaults.INPUT_USD_PER_MTOK` knows. Assessments are built with it by
+#: default so `cost_usd` is a real number; `provider="fake"` is the unpriced counterpart.
+PRICED_PROVIDER = "typesafe"
+
+
+def _cells(row: str) -> list[str]:
+    r"""The cells a markdown renderer sees in one row.
+
+    `\\` is a LITERAL backslash, not an escape, so it is removed BEFORE the split: a bare
+    `(?<!\\)\|` lookbehind reads `\\|` as an escaped pipe, which is exactly the mistake the
+    implementation used to make. An oracle that shares the bug certifies it.
+    """
+    return re.split(r"(?<!\\)\|", re.sub(r"\\\\", "", row))
+
+
+def _rows_under(text: str, heading: str) -> list[str]:
+    """The DATA rows of the table under `heading` — header and separator dropped.
+
+    Binds a row to the section it is printed under. An unanchored `"| 1 | misc |" in text`
+    passes just as happily when two section titles have been swapped.
+    """
+    body = text.split(heading, 1)[1].split("\n## ", 1)[0].splitlines()
+    return [line for line in body if line.startswith("| ") and not line.startswith("| item")]
+
+
+def _headline_line(text: str, prefix: str) -> str:
+    """The single headline line starting with `prefix` — assert on the line, not the file."""
+    return next(line for line in text.splitlines() if line.startswith(prefix))
+
+
+def _item(
+    item_id="1", text="Claude Code hooks", topics=("ai-coding", "misc"), enriched=True
+) -> Item:
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=text,
+        created_at=DT,
+        captured_at=DT,
+        enriched=Enrichment(
+            enriched_at=DT,
+            executor="claude-code",
+            summary="s",
+            primary_topic=topics[0],
+            topics=list(topics),
+        )
+        if enriched
+        else None,
+    )
+
+
+def _cheap_assessment(membership: dict[str, float], choice: str = "a-perfect") -> TopicAssessment:
+    """An assessment with a PLACEHOLDER contract, for tests where currency is not the subject.
+
+    `_assessment` computes the real contract, which costs a question-set hash per call — fine
+    for a handful of fixtures, not for the 2,500 a rounding-order test needs.
+    """
+    return TopicAssessment(
+        item_id="x",
+        provider=PRICED_PROVIDER,
+        model="jev-1.13.0",
+        asked_at=DT,
+        contract="a" * 64,
+        state_chars=3,
+        membership=membership,
+        primary=PrimaryChoice(choice=choice, confidence=0.7, probabilities={choice: 1.0}),
+        input_tokens=0,
+    )
+
+
+def _assessment(
+    item: Item,
+    membership,
+    choice="ai-coding",
+    probabilities=None,
+    tokens=1000,
+    provider=PRICED_PROVIDER,
+) -> TopicAssessment:
+    """A record whose `contract` is the one TODAY'S ask would stamp, so it reads as current.
+
+    The contract is built the way `assess.assess_topics` builds it — the state as sent and
+    the digest of the questions that went with it — rather than being hand-written, so a
+    change to either composition shows up here as a stale fixture rather than as a test
+    that keeps passing over a contract nobody computes any more.
+    """
+    state, state_chars = build_topic_state(item, CHAR_LIMIT)
+    digest = questions_digest(build_topic_questions(VOCAB, FALLBACK))
+    return TopicAssessment(
+        item_id=item.id,
+        provider=provider,
+        model="jev-1.13.0",
+        asked_at=DT,
+        contract=topic_contract(state[STATE_KEY], digest),
+        state_chars=state_chars,
+        membership=membership,
+        primary=PrimaryChoice(
+            choice=choice,
+            confidence=0.7,
+            probabilities=probabilities
+            or {"ai-coding": 0.6, "startups": 0.3, "misc": 0.1, "otro": 0.0},
+        ),
+        input_tokens=tokens,
+    )
+
+
+def test_compare_item_splits_doubtful_missing_and_ranks_the_primary():
+    item = _item()
+    assessment = _assessment(
+        item,
+        {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2},
+        choice="startups",
+        probabilities={"startups": 0.5, "ai-coding": 0.4, "misc": 0.1, "otro": 0.0},
+    )
+    comparison = compare_item(item, assessment, 0.85)
+    assert comparison is not None
+    assert comparison.assigned == ("ai-coding", "misc")
+    assert comparison.doubtful == (Pair("1", "misc", 0.2),)
+    assert comparison.missing == (Pair("1", "startups", 0.9),)
+    assert comparison.jev_assigned == ("ai-coding", "startups")
+    assert comparison.jev_primary == "startups"
+    assert comparison.primary_agrees is False
+    assert comparison.primary_rank == 2  # ai-coding is second in the choice distribution
+
+
+def test_compare_item_reports_no_rank_and_no_agreement_when_enrich_has_no_primary():
+    """An item enrich left without a primary topic has nothing to agree WITH.
+
+    `primary_agrees` must be False and `primary_rank` None. Reporting agreement — or a rank
+    for a topic that does not exist — would let a corpus with no primaries at all show a
+    perfect agreement rate, which is the one number the report is read for.
+    """
+    item = _item()
+    item.enriched = Enrichment(
+        enriched_at=DT,
+        executor="claude-code",
+        summary="s",
+        primary_topic=None,
+        topics=["ai-coding", "misc"],
+    )
+    assessment = _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})
+
+    comparison = compare_item(item, assessment, 0.85)
+
+    assert comparison is not None
+    assert comparison.primary_topic is None
+    assert comparison.primary_rank is None
+    assert comparison.primary_agrees is False
+    assert summarize([(item, assessment)], VOCAB, 0.85)["primary_agree"] == 0
+
+
+def test_compare_item_is_none_without_enrichment():
+    item = _item(enriched=False)
+    assert compare_item(item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1}), 0.85) is None
+
+
+def test_current_assessments_drops_stale_ones():
+    item = _item()
+    fresh = _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1})
+    stale = fresh.model_copy(update={"contract": "f" * 64})
+    kw = {"fallback": FALLBACK, "char_limit": CHAR_LIMIT}
+    assert current_assessments([item], {"1": fresh}, VOCAB, **kw) == [(item, fresh)]
+    assert current_assessments([item], {"1": stale}, VOCAB, **kw) == []
+
+
+def test_summarize_counts_pairs_topics_primary_and_cost():
+    a = _item("1")
+    b = _item("2", text="Seed round", topics=("startups",))
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}, choice="ai-coding")),
+        (
+            b,
+            _assessment(
+                b,
+                {"ai-coding": 0.1, "startups": 0.99, "misc": 0.05},
+                choice="otro",
+                probabilities={"otro": 0.6, "startups": 0.4, "ai-coding": 0.0, "misc": 0.0},
+                tokens=500,
+            ),
+        ),
+    ]
+    summary = summarize(pairs, VOCAB, 0.85)
+    assert summary["items_assessed"] == 2 and summary["items_compared"] == 2
+    assert summary["assigned_pairs"] == 3 and summary["assigned_backed"] == 2
+    assert summary["enrich_backed_pct"] == 66.7
+    assert summary["jev_pairs"] == 3 and summary["jev_backed"] == 2
+    assert summary["jev_backed_pct"] == 66.7
+    assert summary["doubtful_pairs"] == 1 and summary["missing_pairs"] == 1
+    assert summary["primary_agree"] == 1 and summary["primary_agree_pct"] == 50.0
+    assert summary["primary_fallback"] == 1
+    # The three disagreement kinds, counted in POSTS: "1" has an enrich-only topic (misc)
+    # and a Jev-only one (startups); "2" has Jev choosing the fallback as its primary.
+    assert summary["posts_enrich_only"] == 1
+    assert summary["posts_jev_only"] == 1
+    assert summary["posts_primary_differs"] == 1
+    assert summary["posts_with_disagreement"] == 2
+    assert summary["input_tokens"] == 1500 and summary["cost_usd"] == 0.0001
+    assert summary["models"] == {"jev-1.13.0": 2}
+    by_slug = {row["slug"]: row for row in summary["per_topic"]}
+    # `doubtful` and `unjudged` ride WITH the row, not only in the corpus total: they are
+    # already counted by `_slug_counts`, the dashboard's chart-01 tooltip displays them per
+    # topic, and a number displayed per topic that only exists as a corpus sum is a number
+    # nothing can check. `assigned = backed + doubtful + unjudged`, row by row.
+    assert by_slug["misc"] == {
+        "slug": "misc",
+        "assigned": 1,
+        "backed": 0,
+        "doubtful": 1,
+        "unjudged": 0,
+        "backed_pct": 0.0,
+        "missing": 0,
+        "disagreeing": 1,
+        "enrich_primary": 0,
+        "jev_primary": 0,
+        "primary_both": 0,
+    }
+    assert by_slug["startups"] == {
+        "slug": "startups",
+        "assigned": 1,
+        "backed": 1,
+        "doubtful": 0,
+        "unjudged": 0,
+        "backed_pct": 100.0,
+        "missing": 1,
+        "disagreeing": 1,
+        "enrich_primary": 1,
+        "jev_primary": 0,
+        "primary_both": 0,
+    }
+    assert [row["slug"] for row in summary["per_topic"]] == ["misc", "ai-coding", "startups"]
+
+
+def test_the_disagreement_kinds_are_counted_apart():
+    """Each kind on its own post, so a count that read another kind's property shows up:
+    "1" only has an enrich-only topic, "2" only a Jev-only one, "3" only a primary Jev does
+    not share, "4" agrees on everything."""
+    only_enrich = _item("1", topics=("ai-coding", "misc"))
+    only_jev = _item("2", topics=("ai-coding",))
+    only_primary = _item("3", topics=("ai-coding",))
+    agrees = _item("4", topics=("ai-coding",))
+    low = {"startups": 0.1, "misc": 0.1}
+    pairs = [
+        (only_enrich, _assessment(only_enrich, {"ai-coding": 0.9, **low})),
+        (only_jev, _assessment(only_jev, {"ai-coding": 0.9, "startups": 0.9, "misc": 0.1})),
+        (only_primary, _assessment(only_primary, {"ai-coding": 0.9, **low}, choice="startups")),
+        (agrees, _assessment(agrees, {"ai-coding": 0.9, **low})),
+    ]
+
+    summary = summarize(pairs, VOCAB, 0.85)
+
+    assert summary["posts_enrich_only"] == 1
+    assert summary["posts_jev_only"] == 1
+    assert summary["posts_primary_differs"] == 1
+    assert summary["posts_with_disagreement"] == 3
+
+
+def test_the_summary_counts_the_posts_with_no_current_answer():
+    """`items_unassessed` = posts never asked + posts whose answer is stale: what `jev
+    topics` would ask next. The caller that loaded the corpus hands it in; 0 by default."""
+    item = _item("1")
+    pairs = [(item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}))]
+
+    assert summarize(pairs, VOCAB, 0.85)["items_unassessed"] == 0
+    assert summarize(pairs, VOCAB, 0.85, stale=2, unassessed=5)["items_unassessed"] == 5
+
+
+def _confusion_corpus():
+    """Five posts covering every shape of a topic disagreement:
+    "1" enrich misc (doubtful) → Jev startups (missing): one pair both sides named;
+    "2" enrich misc+ai-coding both doubtful, Jev startups: two pairs;
+    "3" enrich ai-coding doubtful, Jev adds nothing: enrich's topic with nothing instead;
+    "4" nothing doubtful, Jev adds startups: Jev's topic with nothing it replaced;
+    "5" agrees on everything, primary included: in no pair at all."""
+    one = _item("1", topics=("misc",))
+    two = _item("2", topics=("misc", "ai-coding"))
+    three = _item("3", topics=("ai-coding",))
+    four = _item("4", topics=("ai-coding",))
+    five = _item("5", topics=("ai-coding",))
+    return [
+        (
+            one,
+            _assessment(one, {"misc": 0.1, "startups": 0.9, "ai-coding": 0.1}, choice="startups"),
+        ),
+        (
+            two,
+            _assessment(two, {"misc": 0.1, "startups": 0.9, "ai-coding": 0.2}, choice="startups"),
+        ),
+        (
+            three,
+            _assessment(three, {"misc": 0.1, "startups": 0.1, "ai-coding": 0.2}, choice="otro"),
+        ),
+        (four, _assessment(four, {"misc": 0.1, "startups": 0.9, "ai-coding": 0.9})),
+        (five, _assessment(five, {"misc": 0.1, "startups": 0.1, "ai-coding": 0.9})),
+    ]
+
+
+def test_per_topic_counts_how_often_each_side_picks_it_as_primary():
+    """Enrich's primary and Jev's Choice, counted per topic over the compared posts."""
+    by_slug = {row["slug"]: row for row in summarize(_confusion_corpus(), VOCAB, 0.85)["per_topic"]}
+
+    assert (by_slug["misc"]["enrich_primary"], by_slug["misc"]["jev_primary"]) == (2, 0)
+    assert (by_slug["startups"]["enrich_primary"], by_slug["startups"]["jev_primary"]) == (0, 2)
+    assert (by_slug["ai-coding"]["enrich_primary"], by_slug["ai-coding"]["jev_primary"]) == (3, 2)
+
+
+def test_topic_confusion_pairs_what_enrich_put_with_what_jev_put_instead():
+    """On each post, every topic only enrich has × every topic only Jev has — `None` on the
+    side that put nothing instead — counted in posts, most frequent first. COUNTS ONLY: the
+    posts behind them are `post_sets`, which the page ships and the JSON report does not."""
+    confusion = summarize(_confusion_corpus(), VOCAB, 0.85)["topic_confusion"]
+
+    assert confusion == [
+        {"enrich": "misc", "jev": "startups", "posts": 2},
+        {"enrich": None, "jev": "startups", "posts": 1},
+        {"enrich": "ai-coding", "jev": None, "posts": 1},
+        {"enrich": "ai-coding", "jev": "startups", "posts": 1},
+    ]
+
+
+def test_primary_confusion_pairs_enrichs_primary_with_jevs_choice_where_they_differ():
+    """`None` is a post enrich left without a primary; Jev's fallback is named as it answered.
+    An agreeing post ("5", and "4" before its primary is removed) is in no row."""
+    pairs = _confusion_corpus()
+    assert all(
+        row["enrich"] != row["jev"] for row in summarize(pairs, VOCAB, 0.85)["primary_confusion"]
+    )
+    four = pairs[3][0]
+    four.enriched.primary_topic = None
+
+    summary = summarize(pairs, VOCAB, 0.85)
+
+    assert summary["primary_confusion"] == [
+        {"enrich": "misc", "jev": "startups", "posts": 2},
+        {"enrich": None, "jev": "ai-coding", "posts": 1},
+        {"enrich": "ai-coding", "jev": "otro", "posts": 1},
+    ]
+    assert (
+        sum(row["posts"] for row in summary["primary_confusion"])
+        == summary["posts_primary_differs"]
+    )
+
+
+def test_post_sets_hold_the_posts_behind_every_confusion_row():
+    """One index, keyed `enrich~jev` with `-` for nothing: the posts each summary row counts."""
+    summary, comparisons = build_report(_confusion_corpus(), VOCAB, 0.85)
+
+    sets = post_sets(comparisons)
+
+    assert {kind: sets[kind] for kind in ("cx", "px")} == {
+        "cx": {
+            "misc~startups": ["1", "2"],
+            "-~startups": ["4"],
+            "ai-coding~-": ["3"],
+            "ai-coding~startups": ["2"],
+        },
+        "px": {"misc~startups": ["1", "2"], "ai-coding~otro": ["3"]},
+    }
+    for kind, rows in (("cx", summary["topic_confusion"]), ("px", summary["primary_confusion"])):
+        assert {pair_key(r["enrich"], r["jev"]): r["posts"] for r in rows} == {
+            key: len(ids) for key, ids in sets[kind].items()
+        }
+
+
+def _band_corpus():
+    """Every confidence band non-empty, each with its own (pairs, posts), and every edge hit
+    exactly once. Threshold 0.85; enrich's primary is its first topic.
+
+    "1" misc 0.0 + ai-coding 0.1999 doubtful → e-lo ×2 (one post, two pairs)
+    "2" misc 0.1 doubtful → e-lo; startups 0.95 EXACTLY → j-hi; Jev primary startups
+    "3" ai-coding 0.2 EXACTLY → e-mid; startups 0.85 = the threshold → j-near, not doubtful
+    "4" misc 0.5 EXACTLY + startups 0.8499 → e-near ×2; ai-coding 0.9 → j-near
+    "5" startups 0.7 → e-near; ai-coding 1.0 → j-hi (the top edge is inside); misc 0.9 → j-near
+    "7" agrees on everything
+    "8" misc 0.6 → e-near
+    "9" startups 0.99 → j-hi; misc 0.9 → j-near
+    e-lo 3/2 · e-mid 1/1 · e-near 4/3 · j-near 4/4 · j-hi 3/3 (pairs/posts)."""
+    specs = [
+        ("1", ("misc", "ai-coding"), {"misc": 0.0, "ai-coding": 0.1999, "startups": 0.1}, "misc"),
+        ("2", ("misc",), {"misc": 0.1, "startups": 0.95, "ai-coding": 0.3}, "startups"),
+        ("3", ("ai-coding",), {"ai-coding": 0.2, "startups": 0.85, "misc": 0.5}, "ai-coding"),
+        (
+            "4",
+            ("misc", "startups"),
+            {"misc": 0.5, "startups": 0.8499, "ai-coding": 0.9},
+            "ai-coding",
+        ),
+        ("5", ("startups",), {"startups": 0.7, "ai-coding": 1.0, "misc": 0.9}, "otro"),
+        ("7", ("ai-coding",), {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, "ai-coding"),
+        ("8", ("misc",), {"misc": 0.6, "ai-coding": 0.1, "startups": 0.1}, "misc"),
+        ("9", ("ai-coding",), {"ai-coding": 0.9, "startups": 0.99, "misc": 0.9}, "ai-coding"),
+    ]
+    pairs = []
+    for item_id, topics, membership, choice in specs:
+        item = _item(item_id, topics=topics)
+        pairs.append((item, _assessment(item, membership, choice=choice)))
+    return pairs
+
+
+def test_the_band_edges_are_defined_once_and_each_band_names_the_total_it_splits():
+    """Below the threshold: < 0.2, 0.2–0.5, 0.5–threshold; at or above it: threshold–0.95 and
+    ≥ 0.95 (the top band keeps 1.0). Each band names the summary total its pairs add up to."""
+    assert confidence_bands(0.85) == (
+        Band("enrich_only", "e-lo", "Jev lo descarta claramente", 0.0, 0.2, "doubtful_pairs"),
+        Band("enrich_only", "e-mid", "Jev lo ve poco probable", 0.2, 0.5, "doubtful_pairs"),
+        Band(
+            "enrich_only", "e-near", "Jev duda: entre 0,5 y el umbral", 0.5, 0.85, "doubtful_pairs"
+        ),
+        Band(
+            "jev_only",
+            "j-near",
+            "Jev lo ve por encima del umbral, sin mucho margen",
+            0.85,
+            0.95,
+            "missing_pairs",
+        ),
+        Band("jev_only", "j-hi", "Jev lo ve claramente", 0.95, 1.0, "missing_pairs", top=True),
+    )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected"),
+    [
+        (0.0, [("j-near", 0.0, 0.95, False), ("j-hi", 0.95, 1.0, True)]),
+        (0.2, [("e-lo", 0.0, 0.2, False), ("j-near", 0.2, 0.95, False), ("j-hi", 0.95, 1.0, True)]),
+        (
+            0.5,
+            [
+                ("e-lo", 0.0, 0.2, False),
+                ("e-mid", 0.2, 0.5, False),
+                ("j-near", 0.5, 0.95, False),
+                ("j-hi", 0.95, 1.0, True),
+            ],
+        ),
+        (
+            0.95,
+            [
+                ("e-lo", 0.0, 0.2, False),
+                ("e-mid", 0.2, 0.5, False),
+                ("e-near", 0.5, 0.95, False),
+                ("j-hi", 0.95, 1.0, True),
+            ],
+        ),
+        (
+            1.0,
+            [
+                ("e-lo", 0.0, 0.2, False),
+                ("e-mid", 0.2, 0.5, False),
+                ("e-near", 0.5, 1.0, False),
+                ("j-hi", 1.0, 1.0, True),
+            ],
+        ),
+        (
+            0.4,
+            [
+                ("e-lo", 0.0, 0.2, False),
+                ("e-mid", 0.2, 0.4, False),
+                ("j-near", 0.4, 0.95, False),
+                ("j-hi", 0.95, 1.0, True),
+            ],
+        ),
+    ],
+)
+def test_the_threshold_cuts_the_bands_and_leaves_no_zero_width_one(threshold, expected):
+    """A band the threshold leaves no room for is dropped; only the Jev side's top band may be
+    a single point (1.0 at a threshold of 1.0), and only it is `top`. An enrich-side band ending
+    at a threshold of 1.0 still EXCLUDES 1.0 — that probability is not a doubt."""
+    bands = confidence_bands(threshold)
+
+    assert [(b.key, b.lo, b.hi, b.top) for b in bands] == expected
+    assert all(b.lo < b.hi or b.top for b in bands)
+    assert all(not b.top for b in bands if b.kind == "enrich_only")
+
+
+@pytest.mark.parametrize(
+    ("noul", "kind", "key"),
+    [
+        (0.0, "enrich_only", "e-lo"),
+        (0.1999, "enrich_only", "e-lo"),
+        (0.2, "enrich_only", "e-mid"),
+        (0.4999, "enrich_only", "e-mid"),
+        (0.5, "enrich_only", "e-near"),
+        (0.8499, "enrich_only", "e-near"),
+        (0.85, "jev_only", "j-near"),
+        (0.9499, "jev_only", "j-near"),
+        (0.95, "jev_only", "j-hi"),
+        (1.0, "jev_only", "j-hi"),
+    ],
+)
+def test_each_edge_belongs_to_the_band_above_it(noul, kind, key):
+    assert band_of(noul, kind, confidence_bands(0.85)).key == key
+
+
+def test_a_probability_no_band_holds_is_refused_not_dropped():
+    with pytest.raises(ValueError, match="in no enrich_only band"):
+        band_of(0.9, "enrich_only", confidence_bands(0.85))
+
+
+def test_the_summary_counts_each_band_in_pairs_and_posts_and_the_index_names_the_posts():
+    summary, comparisons = build_report(_band_corpus(), VOCAB, 0.85)
+
+    rows = {row["key"]: row for row in summary["confidence_bands"]}
+    assert {key: (row["pairs"], row["posts"]) for key, row in rows.items()} == {
+        "e-lo": (3, 2),
+        "e-mid": (1, 1),
+        "e-near": (4, 3),
+        "j-near": (4, 4),
+        "j-hi": (3, 3),
+    }
+    assert rows["j-hi"] == {
+        "kind": "jev_only",
+        "key": "j-hi",
+        "label": "Jev lo ve claramente",
+        "lo": 0.95,
+        "hi": 1.0,
+        "total": "missing_pairs",
+        "top": True,
+        "pairs": 3,
+        "posts": 3,
+    }
+    assert post_sets(comparisons)["bands"] == {
+        "e-lo": ["1", "2"],
+        "e-mid": ["3"],
+        "e-near": ["4", "5", "8"],
+        "j-near": ["3", "4", "5", "9"],
+        "j-hi": ["2", "5", "9"],
+    }
+
+
+def test_the_bands_partition_both_directions_of_disagreement():
+    """Every doubtful pair is in exactly one enrich-side band, every missing pair in one
+    Jev-side band — recounted from the comparisons, not from the band rows."""
+    summary, comparisons = build_report(_band_corpus(), VOCAB, 0.85)
+
+    for kind, total in (("enrich_only", "doubtful_pairs"), ("jev_only", "missing_pairs")):
+        rows = [row for row in summary["confidence_bands"] if row["kind"] == kind]
+        assert {row["total"] for row in rows} == {total}, kind
+        assert sum(row["pairs"] for row in rows) == summary[total] > 0, kind
+    doubtful_posts = {c.item_id for c in comparisons if c.doubtful}
+    band_posts = post_sets(comparisons)["bands"]
+    assert set().union(*(band_posts[k] for k in ("e-lo", "e-mid", "e-near"))) == doubtful_posts
+
+
+def test_each_comparison_carries_its_threshold_and_the_index_refuses_two():
+    """The bands need the threshold the comparisons were made at, and read it OFF them: no
+    second call site is handed a threshold that could disagree with the comparisons'."""
+    pairs = _band_corpus()
+    low = compare_item(*pairs[0], 0.5)
+    high = compare_item(*pairs[1], 0.85)
+
+    assert (low.threshold, high.threshold) == (0.5, 0.85)
+    with pytest.raises(ValueError, match="one threshold"):
+        post_sets([low, high])
+    assert post_sets([])["bands"] == {}
+
+
+def test_the_json_record_does_not_repeat_the_threshold_per_item(tmp_path):
+    pairs = _band_corpus()
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    json_path, _md = write_reports(summary, comparisons, {i.id: i for i, _ in pairs}, tmp_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["summary"]["threshold"] == 0.85
+    assert all("threshold" not in record for record in payload["items"])
+
+
+def test_the_markdown_report_prints_the_bands():
+    pairs = _band_corpus()
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {i.id: i for i, _ in pairs})
+
+    header, *rows = _rows_under(text, "## Qué seguro estaba Jev en los desacuerdos")
+    assert header.startswith("| desacuerdo | tramo | probabilidad |")
+    assert [[cell.strip() for cell in _cells(row)[1:-1]] for row in rows] == [
+        ["enrich asigna y Jev no", "Jev lo descarta claramente", "< 0.200", "3", "2"],
+        ["enrich asigna y Jev no", "Jev lo ve poco probable", "0.200 – 0.500", "1", "1"],
+        ["enrich asigna y Jev no", "Jev duda: entre 0,5 y el umbral", "0.500 – 0.850", "4", "3"],
+        [
+            "Jev añadiría",
+            "Jev lo ve por encima del umbral, sin mucho margen",
+            "0.850 – 0.950",
+            "4",
+            "4",
+        ],
+        ["Jev añadiría", "Jev lo ve claramente", "≥ 0.950", "3", "3"],
+    ]
+
+
+def test_a_retired_primary_spelled_like_the_fallback_is_not_an_agreement():
+    """enrich's primary is a slug that has left the vocabulary and happens to be spelled like
+    the fallback; Jev answers the fallback. Same string, different facts: never asked about vs
+    "none of these". It is unjudged, not agreement, and sits in no diagonal."""
+    item = _item("1", topics=("otro",))
+    pairs = [
+        (item, _assessment(item, {"ai-coding": 0.1, "startups": 0.1, "misc": 0.1}, choice="otro"))
+    ]
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    assert comparisons[0].primary_agrees is False and comparisons[0].primary_differs
+    assert summary["primary_agree"] == 0 and summary["primary_unjudged"] == 1
+    assert post_sets(comparisons)["pd"] == {}
+    assert summary["primary_confusion"] == [{"enrich": "otro", "jev": "otro", "posts": 1}]
+
+
+def test_each_topic_counts_the_posts_where_both_sides_pick_it_as_primary():
+    """The diagonal of the primary cross, per topic, and the posts behind it (`pd`): with the
+    off-diagonal rows it accounts for every post each side picked the topic on."""
+    summary, comparisons = build_report(_band_corpus(), VOCAB, 0.85)
+    rows = {row["slug"]: row for row in summary["per_topic"]}
+
+    assert {slug: row["primary_both"] for slug, row in rows.items()} == {
+        "ai-coding": 3,
+        "startups": 0,
+        "misc": 2,
+    }
+    assert post_sets(comparisons)["pd"] == {"ai-coding": ["3", "7", "9"], "misc": ["1", "8"]}
+    assert sum(row["primary_both"] for row in rows.values()) == summary["primary_agree"]
+    for slug, row in rows.items():
+        away = sum(r["posts"] for r in summary["primary_confusion"] if r["enrich"] == slug)
+        assert row["primary_both"] == row["enrich_primary"] - away, slug
+
+
+def test_the_fallback_row_of_the_primary_cross_counts_every_fallback_pick():
+    """Jev's «otro» posts, by the primary enrich had: the rows add up to `primary_fallback`."""
+    summary, _ = build_report(_band_corpus(), VOCAB, 0.85)
+
+    rows = [r for r in summary["primary_confusion"] if r["jev"] == FALLBACK]
+    assert rows == [{"enrich": "startups", "jev": "otro", "posts": 1}]
+    assert sum(r["posts"] for r in rows) == summary["primary_fallback"]
+
+
+def test_the_json_report_carries_the_counts_and_not_the_post_lists(tmp_path):
+    """The post lists grow with every evaluated post; the report file keeps the counts."""
+    pairs = _confusion_corpus()
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    json_path, _md = write_reports(summary, comparisons, {i.id: i for i, _ in pairs}, tmp_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "post_sets" not in payload and "post_sets" not in payload["summary"]
+    # The bands ride as counts; their posts, like the pairs', stay in the page's index.
+    assert all("ids" not in row for row in payload["summary"]["confidence_bands"])
+    assert all(
+        set(row) == {"enrich", "jev", "posts"} for row in payload["summary"]["topic_confusion"]
+    )
+
+
+def test_the_primary_counts_account_for_every_compared_post():
+    """Every compared post has exactly one Jev primary: a vocabulary topic or the fallback."""
+    summary = summarize(_confusion_corpus(), VOCAB, 0.85)
+
+    jev_total = sum(row["jev_primary"] for row in summary["per_topic"])
+    assert jev_total + summary["primary_fallback"] == summary["items_compared"]
+
+
+def test_a_topics_primary_counts_differ_only_by_its_primary_confusion():
+    """Per topic: the posts where both sides pick it are `enrich_primary` minus the rows where
+    enrich picked it and Jev did not — and equally `jev_primary` minus the reverse rows."""
+    summary = summarize(_confusion_corpus(), VOCAB, 0.85)
+    rows = summary["primary_confusion"]
+
+    for row in summary["per_topic"]:
+        slug = row["slug"]
+        enrich_away = sum(r["posts"] for r in rows if r["enrich"] == slug)
+        jev_away = sum(r["posts"] for r in rows if r["jev"] == slug)
+        assert row["enrich_primary"] - enrich_away == row["jev_primary"] - jev_away, slug
+
+
+def test_a_topics_disagreeing_posts_are_its_doubtful_plus_its_missing_ones():
+    """The topic navigator's "discrepancias": posts where enrich puts the topic and Jev does
+    not back it, plus posts where Jev backs it and enrich did not put it. One post cannot be
+    both for the same topic, so the sum counts POSTS."""
+    a, b, c = _item("1", topics=("ai-coding",)), _item("2", topics=("ai-coding",)), _item("3")
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.2, "startups": 0.9, "misc": 0.1})),
+        (b, _assessment(b, {"ai-coding": 0.3, "startups": 0.1, "misc": 0.1})),
+        (c, _assessment(c, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.9})),
+    ]
+
+    by_slug = {row["slug"]: row for row in summarize(pairs, VOCAB, 0.85)["per_topic"]}
+
+    assert (by_slug["ai-coding"]["doubtful"], by_slug["ai-coding"]["missing"]) == (2, 0)
+    assert by_slug["ai-coding"]["disagreeing"] == 2
+    assert by_slug["startups"]["disagreeing"] == by_slug["startups"]["missing"] == 1
+    assert by_slug["misc"]["disagreeing"] == 0
+
+
+def test_summarize_prices_each_record_by_its_own_provider_and_names_the_unpriced_one():
+    """An unpriced judge contributes 0.0 to the bill, and the summary says WHICH zero it is.
+
+    `INPUT_USD_PER_MTOK` prices `typesafe` and nothing else, so a panel that mixes judges
+    must not borrow one vendor's rate for another's records — an invented rate reads as a
+    bill. A bare `0.0` cannot say "nobody prices this judge", which is why the provider is
+    NAMED, exactly as `cli._jev_cost_line` names it for a run.
+    """
+    a = _item("1")
+    b = _item("2", text="Seed round", topics=("startups",))
+    million = 1_000_000
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}, tokens=million)),
+        (
+            b,
+            _assessment(
+                b, {"ai-coding": 0.1, "startups": 0.9, "misc": 0.1}, provider="fake", tokens=million
+            ),
+        ),
+    ]
+    summary = summarize(pairs, VOCAB, 0.85)
+    # Two million tokens counted, only the typesafe million billable: 1 Mtok × 0.042 $/Mtok.
+    # A literal, not the code's own formula — and one that separates the two mutations this
+    # test exists for: flat-rating both records gives 0.084, pricing neither gives 0.0.
+    assert summary["input_tokens"] == 2 * million
+    assert summary["cost_usd"] == 0.042
+    assert summary["providers"] == {PRICED_PROVIDER: 1, "fake": 1}
+    assert summary["unpriced_providers"] == ["fake"]
+    # Both judges answered with the same model name, so `models` counts two.
+    assert summary["models"] == {"jev-1.13.0": 2}
+
+
+def test_summarize_counts_records_that_reported_no_token_usage_separately():
+    """`input_tokens=None` is a documented provider behaviour; folding it into 0 would
+    report a run that WAS paid for as free. The count is what makes the total read as
+    "at least this much"."""
+    item = _item()
+    pairs = [
+        (item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, tokens=None))
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+    assert summary["input_tokens"] == 0
+    assert summary["input_tokens_unknown"] == 1
+    assert summary["cost_usd"] == 0.0
+    # And the marker reaches the reader: `Coste: 0 tokens de entrada` on its own describes
+    # a run that was paid for as free.
+    assert "(+1 sin recuento)" in render_report_markdown(summary, comparisons, {"1": item})
+
+
+def test_summarize_does_not_count_a_topic_jev_was_never_asked_about_as_backed():
+    """An assigned topic that has left the vocabulary is UNJUDGED, never "backed".
+
+    `enrich` validates topics against the vocabulary AT WRITE TIME, so an item enriched
+    under an older `vocab.yaml` can carry a slug today's questions no longer ask about.
+    Such a pair is in neither `membership` nor `doubtful`, so counting `backed` as
+    `assigned - doubtful` would silently report Jev as endorsing an assignment Jev was
+    never shown. The three buckets PARTITION `assigned_pairs`.
+    """
+    item = _item(topics=("ai-coding", "retired-topic"))
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
+    summary = summarize(pairs, VOCAB, 0.85)
+    assert summary["assigned_pairs"] == 2
+    assert summary["assigned_backed"] == 1
+    assert summary["doubtful_pairs"] == 0
+    assert summary["assigned_unjudged"] == 1
+    assert (
+        summary["assigned_backed"] + summary["doubtful_pairs"] + summary["assigned_unjudged"]
+        == summary["assigned_pairs"]
+    )
+    assert summary["enrich_backed_pct"] == 50.0
+
+
+def test_markdown_and_files(tmp_path: Path):
+    item = _item()
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))]
+    summary = summarize(pairs, VOCAB, 0.85)
+    comparisons = [c for i, a in pairs if (c := compare_item(i, a, 0.85))]
+    text = render_report_markdown(summary, comparisons, {"1": item})
+    assert text.startswith("# Jev · topics")
+    # On the line they belong to, not anywhere in the document.
+    assert (
+        _headline_line(text, "Umbral ")
+        == "Umbral 0.850 · modelo: jev-1.13.0 (1) · proveedor: typesafe (1)"
+    )
+    assert "| 1 | misc | 0.200 |" in text  # doubtful row
+    assert "| 1 | startups | 0.900 |" in text  # missing row
+    json_path, md_path = write_reports(summary, comparisons, {"1": item}, tmp_path / "jev")
+    assert json_path.name == "topics-report.json" and md_path.name == "topics-report.md"
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["summary"]["doubtful_pairs"] == 1
+    assert payload["items"][0]["doubtful"] == [{"slug": "misc", "noul": 0.2}]
+
+
+def test_markdown_names_the_unpriced_provider_rather_than_printing_a_bare_zero():
+    item = _item()
+    pairs = [
+        (item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, provider="fake"))
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+    text = render_report_markdown(summary, comparisons, {"1": item})
+    assert "proveedor sin tarifa: fake" in text
+
+
+def test_a_boundary_noul_reads_like_the_page_and_not_like_its_own_contradiction():
+    """`0.8496` under a heading that means "below 0.850" must not render as `0.85`.
+
+    ONE side-car, two artifacts, and this was the one place they printed different numbers
+    for the same value: `jev.html` renders every noul compared against the umbral at three
+    decimals — it was changed to, because two decimals made 331 rows on the real corpus
+    contradict their own heading — while `topics-report.md` still rendered two. A pair at
+    0.8496 is doubtful, and under `## Dudosas` it printed `0.85` beside a headline reading
+    `Umbral 0.85`: a row that reads as a bug in the tool.
+
+    The umbral is formatted the same way for the same reason — a reader compares the column
+    with the headline, and a like-for-like comparison needs both at one precision.
+    """
+    item = _item()
+    # `choice="startups"` against enrich's `ai-coding` primary, so the real-disagreement
+    # section has a row and its `conf.` column can be pinned in the same assertion.
+    pairs = [
+        (
+            item,
+            _assessment(item, {"ai-coding": 0.8496, "startups": 0.9, "misc": 0.2}, "startups"),
+        )
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    assert "| 1 | ai-coding | 0.850 |" in text, text
+    assert _headline_line(text, "Umbral ").startswith("Umbral 0.850 ·")
+    # The confidence column is deliberately NOT moved: it is never compared against the
+    # umbral, and the page prints it at two decimals too.
+    assert "| 1 | ai-coding | startups | 0.70 |" in text, text
+
+
+# ------------------------------------------------------------------- markdown rendering
+
+
+def test_markdown_escapes_a_pipe_in_the_post_text_instead_of_splitting_the_row():
+    """A post containing `|` must not grow extra cells in the table it lands in.
+
+    This corpus is AI/dev posts from X, where shell pipelines (`cat x | grep y`) and `A | B`
+    phrasing are ordinary, so an unescaped pipe is not a corner case — it is a ragged row in
+    the one file a person actually reads.
+    """
+    item = _item(text="cost | benefit | ratio")
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))]
+    summary = summarize(pairs, VOCAB, 0.85)
+    comparisons = [c for i, a in pairs if (c := compare_item(i, a, 0.85))]
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    row = next(line for line in text.splitlines() if line.startswith("| 1 | misc |"))
+    assert "cost \\| benefit \\| ratio" in row
+    # `| item | topic | noul | texto |` is four cells between five unescaped pipes, so a split
+    # on them yields six fields: the four cells plus the empty ones outside the leading and
+    # trailing bars. Splitting on UNESCAPED pipes is what a markdown renderer does, so it is
+    # what the count must use.
+    assert len(_cells(row)) == 6
+
+
+def test_summarize_reports_cost_as_a_float_even_when_nothing_was_priced():
+    """`sum()` over an empty run returns `int 0`, and `round(0, 4)` keeps it an int.
+
+    The dashboard consumes this key; a type that changes with the contents of the side-car
+    is drift, and `~0 $` instead of `~0.0 $` is the same drift reaching the reader.
+    """
+    summary = summarize([], VOCAB, 0.85)
+    assert summary["cost_usd"] == 0.0
+    assert isinstance(summary["cost_usd"], float)
+    assert "~0.0000 $" in render_report_markdown(summary, [], {})
+
+
+def test_per_topic_puts_never_assigned_topics_after_the_ones_with_a_real_backing_rate():
+    """ "Peor primero" means worst BACKING first, and a topic nobody assigned has no backing
+    rate to be worst at.
+
+    `_pct` returns 0.0 for a zero whole, so a 30-topic vocabulary with a long tail of unused
+    topics would bury the answer this table exists to give under rows about nothing.
+    """
+    item = _item(topics=("ai-coding",))
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
+
+    rows = summarize(pairs, VOCAB, 0.85)["per_topic"]
+
+    assert [row["slug"] for row in rows] == ["ai-coding", "misc", "startups"]
+    assert rows[0]["assigned"] == 1 and rows[0]["backed_pct"] == 100.0
+    assert all(row["assigned"] == 0 for row in rows[1:])
+
+
+def test_summarize_counts_a_primary_jev_was_never_asked_about_separately():
+    """A primary that left the vocabulary is "Jev was never asked", not "Jev disagrees".
+
+    The membership side already gives that fact its own bucket (`assigned_unjudged`);
+    counting the same fact as a primary disagreement is the asymmetry that bucket exists to
+    remove. The denominator still counts the item — exactly as `assigned_pairs` still counts
+    an unjudged pair — so the bucket makes the reason visible without hiding the item.
+    """
+    item = _item(topics=("retired-topic", "ai-coding"))
+    assessment = _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})
+
+    comparison = compare_item(item, assessment, 0.85)
+    summary = summarize([(item, assessment)], VOCAB, 0.85)
+
+    assert comparison is not None
+    assert comparison.primary_topic == "retired-topic"
+    assert comparison.primary_unjudged is True
+    assert summary["primary_unjudged"] == 1
+    assert summary["primary_agree"] == 0
+    assert summary["primary_agree_pct"] == 0.0
+    # An in-vocabulary primary is NOT unjudged, whether or not Jev agreed with it.
+    agreed = _item(topics=("ai-coding", "misc"))
+    other = _assessment(agreed, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})
+    assert summarize([(agreed, other)], VOCAB, 0.85)["primary_unjudged"] == 0
+
+
+def test_build_report_returns_the_comparisons_the_summary_was_computed_from():
+    """One comparison pass, not two.
+
+    The CLI needs both halves; re-running `compare_item` for the second is twice the work on
+    a ~3,000-item corpus and a second call site that has to be handed the same threshold.
+    """
+    a = _item("1")
+    b = _item("2", text="Seed round", topics=("startups",), enriched=False)
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2})),
+        (b, _assessment(b, {"ai-coding": 0.1, "startups": 0.99, "misc": 0.05})),
+    ]
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85, now=now)
+
+    assert summary == summarize(pairs, VOCAB, 0.85, now=now)
+    # `b` has no enrichment, so it is assessed but not comparable — the list is the FILTERED
+    # one the summary counted, not one comparison per pair.
+    assert summary["items_assessed"] == 2 and summary["items_compared"] == 1
+    assert comparisons == [compare_item(a, pairs[0][1], 0.85)]
+
+
+def test_summarize_stamps_when_it_ran_and_the_markdown_reads_that_stamp():
+    """The JSON carries the stamp too, and the markdown reads it instead of the clock.
+
+    Task 5's dashboard reads the JSON; without a stamp it cannot say how old the report it is
+    rendering is. Taking the header date from the summary also makes `render_report_markdown`
+    a pure function of its inputs — it was the one clock call in the module.
+    """
+    item = _item()
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
+    stamped = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85, now=stamped)
+
+    assert summary["generated_at"] == "2026-01-02T03:04:05+00:00"
+    text = render_report_markdown(summary, comparisons, {"1": item})
+    assert text.startswith("# Jev · topics — 2026-01-02")
+
+
+def test_snippet_truncates_a_long_post_and_still_escapes_every_pipe_it_keeps():
+    """The cut runs first and the escape second, so the two cannot interfere.
+
+    Escaping first and cutting after could land the cut between a backslash and its pipe,
+    leaving a half-written escape in the cell. Whichever way the post is cut, the row it
+    lands in still has exactly the cells its header declares.
+    """
+    item = _item(text="a | b " * 40)  # 240 characters, pipes throughout, well past the cut
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    row = next(line for line in text.splitlines() if line.startswith("| 1 | misc |"))
+    assert "…" in row  # the post really was cut
+    assert "a \\| b" in row  # and what survived is still escaped
+    assert len(_cells(row)) == 6
+
+
+# ------------------------------------------------------------------- the threshold boundary
+
+
+def test_a_noul_exactly_at_the_threshold_counts_as_backed_not_doubtful():
+    """`defaults.DEFAULT_THRESHOLD` defines backing as AT OR ABOVE `t`, and `[jev].threshold`
+    defaults to exactly 0.85 while providers routinely answer rounded values.
+
+    One flipped comparison silently moves an item between "respaldada" and "dudosa" in every
+    number both files quote, and no fixture with 0.95/0.20 values can see it.
+    """
+    item = _item(topics=("ai-coding", "misc"))
+    assessment = _assessment(item, {"ai-coding": 0.85, "startups": 0.85, "misc": 0.84})
+
+    comparison = compare_item(item, assessment, 0.85)
+
+    assert comparison is not None
+    assert comparison.doubtful == (Pair("1", "misc", 0.84),)  # only what is BELOW t
+    assert comparison.missing == (Pair("1", "startups", 0.85),)  # at t, unassigned -> candidate
+    assert comparison.jev_assigned == ("ai-coding", "startups")  # at t -> Jev backs it
+
+
+def test_threshold_zero_backs_everything_and_threshold_one_backs_only_certainty():
+    """Both ends of the closed interval are legal and meaningful, and they are opposites."""
+    item = _item(topics=("ai-coding", "misc"))
+    assessment = _assessment(item, {"ai-coding": 1.0, "startups": 0.85, "misc": 0.0})
+
+    at_zero = compare_item(item, assessment, 0.0)
+    at_one = compare_item(item, assessment, 1.0)
+
+    assert at_zero is not None and at_one is not None
+    assert at_zero.doubtful == ()
+    assert at_zero.jev_assigned == ("ai-coding", "startups", "misc")
+    assert [pair.slug for pair in at_one.doubtful] == ["misc"]
+    assert at_one.jev_assigned == ("ai-coding",)
+    assert at_one.missing == ()
+
+
+def test_doubtful_and_missing_are_ordered_within_one_item():
+    """Per-item ordering, with TWO pairs — one pair cannot show a direction."""
+    item = _item(topics=("ai-coding", "misc", "startups"))
+    assessment = _assessment(item, {"ai-coding": 0.95, "startups": 0.60, "misc": 0.20})
+
+    comparison = compare_item(item, assessment, 0.85)
+
+    assert comparison is not None
+    assert comparison.doubtful == (Pair("1", "misc", 0.2), Pair("1", "startups", 0.6))
+
+
+def test_missing_is_ordered_strongest_first_within_one_item():
+    item = _item(topics=("misc",))
+    assessment = _assessment(item, {"ai-coding": 0.90, "startups": 0.99, "misc": 0.95})
+
+    comparison = compare_item(item, assessment, 0.85)
+
+    assert comparison is not None
+    assert comparison.missing == (Pair("1", "startups", 0.99), Pair("1", "ai-coding", 0.9))
+
+
+def test_primary_rank_breaks_a_tie_by_option_name():
+    """The tie-break is the property `primary_rank`'s docstring sells: "two runs of the same
+    distribution can never report different ranks".
+
+    Distributions are stored and re-read as JSON, so insertion order is whatever the provider
+    sent — a stable sort with no tie-break really does rank the same numbers differently.
+    """
+    item = _item(topics=("ai-coding", "misc"))
+    assessment = _assessment(
+        item,
+        {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1},
+        choice="misc",
+        # Insertion order deliberately NOT alphabetical: a stable sort with no tie-break ranks
+        # `ai-coding` 2nd, the tie-break ranks it 1st.
+        probabilities={"misc": 0.4, "ai-coding": 0.4, "startups": 0.2, "otro": 0.0},
+    )
+
+    comparison = compare_item(item, assessment, 0.85)
+
+    assert comparison is not None
+    assert comparison.primary_rank == 1
+
+
+# ------------------------------------------------------------- what the side-car dropped
+
+
+def test_the_summary_counts_the_side_car_records_the_filter_dropped():
+    """A retired side-car must never render identically to one nobody ever wrote.
+
+    The three numbers PARTITION the side-car, so a record cannot leave the comparison without
+    a counter saying where it went — the difference between "run `jev topics`" and "you have
+    just retired 2,400 paid records" is the price of the whole corpus.
+    """
+    item = _item()
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85, stale=4, orphans=2)
+
+    assert summary["assessments_stored"] == 7
+    assert summary["assessments_stale"] == 4
+    assert summary["assessments_orphaned"] == 2
+    assert summary["items_assessed"] == 1
+    text = render_report_markdown(summary, comparisons, {"1": item})
+    assert _headline_line(text, "Evaluaciones:") == (
+        "Evaluaciones: 1 vigentes de 7 guardadas · 4 caducadas · 2 huérfanas"
+    )
+
+
+def test_a_lone_stale_record_agrees_in_number_and_grammar():
+    summary = summarize([], VOCAB, 0.85, stale=1)
+    assert "· 1 caducada" in render_report_markdown(summary, [], {})
+    # Nothing orphaned: the segment has nothing to say and is not printed.
+    assert "huérfana" not in render_report_markdown(summary, [], {})
+
+
+# --------------------------------------------------------------------- per-topic ordering
+
+
+def test_per_topic_orders_on_the_exact_ratio_not_the_rounded_percentage():
+    """2499 of 2500 rounds to 100.0 and must still sort BELOW a perfect 2500 of 2500.
+
+    `_pct` keeps one decimal for the reader. Sorting on it makes the one topic with a real
+    disagreement tie with every perfect topic and then fall to ALPHABETICAL order — in a
+    30-topic vocabulary the answer lands below rows about nothing, under "peor primero".
+    """
+    vocab = [
+        Topic(slug="a-perfect", description="Respaldado siempre."),
+        Topic(slug="b-almost", description="Respaldado casi siempre."),
+    ]
+    backed = _cheap_assessment({"a-perfect": 0.99, "b-almost": 0.99})
+    doubted = _cheap_assessment({"a-perfect": 0.99, "b-almost": 0.10})
+    pairs = [
+        (_item(str(i), topics=("a-perfect", "b-almost")), backed if i else doubted)
+        for i in range(2500)
+    ]
+
+    rows = summarize(pairs, vocab, 0.85)["per_topic"]
+
+    # Both render 100.0 to the reader; only the exact ratio can order them.
+    assert [row["backed_pct"] for row in rows] == [100.0, 100.0]
+    assert [row["slug"] for row in rows] == ["b-almost", "a-perfect"]
+    assert rows[0]["backed"] == 2499 and rows[1]["backed"] == 2500
+
+
+def test_a_per_topic_row_partitions_its_own_assigned_pairs():
+    """`backed + doubtful + unjudged == assigned`, per row, the same arithmetic as the
+    corpus-wide total. The shelter that makes `unjudged` zero per row depends on the caller
+    having filtered for currency, and `summarize` is public."""
+    a = _item("1", topics=("ai-coding", "misc"))
+    b = _item("2", text="Seed round", topics=("startups",))
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.20})),
+        (b, _assessment(b, {"ai-coding": 0.1, "startups": 0.99, "misc": 0.1})),
+    ]
+
+    summary = summarize(pairs, VOCAB, 0.85)
+
+    by_slug = {row["slug"]: row for row in summary["per_topic"]}
+    assert by_slug["misc"]["assigned"] == 1 and by_slug["misc"]["backed"] == 0
+    assert by_slug["ai-coding"]["backed"] == 1
+    assert by_slug["startups"]["backed"] == 1
+    # The rows account for every judged assigned pair the corpus-wide total counts.
+    assert sum(row["assigned"] for row in summary["per_topic"]) == (
+        summary["assigned_pairs"] - summary["assigned_unjudged"]
+    )
+    # And each row's own three buckets partition it, which is what lets a consumer show
+    # `dudosas` / `sin juzgar` per topic against a number the report also emits.
+    for row in summary["per_topic"]:
+        assert row["backed"] + row["doubtful"] + row["unjudged"] == row["assigned"]
+    assert sum(row["doubtful"] for row in summary["per_topic"]) == summary["doubtful_pairs"]
+
+
+# ------------------------------------------------------- markdown: sections, order, cuts
+
+
+def test_the_tables_are_worst_first_under_their_own_heading_and_cut_at_top():
+    """Binds three things one substring assertion cannot: which rows go under which heading,
+    which direction each table sorts, and that `top` really cuts.
+
+    Under a swapped-title mutant the header still says "peor primero" while the table shows
+    the twenty LEAST doubtful pairs, and the reader has no way to tell.
+    """
+    items = [_item(str(i), topics=("misc",)) for i in (1, 2, 3)]
+    pairs = [
+        (item, _assessment(item, {"ai-coding": 0.99, "startups": 0.86 + i / 100, "misc": noul}))
+        for i, (item, noul) in enumerate(zip(items, [0.10, 0.40, 0.80]))
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {i.id: i for i in items}, top=2)
+
+    # Ascending noul, and only `top` of them.
+    doubtful = [_cells(row)[3].strip() for row in _rows_under(text, "## Dudosas")]
+    assert doubtful == ["0.100", "0.400"]
+    # Descending noul, so the STRONGEST candidates are the ones that survive the cut.
+    missing = [_cells(row)[3].strip() for row in _rows_under(text, "## Candidatas que faltan")]
+    assert missing == ["0.990", "0.990"]
+
+
+def test_a_cut_table_says_how_many_rows_it_dropped():
+    """`top 20` reads the same whether there were 7 rows or 700. A silent drop in the artifact
+    that exists to be read is the same failure as a silent drop in a number."""
+    items = [_item(str(i), topics=("misc",)) for i in (1, 2, 3)]
+    pairs = [
+        (item, _assessment(item, {"ai-coding": 0.1, "startups": 0.1, "misc": noul}))
+        for item, noul in zip(items, [0.10, 0.40, 0.80])
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    cut = render_report_markdown(summary, comparisons, {i.id: i for i in items}, top=2)
+    whole = render_report_markdown(summary, comparisons, {i.id: i for i in items}, top=20)
+
+    assert "_… y 1 fila más (el JSON las lleva todas)._" in cut
+    assert "fila más" not in whole and "filas más" not in whole
+
+
+def test_markdown_escapes_a_backslash_before_a_pipe_instead_of_re_opening_the_cell():
+    r"""A post containing `\|` must not re-open the cell.
+
+    Escaping only the pipe turns `grep 'foo\|bar'` into `foo\\|bar`, and cmark-gfm's row
+    scanner consumes `\` plus ONE character: it eats both backslashes and the `|` becomes a
+    LIVE delimiter. A BRE alternation, a shell escape and a Windows path all hit this.
+    """
+    item = _item(text=r"grep 'foo\|bar' file")
+    summary, comparisons = build_report(
+        [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))],
+        VOCAB,
+        0.85,
+    )
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    row = _rows_under(text, "## Dudosas")[0]
+    assert len(_cells(row)) == 6
+    assert r"grep 'foo\\\|bar' file" in row
+
+
+def test_a_multiline_post_stays_on_one_row():
+    """The other half of `_snippet`'s contract: a newline ENDS the row, and multi-line posts
+    are the common case on X."""
+    item = _item(text="línea uno\nlínea dos")
+    summary, comparisons = build_report(
+        [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))],
+        VOCAB,
+        0.85,
+    )
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    assert _rows_under(text, "## Dudosas") == ["| 1 | misc | 0.200 | línea uno línea dos |"]
+
+
+def test_a_row_for_an_item_missing_from_the_store_renders_an_empty_text_cell():
+    """A report built from a side-car whose item was deleted still renders a well-formed row."""
+    item = _item()
+    summary, comparisons = build_report(
+        [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))],
+        VOCAB,
+        0.85,
+    )
+
+    text = render_report_markdown(summary, comparisons, {})
+
+    row = _rows_under(text, "## Dudosas")[0]
+    assert row == "| 1 | misc | 0.200 |  |"
+    assert len(_cells(row)) == 6
+
+
+def test_the_markdown_names_the_unjudged_slugs_not_just_their_count():
+    """`**sin juzgar:** 4` cannot tell a reader WHICH topic to put back in `vocab.yaml`.
+
+    The JSON record carried the slugs and the file a person reads did not, which made the one
+    bucket that says "your vocabulary moved" the one bucket nobody could act on.
+    """
+    item = _item(topics=("ai-coding", "retired-topic"))
+    summary, comparisons = build_report(
+        [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))],
+        VOCAB,
+        0.85,
+    )
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    assert summary["assigned_unjudged"] == 1
+    assert _rows_under(text, "## Asignaciones sin juzgar") == [
+        "| 1 | retired-topic | Claude Code hooks |"
+    ]
+
+
+def test_the_primary_tables_are_split_by_reason_and_ranked_worst_first():
+    """One table headed "en desacuerdo" says the opposite of what the module establishes: an
+    item with no primary, and one whose primary left the vocabulary, are not disagreements.
+
+    Within a section the worst conflict comes first — enrich's primary furthest DOWN Jev's own
+    ranking — because the file shows only the first `top` rows.
+    """
+    no_primary = _item("1")
+    no_primary.enriched = Enrichment(
+        enriched_at=DT, executor="claude-code", summary="s", primary_topic=None, topics=["misc"]
+    )
+    retired = _item("2", text="Seed round", topics=("retired-topic", "misc"))
+    close_call = _item("3", text="Otro post", topics=("startups", "misc"))
+    far_conflict = _item("4", text="Un cuarto", topics=("misc", "startups"))
+    membership = {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}
+    # `close_call`'s primary is 2nd in Jev's ranking; `far_conflict`'s is 3rd — worse.
+    ranked = {"ai-coding": 0.6, "startups": 0.3, "misc": 0.1, "otro": 0.0}
+    pairs = [
+        (no_primary, _assessment(no_primary, membership, probabilities=ranked)),
+        (retired, _assessment(retired, membership, probabilities=ranked)),
+        (close_call, _assessment(close_call, membership, probabilities=ranked)),
+        (far_conflict, _assessment(far_conflict, membership, probabilities=ranked)),
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {item.id: item for item, _ in pairs})
+
+    assert "## Primario que no coincide (top 20 por motivo)" in text
+    assert "### Sin primario en enrich (1)" in text
+    assert "### Primario sin juzgar (salió del vocabulario) (1)" in text
+    assert "### Desacuerdo real (2)" in text
+    # Worst first inside the section: rank 3 (`misc`) before rank 2 (`startups`).
+    real = text.split("### Desacuerdo real (2)", 1)[1].splitlines()
+    rows = [line for line in real if line.startswith("| 4 |") or line.startswith("| 3 |")]
+    assert [_cells(row)[1].strip() for row in rows] == ["4", "3"]
+
+
+def test_a_primary_the_provider_left_out_of_its_distribution_gets_its_own_bucket():
+    """`primary_rank is None` used to mean three different things and count as an ordinary
+    disagreement.
+
+    `PrimaryChoice` does not enforce full coverage, so a provider may score a slug in
+    `membership` and omit it from the Choice. That is the one case where Jev DEMONSTRABLY
+    never considered the topic, and it was the one rendered as a bare `—`.
+    """
+    item = _item(topics=("misc", "ai-coding"))
+    assessment = _assessment(
+        item,
+        {"ai-coding": 0.95, "startups": 0.1, "misc": 0.90},
+        choice="ai-coding",
+        probabilities={"ai-coding": 0.9, "startups": 0.1, "otro": 0.0},  # no `misc`
+    )
+
+    comparison = compare_item(item, assessment, 0.85)
+    summary = summarize([(item, assessment)], VOCAB, 0.85)
+
+    assert comparison is not None
+    assert comparison.primary_rank is None
+    assert comparison.primary_unjudged is False  # `misc` IS in membership — Jev was asked
+    assert comparison.primary_unranked is True
+    assert summary["primary_unranked"] == 1
+    assert summary["primary_unjudged"] == 0
+    text = render_report_markdown(summary, [comparison], {"1": item})
+    assert "### Primario ausente de la distribución de Jev (1)" in text
+
+
+def test_summarize_counts_the_records_whose_evidence_was_cut():
+    """Truncation says a judgement was made on PARTIAL evidence, so a silent zero is the
+    reading that matters."""
+    item = _item()
+    assessment = _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}).model_copy(
+        update={"truncated": True}
+    )
+
+    summary, comparisons = build_report([(item, assessment)], VOCAB, 0.85)
+
+    assert summary["truncated"] == 1
+    assert "truncados: 1" in render_report_markdown(summary, comparisons, {"1": item})
+
+
+def test_a_naive_now_is_refused_rather_than_stamped_as_utc():
+    """`TopicAssessment.asked_at` refuses exactly this, and says why: we do not coerce,
+    because that masks the bug. A consumer ageing the report would read local time as UTC."""
+    item = _item()
+    pairs = [(item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}))]
+
+    with pytest.raises(ValueError, match="now"):
+        summarize(pairs, VOCAB, 0.85, now=datetime(2026, 1, 2, 3, 4, 5))
+
+
+# --------------------------------------------------------------- the JSON reader's contract
+
+
+def test_the_json_record_carries_every_field_a_reader_of_it_reads(tmp_path: Path):
+    """The record IS the contract for whoever reads the file. Asserting one key lets the two
+    fields this work added vanish from the JSON with nothing going red."""
+    item = _item(topics=("retired-topic", "ai-coding"))
+    summary, comparisons = build_report(
+        [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))],
+        VOCAB,
+        0.85,
+    )
+
+    json_path, _ = write_reports(summary, comparisons, {"1": item}, tmp_path / "jev")
+
+    record = json.loads(json_path.read_text(encoding="utf-8"))["items"][0]
+    assert set(record) == {
+        "item_id",
+        "assigned",
+        "primary_topic",
+        "jev_primary",
+        "jev_confidence",
+        "primary_rank",
+        "doubtful",
+        "missing",
+        "jev_assigned",
+        "unjudged",
+        "primary_unjudged",
+        "primary_unranked",
+        "primary_agrees",
+    }
+    assert record["unjudged"] == ["retired-topic"]
+    assert record["primary_unjudged"] is True
+    assert record["missing"] == [{"slug": "startups", "noul": 0.9}]
+    assert record["jev_assigned"] == ["ai-coding", "startups"]
+    assert record["primary_agrees"] is False
+
+
+def test_write_reports_leaves_the_last_good_report_whole_when_a_rename_dies(tmp_path, monkeypatch):
+    """The atomicity the docstring claims, pinned the way `test_jev_store` pins the side-car's.
+
+    It also pins the WEAKER joint guarantee the docstring now states: the two files are atomic
+    individually, so a death between them leaves the JSON new and the markdown previous.
+    """
+    item = _item()
+    assessment = _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2})
+    jev_dir = tmp_path / "jev"
+    first, comparisons = build_report([(item, assessment)], VOCAB, 0.85)
+    _, md_path = write_reports(first, comparisons, {"1": item}, jev_dir)
+    before = md_path.read_bytes()
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if str(dst).endswith(".md"):
+            raise OSError("disco lleno")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("xbrain.store.os.replace", _boom)
+    other, other_comparisons = build_report([(item, assessment)], VOCAB, 0.10)
+
+    with pytest.raises(OSError, match="disco lleno"):
+        write_reports(other, other_comparisons, {"1": item}, jev_dir)
+
+    assert md_path.read_bytes() == before
+    # No half-written temp file survives the failure.
+    assert sorted(p.name for p in jev_dir.iterdir()) == ["topics-report.json", "topics-report.md"]
+
+
+def test_a_fallback_primary_gets_its_own_section_not_the_disagreement_one():
+    """Jev answering "none of these" says the VOCABULARY is missing a topic, not that enrich
+    is wrong. Different diagnosis, different remedy, so a different section."""
+    item = _item(topics=("ai-coding", "misc"))
+    assessment = _assessment(
+        item,
+        {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1},
+        choice="otro",
+        probabilities={"otro": 0.6, "ai-coding": 0.4, "startups": 0.0, "misc": 0.0},
+    )
+    summary, comparisons = build_report([(item, assessment)], VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    assert summary["primary_fallback"] == 1
+    assert summary["primary_agree"] == 0
+    assert "### Jev eligió el fallback (1)" in text
+    assert "### Desacuerdo real (0)" in text
+
+
+def test_the_markdown_explains_why_a_section_can_count_less_than_the_headline():
+    """The headline counters are INDEPENDENT; the sections PARTITION by priority.
+
+    An item whose primary left the vocabulary AND that Jev answered with the fallback is in
+    both headline counters but appears once, under the first reason that applies. So a reader
+    can see `**primario = fallback:** 1` two lines above `### Jev eligió el fallback (0)` —
+    and the file has to say why, not just the code.
+    """
+    item = _item("2", text="Seed round", topics=("retired-topic", "startups"))
+    assessment = _assessment(
+        item,
+        {"ai-coding": 0.1, "startups": 0.99, "misc": 0.05},
+        choice="otro",
+        probabilities={"otro": 0.6, "startups": 0.4, "ai-coding": 0.0, "misc": 0.0},
+    )
+    summary, comparisons = build_report([(item, assessment)], VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"2": item})
+
+    # The overlap really is on the page: counted twice above, filed once below.
+    assert summary["primary_fallback"] == 1 and summary["primary_unjudged"] == 1
+    assert "**primario = fallback:** 1" in text
+    assert "### Jev eligió el fallback (0)" in text
+    assert "### Primario sin juzgar (salió del vocabulario) (1)" in text
+    assert "estas cifras pueden sumar menos que las de arriba" in text
+
+
+# ----------------------------------------------------------------------- the run history
+
+
+def _logged(started: datetime, *, requests=2, ok=2, tokens=None, unknown=0, interrupted=False):
+    by_provider = {PRICED_PROVIDER: 2000} if tokens is None else tokens
+    return JevRun(
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+        models=["jev-1.13.0"] if ok else [],
+        requests=requests,
+        ok=ok,
+        failed=requests - ok if not interrupted else 0,
+        input_tokens_by_provider=by_provider,
+        input_tokens=sum(by_provider.values()),
+        input_tokens_unknown=unknown,
+        interrupted=interrupted,
+    )
+
+
+def test_the_run_history_prices_every_pass_through_the_one_price_formula():
+    early = _logged(datetime(2026, 9, 25, 9, tzinfo=timezone.utc))
+    late = _logged(
+        datetime(2026, 9, 26, 9, tzinfo=timezone.utc),
+        requests=3,
+        ok=3,
+        tokens={PRICED_PROVIDER: 3000, "fake": 500},
+        unknown=1,
+    )
+
+    history = run_history([early, late], {})
+
+    # Newest first: the question is "what did the last pass cost".
+    assert [row["started_at"] for row in history["runs"]] == [
+        late.started_at.isoformat(),
+        early.started_at.isoformat(),
+    ]
+    newest = history["runs"][0]
+    assert newest["cost_usd"] == tokens_cost_usd(3000, PRICED_PROVIDER) + tokens_cost_usd(
+        500, "fake"
+    )
+    assert newest["unpriced_providers"] == ["fake"]
+    assert newest["providers"] == ["fake", PRICED_PROVIDER]
+    assert (newest["requests"], newest["ok"], newest["failed"]) == (3, 3, 0)
+    total = history["total"]
+    assert (total["runs"], total["requests"], total["input_tokens"]) == (2, 5, 5500)
+    assert total["input_tokens_unknown"] == 1
+    assert history["runs"][1]["cost_usd"] == tokens_cost_usd(2000, PRICED_PROVIDER)
+    assert total["cost_usd"] == pytest.approx(history["runs"][1]["cost_usd"] + newest["cost_usd"])
+    assert total["unpriced_providers"] == ["fake"]
+
+
+def _stored(item_id: str, asked_at: datetime, tokens: int = 1000) -> TopicAssessment:
+    item = _item(item_id)
+    return _assessment(
+        item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, tokens=tokens
+    ).model_copy(update={"asked_at": asked_at})
+
+
+def _at(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 9, 26, hour, minute, tzinfo=timezone.utc)
+
+
+def test_an_assessment_counts_as_logged_only_inside_a_logged_pass():
+    """Covered iff `asked_at` falls inside SOME logged pass's [started_at, finished_at].
+
+    Before the first pass, between two passes (a run from an older copy of xbrain, an
+    append that failed, a SIGTERM) and after the last: all outside the log, and all counted
+    and priced so the total never silently omits them. The runs are handed in out of order
+    and the boundaries are inclusive.
+    """
+    run_a = _logged(_at(9))  # 09:00:00 – 09:00:30
+    run_b = _logged(_at(11))  # 11:00:00 – 11:00:30
+    stored = {
+        "before": _stored("before", _at(8), tokens=1000),
+        "at-start": _stored("at-start", _at(9), tokens=10),
+        "in-a": _stored("in-a", _at(9) + timedelta(seconds=30), tokens=20),
+        "between": _stored("between", _at(10), tokens=3000),
+        "after-a-no-run": _stored("after-a-no-run", _at(9, 5), tokens=500),
+        "in-b": _stored("in-b", _at(11) + timedelta(seconds=10), tokens=30),
+        "after": _stored("after", _at(12), tokens=7),
+    }
+
+    outside = run_history([run_b, run_a], stored)["out_of_log"]
+
+    assert outside["assessments"] == 4  # before, between, after-a-no-run, after
+    assert outside["input_tokens"] == 1000 + 3000 + 500 + 7
+    assert outside["cost_usd"] == tokens_cost_usd(4507, PRICED_PROVIDER)
+
+
+def test_with_no_log_every_stored_assessment_is_outside_it():
+    stored = {"1": _stored("1", DT)}
+
+    history = run_history([], stored)
+
+    assert history["runs"] == []
+    assert history["total"]["runs"] == 0
+    assert history["total"]["cost_usd"] == 0.0 and isinstance(history["total"]["cost_usd"], float)
+    assert history["out_of_log"]["assessments"] == 1
+
+
+def test_a_pass_where_nothing_answered_costs_a_float_zero():
+    """No provider answered, so there is nothing to price: still a float, like every cost."""
+    silent = _logged(_at(9), requests=2, ok=0, tokens={})
+
+    [row] = run_history([silent], {})["runs"]
+
+    assert row["cost_usd"] == 0.0 and isinstance(row["cost_usd"], float)
+
+
+def test_the_history_line_quotes_the_bill_in_the_shared_sentence():
+    run = _logged(_at(9))
+
+    line = history_fragment(run_history([run], {}))
+
+    assert line.startswith("1 pasada · 2 peticiones · ")
+    assert jev_cost_fragment(2000, 0, tokens_cost_usd(2000, PRICED_PROVIDER), ()) in line
+
+
+def test_the_history_line_says_there_is_no_log_and_prices_what_is_outside_it():
+    """Not `0 pasadas · … (~0.0000 $)`: that reads as "free"."""
+    line = history_fragment(run_history([], {"1": _stored("1", DT, tokens=4000)}))
+
+    assert line.startswith("sin pasadas registradas")
+    assert "1 evaluación fuera del registro de pasadas" in line
+    assert jev_cost_fragment(4000, 0, tokens_cost_usd(4000, PRICED_PROVIDER), ()) in line
+
+
+def test_the_history_line_prices_assessments_outside_the_log_too():
+    run = _logged(_at(9))
+    line = history_fragment(run_history([run], {"x": _stored("x", _at(10), tokens=3000)}))
+
+    assert "1 evaluación fuera del registro de pasadas" in line
+    assert jev_cost_fragment(3000, 0, tokens_cost_usd(3000, PRICED_PROVIDER), ()) in line
+
+
+# ------------------------------------------------------------------ disagreement, one place
+
+
+def test_a_comparison_names_its_three_kinds_of_disagreement():
+    item = _item(topics=("ai-coding", "misc"))
+    comparison = compare_item(
+        item,
+        _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}, choice="startups"),
+        0.85,
+    )
+
+    assert [p.slug for p in comparison.enrich_only] == ["misc"]
+    assert [p.slug for p in comparison.jev_only] == ["startups"]
+    assert comparison.primary_differs is True
+    assert comparison.disagreements == 3
+
+
+def test_an_enrich_without_a_primary_counts_as_a_primary_that_differs():
+    """Nothing for Jev to agree with is itself something to fix."""
+    item = _item(topics=("ai-coding",))
+    item.enriched.primary_topic = None
+    comparison = compare_item(
+        item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}), 0.85
+    )
+
+    assert comparison.primary_differs is True and comparison.disagreements == 1
+
+
+def test_the_summary_counts_posts_with_any_disagreement():
+    agree, differ = _item("1", topics=("ai-coding",)), _item("2", topics=("misc",))
+    pairs = [
+        (agree, _assessment(agree, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})),
+        (differ, _assessment(differ, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})),
+    ]
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    assert summary["posts_with_disagreement"] == sum(1 for c in comparisons if c.disagreements)
+    assert summary["posts_with_disagreement"] == 1
+
+
+# ------------------------------------------------------------------ what one post cost
+
+
+def test_a_posts_cost_is_unknown_without_usage_and_unpriced_for_an_unknown_provider():
+    item = _item()
+    counted = _assessment(item, {"ai-coding": 0.9}, tokens=2500)
+    silent = _assessment(item, {"ai-coding": 0.9}, tokens=None)
+    unpriced_judge = _assessment(item, {"ai-coding": 0.9}, tokens=2500, provider="fake")
+
+    assert assessment_cost_usd(counted) == tokens_cost_usd(2500, PRICED_PROVIDER)
+    assert assessment_cost_usd(silent) is None
+    assert assessment_cost_usd(unpriced_judge) is None
+
+
+def test_the_mean_cost_per_post_counts_only_posts_it_can_price_and_says_how_many():
+    a, b, c = _item("1"), _item("2"), _item("3")
+    view = post_cost_view(
+        [
+            _assessment(a, {"ai-coding": 0.9}, tokens=2000),
+            _assessment(b, {"ai-coding": 0.9}, tokens=None),
+            _assessment(c, {"ai-coding": 0.9}, tokens=9000, provider="fake"),
+        ]
+    )
+
+    assert view["mean_usd"] == tokens_cost_usd(2000, PRICED_PROVIDER)
+    assert (view["n"], view["of"]) == (1, 3)
+    assert view["unpriced_providers"] == ["fake"]
+
+
+def test_the_mean_cost_is_none_when_no_post_can_be_priced():
+    item = _item()
+
+    view = post_cost_view([_assessment(item, {"ai-coding": 0.9}, tokens=None)])
+
+    assert view["mean_usd"] is None and (view["n"], view["of"]) == (0, 1)

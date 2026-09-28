@@ -330,12 +330,27 @@ clickable: the drawer behind it lists the posts underneath, each with a link to
 the tweet and an `obsidian://open` deep link back to its note.
 
 It is **one file** — ECharts is vendored into it and the photo thumbnails are
-inlined as data URIs (~1.8 MB on a 2,300-item corpus). Only two things still come
-off the network when you open it, the Google Fonts stylesheet and the X video
-posters; both degrade to a plain-font, no-poster page offline.
+inlined as data URIs (~1.8 MB on a 2,300-item corpus). No external scripts: only
+two things still come off the network when you open it, the Google Fonts
+stylesheet and the X video posters; both degrade to a plain-font, no-poster page
+offline. Its sibling `jev.html` is built the same way, without ECharts; it references
+the fonts and shows each post through X's own embed (a frame from `platform.twitter.com`,
+never X's script), falling back to the saved copy with photos from the vault's `_media/`
+folder by relative path.
 
 It is a secondary artefact and `generate` treats it as one: if building it
 raises, the failure is logged and every note is still written.
+
+### Plus — a second opinion on the topics
+
+`xbrain jev` asks a different model family the same question `enrich` answered —
+which of your vocabulary topics does this post belong to? — and puts the two
+answers side by side, with a probability on every one. **It is a second opinion
+and it never changes the wiki:** the answers live in their own side-car, no topic
+assignment moves, no note is re-rendered, and you can run it or ignore it without
+touching the corpus. It needs a TypeSafe key, and it is the only command that bills per
+run on XBrain's default keyless setup — `--executor api` and the Firecrawl fallback also
+cost money, but both are opt-in paths you have to turn on. See [docs/jev.md](docs/jev.md).
 
 ---
 
@@ -380,10 +395,15 @@ uv run xbrain status     # see the counts
 | An X account | — | Yours. XBrain reads *your* bookmarks and tweets. |
 | `ANTHROPIC_API_KEY` | — | **Optional.** Only for the `api` execution mode. |
 | `FIRECRAWL_API_KEY` | — | **Optional.** Fallback fetcher for JavaScript-heavy pages. |
+| `TYPESAFE_API_KEY` | — | **Optional.** Only for `xbrain jev topics`, `xbrain jev ask` and the jobs `xbrain jev serve` runs (the second opinion on topics, and asking the corpus). Read from the environment or from `<repo>/.env` (gitignored). See [docs/jev.md](docs/jev.md). |
 | ffmpeg, `parakeet-mlx`, `mlx-vlm` | — | **Optional — only for `digest-video`** (video → transcript/slide digests). External, not pulled by `uv pip install`. See [Local models for `digest-video`](#local-models-for-digest-video-apple-silicon). |
 
-Neither API key is required: the default execution mode uses a Claude Code
-session and costs nothing.
+**No API key is required to run the pipeline.** The default execution mode uses a
+Claude Code session and costs nothing; each key above unlocks one optional path —
+`ANTHROPIC_API_KEY` the `api` executor, `FIRECRAWL_API_KEY` the fallback fetcher, and
+`TYPESAFE_API_KEY` the `xbrain jev` second opinion. Only `xbrain jev topics`, `xbrain jev ask`
+and a job started through `xbrain jev serve`'s API bill per run on the default setup; the other two keys
+enable paths you opt into.
 
 ---
 
@@ -445,7 +465,7 @@ executor = "claude-code"                  # claude-code | api | manual
 model = "claude-haiku-4-5-20251001"        # used only by the `api` executor
 
 [vocab]
-target_count = 45                         # how many topics to induce
+target_count = 45                         # how many topics to induce (default 30)
 
 [topics]
 resynth_threshold = 25                    # re-synthesise an overview after N new posts
@@ -466,6 +486,16 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 # dir = "index"                           # under data/; must resolve INSIDE data/
 # max_matches_per_item = 3                # fragments one item may cite in a search
 # get_char_budget = 40000                 # per-response ceiling before truncate + cursor
+
+[jev]                                     # optional; see docs/jev.md
+# model = "jev-latest"                    # moving alias; each record stores the model that answered
+# threshold = 0.85                        # "backed by Jev" = probability >= threshold
+# fallback_option = "otro"                # escape option of the primary question
+# concurrency = 8                         # requests in flight
+# state_char_limit = 100000               # evidence is cut here (pre-cut length is recorded)
+# serve_max_usd = 1.0                     # the most one job started from `jev serve` may cost
+# ask_max_usd = 0.25                      # `jev ask` asks for confirmation above this estimate
+# ask_top = 20                            # results `jev ask` prints / the Preguntar tab shows first
 ```
 
 | Section | Key | Default | Purpose |
@@ -476,7 +506,7 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[x]` | `handle` | — | Your X handle, no `@`. |
 | `[enrich]` | `executor` | `claude-code` | Default [execution mode](#execution-modes) for the LLM stages. |
 | `[enrich]` | `model` | `claude-haiku-4-5` | Model for the `api` executor. |
-| `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
+| `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. The snippet above shows `45`, which is what this repo's own corpus runs — it is an example, not the default. It is also what drives the cost of `xbrain jev topics`, which asks one question per topic per item. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
 | `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
@@ -489,6 +519,14 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[index]` | `dir` | `index` | Where `data/index/` lives, relative to `data_dir`. Validated on load: an absolute path, a `..` or an escaping symlink is refused, because `index build --force` deletes and recreates whatever it finds there. |
 | `[index]` | `max_matches_per_item` | `3` | How many fragments of one item `search` may cite. What stops a long transcript filling the top ten with ten adjacent windows of itself. |
 | `[index]` | `get_char_budget` | `40000` | Per-response character ceiling for `get`. Above it the bundle truncates **declaring it** and returns a cursor, never silently. |
+| `[jev]` | `model` | `jev-latest` | Jev model for `xbrain jev topics`. A moving alias on purpose — TypeSafe's updates are allowed through, and every stored assessment records the concrete version that answered. See [docs/jev.md](docs/jev.md). |
+| `[jev]` | `threshold` | `0.85` | Probability at or above which a topic counts as "backed by Jev". `jev dashboard` always compares at this value; `jev report` uses it by default and accepts `--threshold` to read the same side-car at another one without re-asking anything. |
+| `[jev]` | `fallback_option` | `otro` | The escape option of the primary-topic question ("a topic not in the vocabulary"). Must not collide with a vocabulary slug — `jev topics` refuses the run if it does, before spending anything. |
+| `[jev]` | `concurrency` | `8` | Requests in flight. Raise it only against an observed `429`. |
+| `[jev]` | `serve_max_usd` | `1.0` | The most one job started through `xbrain jev serve`'s API may cost, in USD: a selection whose estimate is above it is refused, and while it runs no post is sent that would take spent + reserved past it (what was answered is saved). The bill passes it only by what the posts in flight cost above their reservation. `jev topics` in the terminal has no cap. |
+| `[jev]` | `ask_max_usd` | `0.25` | Above this estimate, in USD, `xbrain jev ask` asks `¿Preguntar igualmente?` before spending (`--yes` answers for you). The estimate is posts × tokens per call + characters ÷ characters per token, fitted on paid ask answers (prior 1,000 and 4.0); a whole-corpus query is estimated at ~0.18 $. An ask launched from `xbrain jev serve`'s Preguntar tab is capped by `serve_max_usd` instead, like every server job. |
+| `[jev]` | `ask_top` | `20` | How many of a query's results `xbrain jev ask` prints (`--top N`, `--all`) and the Preguntar tab shows first («Ver más» adds as many). Results are ranked by probability; `threshold` is the topic bar and never cuts them. |
+| `[jev]` | `state_char_limit` | `100000` | Where the evidence sent to Jev is cut (with a visible marker; the pre-cut length is recorded). **Not the cost lever** — the questions are ~89% of what a pass sends, so `[vocab].target_count` is. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
@@ -498,8 +536,12 @@ every enrichment; the next `xbrain enrich` re-enriches in the new language) and
 [Snapshots & safety](#snapshots--safety)). Otherwise new items get the new
 language while old summaries stay as they were.
 
-Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
-only** — never in `config.toml`, never in the repo.
+Secrets never go in `config.toml` and are never committed. `ANTHROPIC_API_KEY` and
+`FIRECRAWL_API_KEY` are read from the **environment only**. `TYPESAFE_API_KEY` is read
+from the environment too, and — because `xbrain jev` is a long-running paid command you
+do not want to re-export every session — also from `<repo>/.env`, which is **gitignored**
+and whose committed template `.env.example` carries no value. That file is the one
+exception to "secrets are not files in the repo", and it stays out of git.
 
 ### Local models for `digest-video` (Apple Silicon)
 
@@ -738,6 +780,12 @@ uv run xbrain <command> [options]
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
 | `verify` | **Semantic verification** of the generated enrichment (an LLM-as-judge ensemble, mirroring `cv-guardrail`): scores each `summary` / `digest` / `topics` output for **faithfulness** (does it invent facts/numbers the source does not support?) and **rubric-adherence**, emitting a per-output verdict **PASS / REVIEW / FAIL** + cited flags (each tagged with its `axis`). **Report-only by default** — writes `data/verify-report.{json,md}`, worst-first, and never mutates the store. **Opt-in `--write-verdicts`** (valid only alongside `--apply`) additionally persists each verdict onto its item as a `VerificationVerdict` (keyed by target) together with a **sha256 fingerprint of the exact judged output** + `verified_at`, so `generate` can badge it. The fingerprint is **stamped at worksheet export** and threaded through the filled worksheet — and, on the audit path, through the report record and the audit worksheet — to the writer, never a recompute against the live store, so a regeneration in the export→judge→(audit)→write window can't bind a verdict to output it never judged. This mutates `items.json`, auto-snapshots `data/` first (label `pre-verify-write-verdicts`), and echoes a written/skipped tally (a dropped verdict is never silent). Keyless worksheet flow: `xbrain verify --target summary\|digest\|topics\|all` exports `data/verify-worksheet.json` → copy it once per judge, fill `judgments` → `xbrain verify --apply ws1.json --apply ws2.json …` aggregates (worst-faithfulness wins, divergence flagged) into the report. **`--audit`** runs the judge≠party second pass over ONLY the consequential (FAIL/divergent) verdicts: `xbrain verify --audit` exports an audit worksheet (source + output + the judges' flags) for a single independent auditor to CONFIRM/REVOKE each flag with a `confidence` (0–1) and cited `reason`; `xbrain verify --audit --apply audit.json` merges it back and **deterministically re-verdicts** under one invariant — *a verdict lowers only when the specific cited evidence that produced it is explicitly revoked; guards only escalate*. Three code-enforced backstops: a **confidence gate** (a REVOKE applies only at `confidence ≥ 0.7`, else it is kept and surfaced), **axis scoping** (revoking an adherence note never clears a faithfulness FAIL), and a **mass-revocation guard** (if one run would clear a suspiciously high share of the FAILs, all such revocations are suppressed and kept FAIL). So a confirmed flag keeps the FAIL, an all-faithfulness-flags-revoked record drops to REVIEW (or PASS if no adherence issue remains), an added confirmed flag re-establishes a FAIL the auditor tried to clear, and a divergent tie is resolved by the auditor — with an `## Audit` report section listing every washed/gated/unmatched decision (and any invariant anomaly). The audit is a **single pass** over the full consequential set: a second `--audit --apply` on an already-audited report is refused (it would let split revocations bypass the mass-revocation guard) unless `--force`. **`--force` may not be combined with `--write-verdicts`**: a forced re-audit re-renders the report from the merged records, so the FAIL set shrinks and N single-revoke runs would launder every FAIL into the store without ever tripping the mass-revocation guard (it needs ≥2 FAILs) — forced re-audits stay available report-only. An **absent `audits` key is rejected** (a judge worksheet fed to the audit path would otherwise persist the un-audited aggregate), as is a `--write-verdicts` run whose audit matched **no** record while consequential verdicts remain. The store is written **before** the report, so a failed write never leaves the report marked `audited`. **The audited verdict is the one that reaches the store**: `xbrain verify --audit --apply audit.json --write-verdicts` persists the MERGED, post-audit verdicts (a revoked FAIL lands lowered and badges nothing; a confirmed — or auditor-added — failure lands as FAIL with its confirmed flags), consuming the merge's guarded output rather than re-deriving anything. `--executor manual\|claude-code`. Defaults to `[enrich].executor`; worksheet tracks only (no `api`). |
 | `verify-entities` | **Deterministic and token-free** sweep of every generated output for named entities that no evidence surface supports. There is no LLM in it, so it cannot inherit the judge ensemble's blind spot, and it sweeps the **whole corpus** rather than a sample. Matching is variant-aware (squashed spacing, acronym↔expansion, handle abbreviation, bounded fuzzy) because the evidence is often ASR output — an exact-string matcher flags precisely the names the generator got *right* (`open ai` → `OpenAI`). **Read what it is blind to before quoting any number from it:** it checks that PROPER NOUNS APPEAR somewhere on the evidence. It never checks what is asserted about them and never looks at a single number, so "Sam Altman said he will fire half the staff" against a source where he discusses hiring extracts `Sam Altman`, finds it grounded and passes clean. **A clean verdict means "no unknown proper nouns", not "not hallucinated".** `--verdicts data/verify-report.json` cross-references a `verify` run and reports how many flagged outputs the judges had passed **unanimously**. Read that as a lower bound, and only over the outputs carrying a verdict at all: the two sets have to overlap before the count says anything about the judges. As this is written they barely do — the report on disk holds 7 judged summaries against 140 confidently flagged outputs and the intersection is empty, so it prints zero because nothing has been judged where this check is looking, not because the judges caught everything. Outputs whose only evidence is the low-precision uncertain tier (ambiguous capitalisation, typically sentence-initial) get their own line rather than being folded into the headline. Read-only: writes `data/entity-report.{json,md}` and never touches the store. `--target digest\|summary` (default `digest`). `topics` is **refused**, not scanned: topic slugs are lowercase kebab-case, so the extractor would find no entity in any of them and return a confident clean bill of health from a check structurally unable to find anything. |
+| `jev topics` | Ask **Jev (TypeSafe AI)** which vocabulary topics each post belongs to — one yes/no question per topic plus one pick-one for the primary, in a single call per item — and write the probabilities to `data/jev/topics.json`. A **side-car**: it never writes `items.json`, never issues a verdict and never re-renders a note. Skips items whose stored answer still describes today's question, so a re-run asks only what changed (`--force` re-asks anyway, says how many current records it is re-billing, and copies the side-car to `data/jev/topics.<UTC stamp>.bak` first — `snapshot restore` does not cover this file). `--id <a>` (repeatable), `--limit N`, `--force`, `--dry-run`. **Spends money, like `jev ask` and a `jev serve` job** — needs `TYPESAFE_API_KEY` in the environment or in `<repo>/.env`; `--dry-run` and an empty backlog need neither the key nor the SDK. Records every per-item failure and keeps going, checkpoints to disk every 25 answers, saves what it banked on Ctrl-C (exit 130), and raises rather than report an empty success when every call failed. Every pass that sent a request appends one line (requests, ok, failed, tokens, models, interrupted) to `data/jev/runs.jsonl`, on every exit path. See [docs/jev.md](docs/jev.md). |
+| `jev report` | Compare those probabilities with what `enrich` assigned, at a threshold, and write `data/jev/topics-report.{json,md}`. Reports both directions — how much of `enrich`'s assignment Jev backs, and how much of Jev's own proposal `enrich` already has — plus the doubtful pairs, the missing candidates, the topics Jev was never asked about, and where `enrich`'s primary sits in Jev's own ranking. Reads only the side-car: **no API call, no key, no cost**. Assessments whose contract no longer describes today's question are excluded and *counted*, so a full side-car retired by a vocabulary edit never reads like one nobody wrote. Refuses — naming the missing input and the file it left alone — rather than write a plausible report of zeros. Also prints a `Histórico:` line pricing every topics pass in `runs.jsonl`, and a `Consultas (jev ask):` line for the `jev ask` passes when there are any. `--threshold T` (default `[jev].threshold`). |
+| `jev dashboard` | Write `jev.html` next to `dashboard.html` in the vault: a browser of every post shown through X's own embed (a sandboxed frame, never `widgets.js`; per post «ver copia guardada» and a page-wide «Vista: X | copia guardada», `?embed=0`, and an automatic fall back to the saved share-style card — text, photos from `_media/`, quoted post, link — when X does not answer in 8 s or has not got the post; an X Article opens on the saved copy, since X's view of one is its bare link) with, under it, enrich vs Jev at `[jev].threshold` (per topic: enrich ✓/—, Jev's probability, coinciden / solo enrich / solo Jev; both primaries; what Jev read; the post's cost). Filters (con discrepancias, enrich asigna y Jev no, Jev añadiría, primario distinto, Jev eligió «otro», sin evaluar), each listing exactly the posts its report count counts, a topic navigator, search, sort and j/k/n/p keys, all bookmarkable in the URL; photos show once `xbrain generate` has mirrored them; a Topics tab with the vocabulary as a sortable table and, per topic, what enrich and Jev put in each other's place and its posts grouped coinciden / solo enrich / solo Jev; a Comparar tab with the three kinds of disagreement, agreement per topic worst first, the primary topic cross (where enrich and Jev coincide and every pair where they do not, «otro» included) and how sure Jev was on the disagreements by probability band, every number opening its posts; a Configuración tab (read-only) with the `[jev]` settings and defaults, the exact questions Jev is sent and their digest, the vocabulary, what Jev reads of each post and where the cut falls, where each file lives, and an estimate of what the next pass would cost; the three numbers `xbrain jev report` prints, and what Jev has cost — total, per pass from `runs.jsonl`, and per post. Computes nothing in the browser. Also free. `xbrain generate` links it from `_index.md` once the page exists. |
+| `jev serve` | Serve the `jev dashboard` page **live on 127.0.0.1** (default port 8765, `--port N`; opens the browser unless `--no-open`), drawn from the files on each load, with evaluate buttons on its cards, topics and Comparar lists (a corner panel shows the estimate and «Evaluar y pagar ~X $», then the progress with «Parar (se guarda lo ya pagado)», then redraws the page in place), over a local JSON API to run a topics pass over chosen posts: `POST /api/topics/estimate` for a pick (some posts, a topic, the next N without a current answer, the posts behind a pair or a confidence band; `force` re-asks current answers) answers how many posts, how many skipped and what it would cost by the mean of the answers already paid for, plus a one-time confirmation; `POST /api/topics/evaluate` with it starts ONE background job running the same pass as `jev topics` (backup, checkpoints, `runs.jsonl`), `GET /api/job` follows it and `POST /api/job/cancel` stops it softly. The **Preguntar** tab asks the corpus the same way (`POST /api/ask/estimate|evaluate`: a query plus `jev ask`'s pre-filters — the topics as a multi-select, each with its post count under the other filters from `GET /api/ask/counts` — planned, run and finished by `jev ask`'s own functions; the same panel, «Preguntar y pagar ~X $», the same job slot), lists every query asked with its results as the post cards ranked by probability (the first `[jev].ask_top`, «Ver más» for more, each with a probability bar; while an ask runs they fill in and re-rank live — `GET /api/job?since=<cursor>` — each new post landing in its ranked place, «nuevo» when it lands above a card already shown, the reader's place held, one sticky status line with «Parar» instead of a progress bar, and every X slot showing the saved copy until X answers), refined for free — top, minimum, topics, days, author, kept in the URL hash — over the saved answers (`GET /api/asks`, `GET /api/ask/<sha>`; reopening costs nothing), and in the static `jev.html` shows the history and saved results without a way to launch. Each job is capped by `[jev].serve_max_usd`: refused above it by estimate, and no post is sent that would take spent + reserved past it. Loopback only; every POST needs the page's per-start token and this server's `Origin`, every request this server's `Host`. The pass lock (`data/jev/.lock`) keeps it and a terminal `jev topics` or `jev ask` from running at once. Ctrl-C waits for the calls in flight, saves and logs them, and exits 130. Costs nothing until a job is confirmed; the job needs `TYPESAFE_API_KEY`. See [docs/jev.md](docs/jev.md#xbrain-jev-serve--the-page-live-with-a-way-to-ask). |
+| `jev ask "<query>"` | Ask the corpus a question: **Jev** says, post by post, whether each post answers it (one yes/no question per post, the query verbatim as the criterion, over the same evidence as `jev topics`), and prints the results **ranked** — every post with a current answer, best first, never cut at `[jev].threshold` (the topic bar) — the first `[jev].ask_top` (20; `--top N`, `--all`), each with its probability as a number and a bar, post id, author, day, the post and its link; `--min P` keeps only answers ≥ P (default none). Pre-filters decide what is paid for: `--topic` (repeatable, any of them: enrich, or a current Jev answer at `[jev].threshold`), `--since`/`--until` (days), `--author`, `--only-evaluated`, `--limit`. Estimates the cost first as posts × tokens per call + characters ÷ characters per token, fitted on paid answers (`--dry-run` stops there, no key needed), asks for confirmation above `[jev].ask_max_usd` unless `--yes` — without holding the lock, then re-plans under it and refuses if the posts moved. Answers are cached per query in `data/jev/asks/<sha>.json` by contract, so asking again pays only for posts whose evidence changed; `data/jev/asks/index.json` keeps each query's last use; each pass is a `kind: "ask"` line in `data/jev/runs.jsonl` (outside every topics cost view), and what the query has cost is printed after the results. Same pass lock as `jev topics` (exit 75 when busy), checkpoints, Ctrl-C saves and exits 130. **Spends money**: needs `TYPESAFE_API_KEY`. See [docs/jev.md](docs/jev.md#xbrain-jev-ask--ask-the-corpus-a-question). |
+| `jev asks [N\|sha]` | List the queries asked with `jev ask`, newest first, each headed `N. <sha8> «query»` (what `jev asks N` and `jev asks <sha>` take): when, how many times, their last use (answers, the minimum and how many reach it when one was set, filters) and what each has cost, summed from `runs.jsonl`. With a query (`jev asks 1`, or a sha prefix), reprint its saved results refined — `--top N`/`--all`, `--min`, `--topic` (repeatable), `--since`, `--until`, `--author` — with no client and no cost. Reads only; free. |
 | `generate` | Render the wiki into the vault. Renders a localized **verification badge** (❌ FAIL / ⚠️ REVIEW; a PASS is left unbadged) under a summary / topics / video-digest **only when its stored verdict is still current** — it recomputes the sha256 fingerprint of the item's current output and badges only on a match, silently skipping a **stale** verdict (the output was re-generated since it was judged). So a FAIL whose output was fixed afterwards never shows a ❌. |
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
@@ -1421,7 +1469,26 @@ xbrain/
 │   ├── i18n.py           # the wiki's own UI strings, keyed by output language
 │   ├── generate.py       # render item notes + topic notes + index + log + dashboard.html
 │   ├── dashboard.py      # build the self-contained interactive dashboard.html
-│   ├── resources/        # dashboard.template.html + the vendored echarts.min.js
+│   ├── jev/              # `xbrain jev`: the Jev (TypeSafe) second opinion on topics
+│   │   ├── client.py     #   the vendor-free seam: questions, answers, JevClient
+│   │   ├── typesafe.py   #   the ONLY module that imports the TypeSafe SDK
+│   │   ├── models.py     #   TopicAssessment / PrimaryChoice / JevRun / Ask* — frozen, extra-forbid
+│   │   ├── defaults.py   #   the [jev] defaults, the price table, the ONE cost sentence
+│   │   ├── env.py        #   TYPESAFE_API_KEY from the environment, else <repo>/.env; the --dry-run key line
+│   │   ├── questions.py  #   one Noul per topic + the primary Choice, canonically ordered
+│   │   ├── assess.py     #   item → state → ask → parse → stamp the contract
+│   │   ├── run.py        #   run_pass: THE paid pass (checkpoint, save, run log); run_topics / run_ask
+│   │   ├── ask.py        #   jev ask: one Noul per post, filters, cache, estimate, results, history
+│   │   ├── lock.py       #   data/jev/.lock: one paid pass at a time, from load to save
+│   │   ├── picks.py      #   TopicsPick / AskPick: what a request may ask a pass about
+│   │   ├── service.py    #   `jev serve` without HTTP: per-kind estimate → confirm → ONE job, the cap
+│   │   ├── serve.py      #   `jev serve`'s HTTP: 127.0.0.1 only, routes and guards
+│   │   ├── errors.py     #   ServeError / refuse: how the server refuses a request
+│   │   ├── store.py      #   data/jev/topics.json (a side-car; items.json is never written), runs.jsonl, asks/
+│   │   ├── load.py       #   the ONE loader of store + vocabulary + side-car for every reader
+│   │   ├── report.py     #   the ONE comparison against `enrich`, at a threshold
+│   │   └── dashboard.py  #   the jev.html blob (same template mechanism as dashboard.html), asks included
+│   ├── resources/        # dashboard.template.html (+ vendored echarts.min.js) + jev.template.html
 │   ├── notes_io.py       # shared markdown helpers
 │   └── gate_audit.py     # does the `quality` gate DO what it reports? (pure; called by CI)
 ├── scripts/
@@ -1474,6 +1541,7 @@ client. Respect X's Terms of Service.
 | [docs/tutorial.md](docs/tutorial.md) | **Start here** — end-to-end walkthrough from install to a searchable wiki. |
 | [docs/digest-video.md](docs/digest-video.md) | Worked example: turn a bookmarked talk into transcript + slide notes. |
 | [docs/knowledge-index.md](docs/knowledge-index.md) | Operating the search index: when to rebuild, measured cost, and what the lexical baseline cannot do. |
+| [docs/jev.md](docs/jev.md) | The Jev second opinion: setup, a daily loop, reading the report and the page, and what it refuses to do. |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common failures & fixes (auth, PATH, digest-video, index, iCloud). |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How XBrain is shaped: pipeline stages, artifacts, rubrics, executors, invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — including PRs written with AI agents. |
@@ -1484,4 +1552,4 @@ code. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-*Last updated: 2026-09-12*
+*Last updated: 2026-09-27*

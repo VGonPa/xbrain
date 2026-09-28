@@ -1,0 +1,211 @@
+"""The `[jev]` defaults, the per-provider input price, and the ONE way to price a run.
+
+`config.py` imports the defaults rather than retyping them (rule 5): a literal in the loader
+would be a second definition that drifts the day this one moves, and nothing would go red
+because each file stays internally consistent. Consumers read `cfg.jev_*` and never
+re-declare one.
+
+The pricing helpers live here for the same reason. `xbrain jev topics` reports what a run
+cost and `xbrain jev report` reports it again; a formula inlined at each call site is two
+definitions of the bill, and the one that drifts is the one nobody re-derives. Every consumer
+calls these — none re-implements `tokens / 1e6 * rate`.
+
+The RENDERING lives here too, for the third time the same argument: `jev_cost_fragment` is the
+one Spanish sentence that quotes a bill. Three call sites used to format it themselves and
+printed the same side-car as `~0.000 $` and `~0.0001 $`, with the unpriced marker worded two
+ways — a recap that disagrees with the bill it recaps.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Protocol
+
+
+class Billed(Protocol):
+    """A paid answer as the bill reads it — a topics `TopicAssessment` or an ask
+    `AskAssessment`: who answered, and how many input tokens it reported (`None`: unknown).
+
+    A Protocol rather than the models, so this module stays importable without pydantic:
+    `config.py` imports it during `load_config`, which every command pays for."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def input_tokens(self) -> int | None: ...
+
+
+#: A moving alias on purpose: TypeSafe's updates are allowed to reach us, and every stored
+#: assessment records the concrete `model` the API answered with.
+DEFAULT_MODEL = "jev-latest"
+#: A topic counts as "backed by Jev" at or above this probability.
+DEFAULT_THRESHOLD = 0.85
+#: The escape option of the primary-topic Choice: "a topic not in the vocabulary".
+DEFAULT_FALLBACK_OPTION = "otro"
+#: Requests in flight.
+DEFAULT_CONCURRENCY = 8
+#: Evidence text is cut here; assessments record the pre-cut length and `truncated`.
+DEFAULT_STATE_CHAR_LIMIT = 100_000
+#: The most one job started through `xbrain jev serve`'s API may cost, in USD. The server
+#: refuses a job whose estimate is above it, and reserves each post's expected cost before
+#: sending, so it stops sending before the cap; the bill passes it only by what the posts in
+#: flight cost above their reservation. The terminal's `xbrain jev topics` has no cap: its
+#: operator chose the selection on the command line.
+DEFAULT_SERVE_MAX_USD = 1.00
+#: Above this estimate, in USD, `xbrain jev ask` asks before spending (`--yes` skips the
+#: question). A query over the whole corpus is ESTIMATED at ~0.18 $ (`docs/jev.md`, from the
+#: 2026-09-22 corpus figures), so the default lets a whole-corpus ask through and stops a larger
+#: one (a far longer query, a grown corpus).
+DEFAULT_ASK_MAX_USD = 0.25
+#: How many of a query's results are shown at first: `xbrain jev ask` prints this many
+#: (`--top N`, `--all`), the Preguntar tab shows this many and adds as many with «Ver más».
+#: Results are RANKED by probability, never cut by `[jev].threshold` (a topic-membership bar
+#: that a yes/no to an open question rarely reaches).
+DEFAULT_ASK_TOP = 20
+#: The provider the CLI builds (`typesafe.PROVIDER` is this constant): what a call not yet
+#: made will be billed as, so an estimate is priced without importing the vendor SDK.
+DEFAULT_PROVIDER = "typesafe"
+#: THE PRIOR of `jev ask`'s cost model, `tokens = posts × per_call + chars / chars_per_token`,
+#: used until paid ask answers of two different sizes let `ask.cost_model` fit both terms.
+#: From a fit over 293 real topics answers (2026-09-27, `docs/jev.md` § Estimate): about 1,050
+#: fixed tokens per call beyond the questions, and 4.3 characters per token on the evidence —
+#: rounded to 1,000 and a lower 4.0, which leans towards more tokens on long posts.
+DEFAULT_ASK_TOKENS_PER_CALL = 1_000
+DEFAULT_CHARS_PER_TOKEN = 4.0
+#: THE `[jev]` keys `config.toml` accepts, each with its default, in the order the
+#: Configuración tab lists them. `config.py` refuses any other key by this list, and the page
+#: states each one's value next to this default — one list, so a new key cannot reach the
+#: loader without reaching the page.
+JEV_DEFAULTS: dict[str, str | float | int] = {
+    "threshold": DEFAULT_THRESHOLD,
+    "model": DEFAULT_MODEL,
+    "fallback_option": DEFAULT_FALLBACK_OPTION,
+    "concurrency": DEFAULT_CONCURRENCY,
+    "state_char_limit": DEFAULT_STATE_CHAR_LIMIT,
+    "serve_max_usd": DEFAULT_SERVE_MAX_USD,
+    "ask_max_usd": DEFAULT_ASK_MAX_USD,
+    "ask_top": DEFAULT_ASK_TOP,
+}
+
+#: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model
+#: version it is quoted for, its source and its date live once in `docs/jev.md` § Vendor
+#: facts — update that table and this literal together, and restate neither anywhere else.
+#: It is a PER-VERSION list price while `[jev].model` defaults to the moving `jev-latest`
+#: alias, so any figure derived from it is an ESTIMATE, not a bill. Assessments record the
+#: concrete model that answered, so a report can always say what it priced.
+INPUT_USD_PER_MTOK: dict[str, float] = {"typesafe": 0.042}
+
+
+def input_tokens_total(assessments: Iterable[Billed]) -> tuple[int, int]:
+    """`(counted_tokens, records_without_count)` over `assessments`.
+
+    The second number is not decoration. `input_tokens` is `None` whenever the provider
+    reported no usage, which is a documented real behaviour — and folding that into 0 turns
+    a run that was paid for into a run that reports itself as free. The caller shows the
+    count so the first number is read as "at least this much", never as the whole bill.
+    """
+    counted = 0
+    unknown = 0
+    for assessment in assessments:
+        if assessment.input_tokens is None:
+            unknown += 1
+        else:
+            counted += assessment.input_tokens
+    return counted, unknown
+
+
+def tokens_cost_usd(tokens: float, provider: str) -> float:
+    """Estimated USD for `tokens` input tokens answered by `provider` — THE price formula.
+
+    Every bill in the package goes through here: a stored assessment (`input_cost_usd`) and a
+    pass in the run log (`report.run_history`) alike. Two formulas would let a price
+    correction reprice one history and not the other. A provider absent from
+    `INPUT_USD_PER_MTOK` prices at 0.0 and is NAMED by the caller (`unpriced_providers`).
+    """
+    return tokens / 1e6 * INPUT_USD_PER_MTOK.get(provider, 0.0)
+
+
+def input_cost_usd(assessments: Iterable[Billed]) -> float:
+    """Estimated USD for the INPUT tokens of `assessments`, priced PER RECORD.
+
+    Per record, by the provider that ANSWERED it, never one rate for the batch: `assessed`
+    may mix providers, and each record carries its own. A provider absent from
+    `INPUT_USD_PER_MTOK` contributes 0.0 rather than borrowing another vendor's rate — an
+    invented rate reads as a bill, and that is the worse error. Because 0.0 renders
+    identically to a genuinely free run, callers pair this with `unpriced_providers` and
+    NAME them; the number alone cannot say "unknown".
+
+    An ESTIMATE, not a bill: `INPUT_USD_PER_MTOK` is a per-version list price while
+    `[jev].model` defaults to a moving alias, and records without a token count contribute
+    nothing they cannot prove (see `input_tokens_total`).
+    """
+    # `float(...)`: `sum()` over an empty iterable returns `int 0`, and a function annotated
+    # `-> float` that sometimes returns an int makes every caller remember the cast — or ship a
+    # JSON key whose type changes with the contents of the side-car.
+    return float(
+        sum(
+            tokens_cost_usd(assessment.input_tokens or 0, assessment.provider)
+            for assessment in assessments
+        )
+    )
+
+
+def unpriced(providers: Iterable[str]) -> tuple[str, ...]:
+    """The distinct `providers` that `INPUT_USD_PER_MTOK` cannot price — THE definition.
+
+    Sorted and de-duplicated so the operator-facing line is stable across runs: this is
+    what turns a bare `~0.0000 $` into "0.0000 because nobody prices this judge". Every
+    other module asks here instead of reading the price table.
+    """
+    return tuple(sorted({p for p in providers if p not in INPUT_USD_PER_MTOK}))
+
+
+def unpriced_providers(assessments: Iterable[Billed]) -> tuple[str, ...]:
+    """`unpriced` over the providers that answered `assessments`."""
+    return unpriced(a.provider for a in assessments)
+
+
+def plural(count: int, singular: str, plural: str) -> str:
+    """`count` with its noun agreed. Spanish agrees at 1 ONLY — "0 evaluaciones" is plural.
+
+    One helper rather than a conditional per string: the count-bearing strings in this package
+    are operator-facing Spanish, and "1 evaluaciones guardadas" in the line that reports what a
+    run cost reads as a bug in the counting, not in the grammar.
+
+    It lives HERE rather than in `cli.py` because the markdown report needs the same rule and
+    must not import the CLI; a second copy is a second rule, and the one that drifts is the one
+    nobody re-reads.
+    """
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def jev_cost_fragment(tokens: int, unknown: int, cost_usd: float, unpriced: Iterable[str]) -> str:
+    """`N tokens de entrada (+K sin recuento) (~X $ · proveedor sin tarifa: a, b)`.
+
+    THE ONE SENTENCE THAT QUOTES A BILL. `xbrain jev topics` reports what a run cost, and
+    `xbrain jev report` and `topics-report.md` recap the same side-car; a recap that prints a
+    different figure from the bill it recaps is the one thing a recap must not do. Formatting
+    it at each call site produced exactly that — `~0.000 $` against `~0.0001 $` for one run.
+
+    FOUR decimals, never three. At `0.042 $/MTok` the numbers are small — measured, a whole
+    corpus is ~0.65 $ and a single item ~0.00025 $ (`docs/jev.md`, the one place the rate and
+    the measurement live) — so three decimals round a partial run to `~0.000 $`: a bill that
+    reports itself as free. A smoke run of twenty items is exactly that shape.
+
+    The two parenthetical markers exist because a bare `~0.0000 $` cannot say which zero it is.
+    A record whose provider reported no usage (`input_tokens is None`, a documented real
+    behaviour) contributes nothing it can prove, so without `(+K sin recuento)` a fully paid run
+    reports itself as free. A provider absent from the price table contributes 0.0 rather than
+    borrowing another vendor's rate — an invented rate reads as a bill, and that is the worse
+    error — so it is NAMED, not counted.
+    """
+    line = plural(tokens, "token de entrada", "tokens de entrada")
+    if unknown:
+        line += f" (+{unknown} sin recuento)"
+    cost = f"~{cost_usd:.4f} $"
+    names = list(unpriced)
+    if names:
+        noun = "proveedor sin tarifa" if len(names) == 1 else "proveedores sin tarifa"
+        cost += f" · {noun}: {', '.join(names)}"
+    return f"{line} ({cost})"

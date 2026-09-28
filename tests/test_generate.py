@@ -1,4 +1,5 @@
 # tests/test_generate.py
+import ast
 import os
 import shutil
 import time
@@ -15,6 +16,7 @@ from xbrain.models import (
     Item,
     Link,
 )
+from tests.test_knowledge_seams import _import_bindings, _parse
 from xbrain.notes_io import note_filename, slugify
 
 
@@ -1997,3 +1999,144 @@ def test_dataless_detection_is_false_where_the_platform_has_no_flags():
         st_mtime_ns = 0
 
     assert _is_dataless(_NoFlags()) is False
+
+
+# --------------------------------------------------------------------------- jev.html link
+
+
+def _index_rows(index: str) -> list[str]:
+    """The `- ` rows of `_index.md`'s `## Índices` section, in order.
+
+    Scoped to the SECTION, not to the file: a whole-file substring check passes when the row
+    exists anywhere, including after the topic list, and the two browser-page rows sitting
+    together under `## Índices` is the entire reason `_browser_page_lines` exists.
+    """
+    section = index.split("## Índices", 1)[1].split("\n## ", 1)[0]
+    return [line for line in section.splitlines() if line.startswith("- ")]
+
+
+def _browser_rows(vault: Path, *, jev: bool) -> list[str]:
+    """The rows `## Índices` must carry, spelled out — label, text and absolute `file://`.
+
+    Written here rather than imported from `generate` so the test asserts the SHIPPED text
+    instead of re-deriving it from the code under test, which would agree with any rename.
+    """
+    rows = [
+        "- [[log|Log cronológico completo]]",
+        f"- [📊 Dashboard interactivo]({(vault / 'dashboard.html').resolve().as_uri()})"
+        " — métricas, drill-down y enlaces (se abre en el navegador)",
+    ]
+    if jev:
+        rows.append(
+            f"- [🔍 Jev · topics]({(vault / 'jev.html').resolve().as_uri()})"
+            " — segunda opinión sobre los topics, frente a `enrich` (se abre en el navegador)"
+        )
+    return rows
+
+
+def test_index_links_jev_html_when_the_page_exists(tmp_path: Path):
+    """`jev.html` is linked from `_index.md` by absolute `file://`, like `dashboard.html`.
+
+    The page is written by `xbrain jev dashboard`, never by `generate`, so the only thing
+    `generate` can know about it is whether it is on disk — which is why the link is
+    conditioned on existence rather than emitted always. An unconditional link would point
+    at a file that does not exist for every user who never runs the Jev side-car.
+
+    The assertion is the whole `## Índices` row list, in order. Pinning only the href let
+    two real regressions through: the row moving out of the section entirely, and the label
+    changing. It is also the first assertion in the suite to pin the DASHBOARD row, whose
+    parity with this one the docstring above claims.
+    """
+    (tmp_path / "jev.html").write_text("<html></html>", encoding="utf-8")
+
+    generate({"1": _item("1", with_link=True)}, tmp_path)
+
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert _index_rows(index) == _browser_rows(tmp_path, jev=True)
+
+
+def test_index_omits_the_jev_link_when_the_page_was_never_written(tmp_path: Path):
+    """No side-car, no link. A dead `file://` in the index is worse than no entry at all:
+    Obsidian opens the browser on a page that does not exist, and the reader cannot tell
+    that from a page that failed to render.
+
+    The assertion is on the ROW LIST, not on the filename. An unconditional link would
+    render its `None` href as the literal `(None)` — no `jev.html` anywhere in the file —
+    so a filename-only check passes over exactly the bug it was written to catch. Scoping
+    it to the section also keeps it honest on a corpus whose topic slugs contain "jev".
+    """
+    generate({"1": _item("1", with_link=True)}, tmp_path)
+
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert _index_rows(index) == _browser_rows(tmp_path, jev=False)
+    assert "jev.html" not in index
+
+
+def test_the_index_is_byte_identical_across_runs_with_and_without_the_jev_page(tmp_path: Path):
+    """`generate` is deterministic, and the jev row does not make it less so.
+
+    The row's href is built with the same `.resolve().as_uri()` as the dashboard's, so a
+    re-run must reproduce the file exactly; and deleting `jev.html` must return the index
+    to its earlier bytes rather than to something merely equivalent. That round trip is
+    what "it self-heals on the next `generate`" means, and nothing pinned it.
+    """
+    store = {"1": _item("1", with_link=True)}
+    page = tmp_path / "jev.html"
+    index = tmp_path / "_index.md"
+
+    generate(store, tmp_path)
+    without_jev = index.read_text(encoding="utf-8")
+
+    page.write_text("<html></html>", encoding="utf-8")
+    generate(store, tmp_path)
+    with_jev = index.read_text(encoding="utf-8")
+    generate(store, tmp_path)
+    assert index.read_text(encoding="utf-8") == with_jev
+
+    page.unlink()
+    generate(store, tmp_path)
+    assert index.read_text(encoding="utf-8") == without_jev
+
+
+def test_generate_does_not_import_the_jev_package():
+    """`generate.py` links the Jev page without depending on the Jev layer.
+
+    The wiki renderer is the mechanical end of the pipeline and runs for every user; the
+    Jev side-car is an optional, paid second opinion. An import would make the renderer
+    load — and fail with — a layer it only ever needs the FILENAME of. The link is a path
+    check, and this pins it.
+
+    TWO MATCHERS, because neither alone covers the four ways to write the import.
+    `_import_bindings` (reused from `test_knowledge_seams`, so relative imports resolve the
+    way the rest of the repo's seam battery resolves them) answers "what name does this
+    module bind, and to what": it catches `from xbrain.jev… import x`, `from xbrain import
+    jev` — the idiom this repo actually uses (`cli.py`'s `from xbrain import snapshot`) —
+    and `from .jev import x`. It does NOT catch a plain `import xbrain.jev`, because the
+    name that binds there is `xbrain`, which is the right answer to its question and the
+    wrong one to this test's: the module still gets imported and executed. So the dotted
+    module of every `ast.Import` alias is checked too.
+
+    The module is located through `xbrain.generate.__file__`, so this asserts about the
+    module that was actually imported rather than about a path guessed from the checkout.
+    """
+    from xbrain import generate as generate_module
+
+    source = Path(generate_module.__file__).read_text(encoding="utf-8")
+    tree = _parse("xbrain.generate", source)
+
+    def _forbidden(target: str) -> bool:
+        return target == "xbrain.jev" or target.startswith("xbrain.jev.")
+
+    offenders = sorted(
+        f"{local} -> {target}"
+        for local, target in _import_bindings("xbrain.generate", tree, is_package=False).items()
+        if _forbidden(target)
+    )
+    offenders += sorted(
+        f"import {alias.name}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if _forbidden(alias.name)
+    )
+    assert offenders == []

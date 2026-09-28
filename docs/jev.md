@@ -1,0 +1,1837 @@
+# Jev topic assessment (`xbrain jev`)
+
+XBrain assigns topics to a post in the `enrich` stage: one LLM reads the post and picks
+slugs out of `vocab.yaml`. Nothing checks that work. `xbrain jev` asks a **different model
+family the same question** and puts the two answers side by side.
+
+Jev (TypeSafe AI) is a typed-question model: you give it a `state` and a map of questions,
+and it answers each one with a calibrated probability rather than with prose. For every
+item XBrain asks one yes/no question per vocabulary topic ("is this post about
+*ai-coding*?") plus one pick-one question for the primary topic.
+
+**It is a second opinion, and it never changes the wiki.** The answers land in a side-car,
+`data/jev/topics.json`. Nothing under `xbrain jev` opens `items.json` for writing, no
+verdict is derived, no topic assignment moves, and no note is re-rendered. You can run it,
+read it, and throw it away without touching the corpus.
+
+The same judge also searches: [`xbrain jev ask`](#xbrain-jev-ask--ask-the-corpus-a-question)
+puts a question of yours to every post and returns the posts that answer it.
+
+- [Setup](#setup)
+- [Daily use](#daily-use)
+- [`xbrain jev topics` — what a run does](#xbrain-jev-topics--what-a-run-does)
+- [`xbrain jev report` — reading the comparison](#xbrain-jev-report--reading-the-comparison)
+- [`xbrain jev dashboard` — reading the page](#xbrain-jev-dashboard--reading-the-page)
+- [`xbrain jev serve` — the page, live, with a way to ask](#xbrain-jev-serve--the-page-live-with-a-way-to-ask)
+- [`xbrain jev ask` — ask the corpus a question](#xbrain-jev-ask--ask-the-corpus-a-question)
+- [Staleness: when an assessment stops counting](#staleness-when-an-assessment-stops-counting)
+- [Where the files live, and what protects them](#where-the-files-live-and-what-protects-them)
+- [Vendor facts, with their dates](#vendor-facts-with-their-dates)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Setup
+
+**Before anything else:** `xbrain jev` compares Jev against `enrich`, so it needs a
+vocabulary and an enriched corpus to compare against. Run the normal pipeline
+(`extract → fetch → vocab → enrich`) first — if XBrain is not set up at all, start with
+[the tutorial](tutorial.md). Provisioning a paid credential before that is wasted: nothing
+here can run until the corpus is enriched.
+
+With that in place:
+
+1. Create an API key at <https://console.typesafe.ai/>.
+2. Put it where XBrain looks — the environment first, then `<repo>/.env`:
+
+   ```bash
+   cp .env.example .env     # then paste the key after TYPESAFE_API_KEY=
+   ```
+
+   `.env` is gitignored. Only `TYPESAFE_API_KEY` is read from it; a line may carry an
+   `export` prefix, single or double quotes and a trailing `#` comment, and the **last**
+   assignment wins, as `source` would. An `export TYPESAFE_API_KEY=…` in your shell takes
+   precedence over the file. A blank value counts as no key, so a `.env.example` copied and
+   left unfilled fails as "no key" instead of as an empty string rejected by the API later.
+
+3. Optionally tune `[jev]` in `config.toml`. Every key is optional; these are the defaults,
+   and an unknown key under `[jev]` is refused at load time rather than ignored:
+
+   ```toml
+   [jev]
+   model = "jev-latest"        # a moving alias; each assessment records the model that answered
+   threshold = 0.85            # "backed by Jev" = probability >= threshold
+   fallback_option = "otro"    # the escape option of the primary question
+   concurrency = 8             # requests in flight
+   state_char_limit = 100000   # evidence is cut here; assessments record the pre-cut length
+   serve_max_usd = 1.0         # the most one job started from `xbrain jev serve` may cost
+   ask_max_usd = 0.25          # `xbrain jev ask` asks for confirmation above this estimate
+   ask_top = 20                # results `jev ask` prints / the Preguntar tab shows first
+   ```
+
+Every `[jev]` key is also documented inline in
+[`config.toml.example`](../config.toml.example), next to the defaults.
+
+## Daily use
+
+```bash
+uv run xbrain jev topics --dry-run          # how many items are pending; calls nothing, needs no key
+uv run xbrain jev topics --limit 20         # a small paid smoke run
+uv run xbrain jev topics                    # the whole backlog
+uv run xbrain jev report                    # data/jev/topics-report.{json,md} at [jev].threshold
+uv run xbrain jev report --threshold 0.95   # the same side-car, read more strictly
+uv run xbrain jev dashboard                 # <output_dir>/jev.html at [jev].threshold — open the printed URI
+uv run xbrain jev serve                     # the same page, live on http://127.0.0.1:8765/
+uv run xbrain jev ask "posts con datos sobre creatina" --dry-run   # what a query would cost
+uv run xbrain jev ask "posts con datos sobre creatina"             # the posts that answer it
+uv run xbrain jev asks                      # the queries asked, and what each cost
+```
+
+`jev topics` spends money, and so do `jev ask` and a job started through `jev serve`'s API.
+`report`, `dashboard` and `asks` re-read what was already paid for: no API call, no key needed, no cost, any
+number of times. `jev serve` costs nothing until a job is confirmed.
+
+The full option list:
+
+| Command | Options |
+|---|---|
+| `xbrain jev topics` | `--id TEXT` (repeatable — only these items) · `--limit INTEGER` · `--force` · `--dry-run` |
+| `xbrain jev report` | `--threshold FLOAT` (default `[jev].threshold`) |
+| `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
+| `xbrain jev serve` | `--port INTEGER` (default 8765; 0 = any free port) · `--no-open` (do not open the browser) |
+| `xbrain jev ask QUERY` | `--topic` · `--since` · `--until` · `--author` · `--only-evaluated` · `--limit` · `--min` · `--top` · `--all` · `--yes` · `--dry-run` ([details](#xbrain-jev-ask--ask-the-corpus-a-question)) |
+| `xbrain jev asks [N\|SHA]` | no argument: lists the queries asked (each as `N. <sha8> «query»`) and what each cost · with `N` or a sha prefix, reprints that query refined: `--top` · `--all` · `--min` · `--topic` · `--since` · `--until` · `--author` ([details](#history-and-what-a-query-has-cost)) |
+
+Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed, a busy
+port, a `jev ask` confirmation answered no) · **75** `jev topics` or `jev ask` refused because
+another pass holds the lock (EX_TEMPFAIL: nothing is wrong but the timing; a script can
+retry) · **130** interrupted with Ctrl-C (`jev topics`, `jev ask`, and `jev serve` when you
+stop it).
+
+**One pass at a time.** `jev topics`, `jev ask` and a job started through `jev serve` all hold
+`data/jev/.lock` from the moment they read the side-car to the moment they have saved it. A
+second pass started meanwhile is refused before it reads anything or spends anything, and
+the message says who holds the lock:
+
+```text
+Error: otra pasada de Jev está en curso (xbrain jev serve · pid 4242 · desde 2026-09-27T10:12:03+00:00): espera a que termine y vuelve a lanzarla. Candado: data/jev/.lock
+```
+
+`--dry-run` only reads, so it neither takes the lock nor waits for it — and so, while a pass
+is running, its count is a snapshot that the pass is about to change. The lock is a kernel
+lock on the file (`flock`): a pass that crashes or is killed releases it with its process, so
+there is never a stale lock to delete by hand. After a clean pass the file is empty; after a
+crash it still carries the dead pass's line (command · pid · since), which means nothing
+while no process holds the lock — the next pass overwrites it.
+
+## `xbrain jev topics` — what a run does
+
+### It tells you what it selected, before it spends anything
+
+Every run opens with one line that accounts for every item it considered, not just the part
+it is about to ask:
+
+```
+20 items por evaluar · 1169 vigentes · 8 sin evidencia · 1412 fuera del límite (1169 evaluaciones guardadas)
+```
+
+Four of the five counts partition the **candidate set** — `20 + 1169 + 8 + 1412 = 2609` here,
+which is the whole corpus because no `--id` was given — so an empty selection caused by a
+regression in the evidence layer can never look like a clean "everything is up to date".
+With `--id a --id b` the candidate set is those two items and the line sums to 2.
+
+- **por evaluar** — items this run will ask about.
+- **vigentes** — items whose stored assessment still describes today's question (skipped).
+- **sin evidencia** — items with nothing to send. `evidence_surfaces` found no text.
+- **forzados** *(a sub-count of `por evaluar`, not a fifth segment)* — appears only under
+  `--force`: selected items whose assessment was *still current* and is being re-asked
+  anyway. This is the segment that says "you are about to re-pay for work you already had",
+  and it is why a `--force` line can look like it sums to more than the corpus. When it is
+  non-zero the run also copies the side-car first and prints
+  `Copia de seguridad: data/jev/topics.<UTC stamp>.bak`
+  ([the side-car section](#where-the-files-live-and-what-protects-them) has the details).
+- **fuera del límite** — evaluable items `--limit` left for a later run. Without it a
+  nightly `--limit 200` cannot tell you whether the backlog is draining or growing.
+
+`items por evaluar` and the parenthetical side-car total are always printed; the other
+segments appear only when they are non-zero, so the common line stays short.
+
+`--dry-run` stops there and adds one line — including whether a key is configured, so a
+green dry-run is not followed by a real run that dies on the first thing it checks:
+
+```
+--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: configurada
+```
+
+`--dry-run` and an empty backlog never build a client, so neither needs a key. The key is
+checked **before** the SDK is imported, and the SDK is imported inside the command rather
+than at module top: `xbrain --help` never loads the vendor's HTTP stack.
+
+### It asks once per item, in parallel
+
+One call carries every question about one post: one yes/no (`topic__<slug>`) per vocabulary
+topic, in slug order, plus one pick-one (`primary`) over every slug with the fallback
+offered last. `[jev].concurrency` calls are in flight at a time. Progress prints every 50
+items and at the end:
+
+```
+  50/2609
+```
+
+### It never loses what it paid for
+
+- **A per-item failure is recorded, never dropped.** The run continues; the first ten
+  failures are echoed on stderr as `FALLO <id>: <motivo>`, the rest as `… y N fallos más`.
+  Re-running asks only the ones still pending.
+- **A run where every item failed raises** instead of reporting an empty success — a dead
+  key or a dead API is an error.
+- **Records are flushed to disk every 25**, and again at the end. The dict in memory is not
+  durability: a SIGTERM or an unexpected exception would take everything in it.
+- **Ctrl-C saves what was banked.** Queued calls are cancelled deliberately (draining the
+  queue would pay the full bill the interrupt was meant to stop), the banked records are
+  written, and the command exits **130**:
+
+  ```
+  Interrumpido: 43 evaluaciones nuevas guardadas (1212 en total) en data/jev/topics.json
+    258000 tokens de entrada (~0.0108 $)
+  ```
+
+  Under `--force` the noun changes — `Interrumpido: 43 evaluaciones re-evaluadas
+  guardadas (1212 en total) …` — because those records are re-bills of work you already
+  had, not new work. It is the run most likely to be interrupted, for the same reason.
+
+  **43 is this run's new records; 1212 is the file total.** An interrupt that rescued
+  nothing writes nothing at all (`Interrumpido: nada nuevo que guardar`) — saving there
+  would write the unchanged map over the side-car, which on a first run is `{}`.
+- **A save failure names the path and the paid count**, because `[Errno 28] No space left
+  on device` is true and useless on its own.
+
+### It closes with the bill
+
+```
+2583 evaluadas · 18 fallidas · 15498000 tokens de entrada (~0.6509 $) · modelo jev-1.13.0 → data/jev/topics.json
+```
+
+The cost sentence is formatted with a decimal point and no digit grouping — the page's
+own numbers use es-ES formatting, the bill does not, because it is one string produced
+in exactly one place and printed identically by
+`jev topics`, `jev report`, `topics-report.md` and the dashboard, so a recap can never quote a
+different figure from the bill it recaps. Two markers exist because a bare `~0.0000 $`
+cannot say which zero it is:
+
+- `(+K sin recuento)` — K records whose provider reported no token usage. They contribute
+  nothing they cannot prove, so without this a fully paid run reports itself as free.
+- `· proveedor sin tarifa: X` — **inside** the cost parentheses, after the figure
+  (`N tokens de entrada (~X $ · proveedor sin tarifa: a, b)`): a provider absent from the
+  price table. It contributes `0.0` rather than borrowing another vendor's rate, and is
+  **named** rather than counted. `proveedores sin tarifa` for more than one.
+
+The figure is an **estimate**, not an invoice: the rate is a list price for a concrete
+model version while `[jev].model` defaults to a moving alias. See [Vendor facts](#vendor-facts-with-their-dates).
+
+### It logs the pass: `data/jev/runs.jsonl`
+
+The side-car keeps only the **latest** answer per item, so it cannot say what Jev has cost
+over time. Every pass that **sent at least one request** appends one JSON line to
+`data/jev/runs.jsonl` and says so on its last line, after the side-car is saved:
+
+```
+pasada registrada → /…/data/jev/runs.jsonl
+```
+
+A `--dry-run`, a pass with nothing to evaluate, or a Ctrl-C before the first request writes
+nothing. Every count is taken where the calls are made, so an answer counts the moment Jev
+returns it, whatever xbrain does with it next:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `topics` or `ask` (a [`jev ask`](#xbrain-jev-ask--ask-the-corpus-a-question) pass). A line without it reads as `topics` |
+| `query_sha` | an `ask` pass only: which query it paid for (the name of `data/jev/asks/<sha>.json`) |
+| `started_at` · `finished_at` | UTC. The page's history table shows the start, in local time |
+| `requests` | calls xbrain **sent**, each item once. Retries inside the vendor SDK are invisible to xbrain and are not counted |
+| `ok` | answers kept in the side-car — saved to disk |
+| `failed` | calls that raised (a provider error, a 402) plus answers xbrain refused (a malformed answer set) |
+| `unsaved` | answers that came back and never reached the disk: after Ctrl-C in the terminal, those not yet saved when the interrupt landed; on any pass, those whose final save failed (a full disk). Paid, not kept, not failed. A stop of a `jev serve` job waits for every call, so only a failed save leaves any there |
+| `input_tokens_by_provider` · `input_tokens` | tokens of **every** answer that came back — refused and unsaved ones included, because each was billed — per provider, and their sum. Empty and 0 when nothing answered |
+| `input_tokens_unknown` | answers that reported no usage |
+| `models` | the distinct models that answered, sorted |
+| `interrupted` | Ctrl-C, or a `jev serve` job stopped by its cap, by the server or by «Parar» on the page. After Ctrl-C `requests - ok - failed - unsaved` is the number of calls still in flight; after any other stop it is 0 |
+
+It stores **tokens, never dollars**: every report prices the history at read time with the
+same formula the side-car uses, so a price correction reprices every past pass.
+
+The line is written on **every** exit path of a pass that sent something: success, partial
+failure, the all-failed error (a 402 on every call is 20 requests made, and that is history
+too), a side-car that could not be written, and Ctrl-C (exit 130). Writing it can never
+change how the pass ends: if the line cannot be built or appended, or the terminal is gone
+(`| head`), the pass keeps its exit code and its saved records, and the line is printed to
+stderr under `no se pudo registrar la pasada en …; añádela a mano:` so you can append it by
+hand.
+
+**What the log cannot see**, and how it still shows up: a worker that picks up its item
+just after Ctrl-C can send one more call that is never logged, and a pass killed by SIGTERM
+or `kill -9` logs nothing at all. The answers those calls stored are in the side-car with an
+`asked_at` that no logged pass covers, so the reports count and price them as **fuera del
+registro** (see below) instead of dropping them.
+
+**The file protects itself against a torn line.** A crash or a full disk in the middle of a
+write can leave the last line cut short. The next append starts on a new line instead of
+gluing its record onto the fragment, and an append whose write fails is rolled back to the
+file's size before it. A line that does not parse is refused by `jev report` and `jev
+dashboard` with its path and line number, never skipped.
+
+### What a pass actually costs
+
+Measured on this repo's corpus on 2026-09-22 — 2,609 items, 45 topics, `state_char_limit =
+100000`:
+
+| | chars |
+|---|---|
+| Question set, per call (constant) | 20,305 |
+| Evidence per item — median | 788 |
+| Evidence per item — mean / p95 / max | 2,476 / 4,944 / 100,054 |
+| Items cut at the limit | 7 of 2,609 |
+| **One full pass** | **59.4 M** (≈ 15–17 M input tokens, ≈ 6k per item) |
+
+At `0.042 $/MTok` that is roughly **0.63–0.71 $** for the whole corpus, in a few minutes at
+8 concurrent requests. The token figure is a character-count conversion; the authoritative
+number is the one the run itself reports from the provider's usage.
+
+The sample outputs above are built on that ≈ 6k-tokens-per-item figure, so they can be
+re-derived rather than taken on trust: 2,583 assessed + 18 failed + 8 without evidence =
+2,609, and 2,583 × ≈ 6k ≈ 15.5 M tokens ≈ 0.65 $.
+
+**The questions are 89% of that bill, not the evidence.** They are constant per call and
+scale with `[vocab].target_count`, so the cost lever is the size of the vocabulary —
+lowering `state_char_limit` barely moves it, and would cost evidence.
+
+## `xbrain jev report` — reading the comparison
+
+Writes two files under `<data_dir>/jev/` (default `data/jev/`), overwritten on every run:
+
+- `topics-report.md` — what a person reads. Headline numbers, then the tables. `Por topic`
+  carries **every** vocabulary row, worst-backed first; the four queue tables (doubtful,
+  missing candidates, unjudged, primary mismatches) are **deliberately cut** at 20 rows
+  each — the primary mismatches at 20 **per reason**, so that section can carry up to 100
+  rows across its five sub-tables, as its own heading says (`top 20 por motivo`). Every cut
+  table announces the cut (`_… y N filas más (el JSON las lleva todas)._`, italicised in
+  the raw file).
+- `topics-report.json` — what a program reads: `{"summary": {…}, "items": [{…}]}`, one
+  record per compared item, no post text (join on `item_id`).
+
+Both are written atomically, and the JSON first — a program comparing `generated_at` can
+see a mismatched pair, a person reading a stale markdown cannot.
+
+stdout is one line, the same one `jev dashboard` prints:
+
+```
+Umbral 0.85 · 0 caducadas · items comparados 2565/2583 · enrich respaldado 78.4 % · Jev respaldado 61.2 % · dudosas 1204 · sin juzgar 0 · candidatas 3310 · primario coincide 64.1 % · 15498000 tokens de entrada (~0.6509 $)
+→ data/jev/topics-report.md
+→ data/jev/topics-report.json
+```
+
+### `items comparados 2565/2583` — two different populations
+
+The second number is how many stored assessments are **current**. The first is how many of
+those had something to compare against: `compare_item` returns nothing for an item with no
+`Enrichment`, so it is counted as assessed and not as compared.
+
+The gap is therefore the population **Jev has an opinion about that `enrich` has not
+enriched** — normally items extracted since the last `xbrain enrich` run. It is not an
+error and nothing is lost: those items have no JSON record in the report and contribute to
+no bucket. Run `xbrain enrich` and the gap closes on the next report.
+
+Collapsing the two into one number would hide that population entirely, which is why the
+line prints both. A gap that keeps growing across runs means `enrich` is falling behind
+`extract`; a gap that appears suddenly usually means a `vocab --regenerate` cleared the
+enrichments.
+
+### The signals
+
+| Signal | Meaning |
+|---|---|
+| **dudosa** | a topic `enrich` assigned that Jev scored **below** the threshold |
+| **candidata que falta** | a topic Jev scored **at or above** the threshold that `enrich` did not assign |
+| **asignación de Jev** | every topic at or above the threshold — Jev's own proposal, strongest first |
+| **respaldada (enrich → Jev)** | `assigned_backed / assigned_pairs`: how much of `enrich`'s work Jev backs |
+| **respaldada (Jev → enrich)** | `jev_backed / jev_pairs`: how much of Jev's own proposal `enrich` already has |
+| **sin juzgar** | an assigned topic Jev was never **asked** about — a slug that left `vocab.yaml` after the item was enriched |
+| **primario coincide** | Jev's pick-one answer equals `enriched.primary_topic` (never when that primary has left the vocabulary: Jev was not asked about it, even if an old slug is spelled like the fallback Jev answered) |
+| **rango del primario** | the 1-based position of `enrich`'s primary in Jev's distribution, ties broken by option name |
+| **primario = fallback** | Jev answered "none of these": the vocabulary is missing a topic, not a verdict on `enrich` |
+| **primario sin juzgar** | `enrich`'s primary left the vocabulary |
+| **primario sin rango** | Jev was asked about it and then left it out of its own distribution |
+| **truncado** | the evidence exceeded `state_char_limit`; Jev saw a marked prefix |
+
+Three rules worth stating plainly, because each one is a place the number could have lied:
+
+- **`backed + doubtful + unjudged` partition `assigned_pairs`.** Backed is what is left
+  once the other two are removed, never `assigned − doubtful`.
+- **An assigned topic absent from `membership` is `unjudged`, never scored `0.0`.** A
+  fabricated zero would put a topic Jev was never asked about at the top of the "most
+  doubtful" table as the strongest disagreement in the corpus.
+- **The denominators keep counting the awkward cases.** An item with no primary at all
+  counts as not agreeing ("there is nothing to agree with" is not agreement) and stays in
+  the denominator, so a corpus cannot improve its agreement rate by losing vocabulary.
+
+In the markdown, the primary mismatches are **split by reason** — `Sin primario en
+enrich`, `Primario sin juzgar (salió del vocabulario)`, `Jev eligió el fallback`,
+`Primario ausente de la distribución de Jev`, `Desacuerdo real` — and each item appears
+**once**, under the first reason that applies. The headline counters are independent and
+count the same item in two of them if both are true, so the section counts can sum to
+**less** than the headline. That is not a discrepancy, and
+the report says so above the tables.
+
+### The JSON summary
+
+`generated_at` (ISO 8601 UTC) · `threshold` · `items_assessed` · `items_compared` ·
+`items_unassessed` ·
+`assessments_stored` · `assessments_stale` · `assessments_orphaned` · `models` ·
+`providers` · `truncated` · `input_tokens` · `input_tokens_unknown` · `cost_usd` ·
+`unpriced_providers` · `assigned_pairs` · `assigned_backed` · `assigned_unjudged` ·
+`enrich_backed_pct` · `jev_pairs` · `jev_backed` · `jev_backed_pct` · `doubtful_pairs` ·
+`missing_pairs` · `primary_agree` · `primary_agree_pct` · `primary_fallback` ·
+`primary_unjudged` · `primary_unranked` · `posts_with_disagreement` · `posts_enrich_only` ·
+`posts_jev_only` · `posts_primary_differs` · `per_topic` · `topic_confusion` ·
+`primary_confusion` · `confidence_bands`.
+
+`assessments_stored == items_assessed + assessments_stale + assessments_orphaned` — a real
+partition of the side-car, so "0 vigentes" can always be told apart from "0 guardadas".
+`items_unassessed` counts the posts of the corpus with no current answer — never asked, or
+stale — which is what `xbrain jev topics` would ask next (it still skips a post with no
+evidence at all).
+
+Two name pairs collide and are worth reading carefully: `summary.primary_unjudged` is a
+**count of items** while `items[].primary_unjudged` is a **boolean about one item**; and
+the membership-side count is `summary.assigned_unjudged` while the per-item field is
+`items[].unjudged`.
+
+`posts_with_disagreement` counts the compared posts with at least one disagreement — a
+topic enrich assigned that Jev does not back, a topic Jev backs that enrich did not assign,
+or a primary that differs (a post enrich left without a primary counts). The recap line
+prints it as `N posts con desacuerdo`, and the dashboard's "Con discrepancias" count is the same
+number. `posts_enrich_only`, `posts_jev_only` and `posts_primary_differs` split the same posts by
+KIND of disagreement (a post can count in more than one). Each `per_topic` row carries
+`disagreeing` = its `doubtful` + its `missing`: the posts that disagree about that topic.
+Separately, each row also carries `enrich_primary` and `jev_primary`: on how many compared posts
+each side picked it as THE topic (these are not part of `disagreeing`), and `primary_both`: on how
+many both picked it — the diagonal of the primary cross, equal to `enrich_primary` minus the
+`primary_confusion` rows where enrich picked it. `primary_both` summed over the topics is
+`primary_agree`.
+
+`topic_confusion` pairs what each side put INSTEAD. On every post, each topic only enrich has
+(`doubtful`) is paired with each topic only Jev has (`missing`); a post where only one side has
+something pairs it with `null` (enrich put a topic Jev does not back and Jev put nothing in its
+place, or Jev added one without replacing anything). Each row is `{enrich, jev, posts}`, most
+posts first. It is a PRODUCT: a post with two enrich-only topics and two Jev-only topics is in
+four rows. `primary_confusion` is the same shape for the primary: enrich's primary × Jev's
+choice on every post where they differ (`enrich: null` = enrich left no primary; the fallback
+appears as Jev answered it), and its rows' `posts` add up to `posts_primary_differs`.
+
+`confidence_bands` says how sure Jev was on each disagreement, one row per band:
+`{kind, key, label, lo, hi, total, top, pairs, posts}`. The edges are defined once, in
+`report._BAND_SPECS` (cut at the threshold by `report.confidence_bands`): for what enrich
+assigns and Jev does not back (`kind: "enrich_only"`), below 0.2 (`e-lo`, *Jev lo descarta
+claramente*), 0.2–0.5 (`e-mid`, *Jev lo ve poco probable*) and 0.5–threshold (`e-near`, *Jev
+duda: entre 0,5 y el umbral*); for what Jev would add (`jev_only`), threshold–0.95 (`j-near`,
+*Jev lo ve por encima del umbral, sin mucho margen*) and 0.95 and above (`j-hi`, *Jev lo ve
+claramente*). Each band holds its lower edge: a pair at exactly 0.5 is `e-near`, and a pair at
+exactly the threshold is not a doubt — if enrich did not assign it, it is `j-near`; if enrich
+did, the two agree. Only the Jev side's top band holds 1.0; at a threshold of 1.0 it is the
+single point 1.0, and `e-near` ends just below it. A band the threshold leaves no room for is
+left out (at a threshold of 0.4 there is no `e-near`). `total` names the summary field a kind's
+bands add up to (`doubtful_pairs`, `missing_pairs`). `pairs` counts (post, topic)
+disagreements and `posts` the posts they are on, so a post with two doubtful topics in one band
+counts once there. The `label`s are part of the report's contract — they travel in the JSON —
+and are worded for a high threshold like the default 0.85. `jev report`'s markdown prints the
+same bands in a table, *Qué seguro estaba Jev en los desacuerdos*.
+
+The JSON report carries these COUNTS only. The posts behind them live in one index,
+`report.post_sets`, which only the page ships: `cx` and `px` per confusion pair, `pd` per topic
+(the posts where both sides pick it as primary) and `bands` per band. The lists grow with every
+evaluated post, and a report file is for numbers.
+
+Under the recap line, `jev report` prints the run history in the shared cost sentence:
+
+```text
+Histórico: 3 pasadas · 2640 peticiones · 15520000 tokens de entrada (~0.6518 $)
+Histórico: sin pasadas registradas · 20 evaluaciones fuera del registro de pasadas: 125548 tokens de entrada (~0.0053 $)
+```
+
+The recap line prices the side-car (the latest answer per item); this one prices every pass
+the log recorded, re-asks included. A stored answer counts as logged only when its
+`asked_at` falls inside some logged pass. Everything else — answers from before the log
+existed, from a copy of xbrain that does not write it, from a pass whose line could not be
+appended or that was killed — is named and priced at the end
+(`· N evaluaciones fuera del registro de pasadas: …`) instead of being silently left out.
+With no logged pass at all the line says `sin pasadas registradas` rather than quoting a
+`~0.0000 $` that reads as free.
+
+It counts **topics passes only**. When [`jev ask`](#xbrain-jev-ask--ask-the-corpus-a-question)
+has been used, a second line prices its passes in the same sentence, and the topics numbers
+above it do not change:
+
+```text
+Consultas (jev ask): 2 pasadas · 3686 peticiones · 5922640 tokens de entrada (~0.2487 $)
+```
+
+`jev report` reads the run log **before** writing either report: a corrupt line refuses the
+command with the line number, and the previous reports are left alone.
+
+### It refuses rather than overwrite a good report with zeros
+
+A comparison over nothing is not a comparison of zeros — it is a plausible file of zeros
+written over the last good one. So the command checks first, names the missing input, the
+command that fixes it, and the artifact it left alone. `jev dashboard` refuses on the same
+five conditions, naming `jev.html` instead — six lines below, because the last condition is
+shown in both of its number forms:
+
+```text
+Error: el vocabulario está vacío o falta <data_dir>/vocab.yaml: ejecuta `xbrain vocab`. No se sobrescribe <artefacto>
+Error: no hay items que comparar en <items.json>: ejecuta `xbrain extract`. No se sobrescribe <artefacto>
+Error: no hay evaluaciones guardadas en <topics.json>: ejecuta `xbrain jev topics`. No se sobrescribe <artefacto>
+Error: 0 evaluaciones vigentes de N guardadas (S caducadas, H huérfanas): ejecuta `xbrain jev topics` (o revisa <vocab.yaml> si acabas de cambiarlo). No se sobrescribe <artefacto>
+Error: ninguna evaluación vigente tiene con qué compararse: los N items evaluados no están enriquecidos. Ejecuta `xbrain enrich`. No se sobrescribe <artefacto>
+Error: ninguna evaluación vigente tiene con qué compararse: el 1 item evaluado no está enriquecido. Ejecuta `xbrain enrich`. No se sobrescribe <artefacto>
+```
+
+The last refusal appears twice because the whole phrase agrees in number — article, noun and
+verb — so at one item it reads `el 1 item evaluado no está enriquecido`, never `los 1 item
+evaluado no están enriquecidos`.
+
+`<artefacto>` is a full path, and it is the one the command being run would have written:
+`data/jev/topics-report.json` for `jev report`, `<output_dir>/jev.html` for `jev dashboard`.
+
+The fourth is the one that costs money to misread, which is why `caducadas` is printed even
+at zero in every summary line: it is the number that tells "nobody has run `xbrain jev
+topics` yet" apart from "a vocabulary edit just retired every paid record you have".
+
+### What the report does not carry
+
+- **No wall-clock.** Time a pass with `time uv run xbrain jev topics`.
+- **No language split.** To compare agreement on Spanish and English posts, join
+  `topics-report.json`'s `items[].item_id` against `items.json` for `author.handle` and
+  `text`. Nothing in the report carries a language field.
+
+## `xbrain jev dashboard` — reading the page
+
+Writes `jev.html` into the vault's output directory, next to `dashboard.html`. It prints
+the same line `jev report` prints, then how many posts the page carries and where it is:
+
+```text
+2609 posts en el dashboard (293 comparados con Jev) → file:///…/XBrain/jev.html
+```
+
+Open it with `open <uri>`.
+
+**The page is a browser of the whole corpus that shows, post by post, what enrich put and
+what Jev sees, so you can find and fix the wrong topics, and what finding out cost.** It
+compares at `[jev].threshold` (0,85 by default), fixed: there is no control that moves it,
+and the page recomputes nothing. Every number comes from the same `build_report` call
+`xbrain jev report` makes, so the two surfaces always agree; the costs come from the same
+price formula (`report.run_history`, `report.post_cost_view`). The browser only filters,
+searches and orders the posts. To read the side-car at another threshold, use
+`xbrain jev report --threshold`.
+
+Top to bottom:
+
+1. **Header** — the day the page was written (*Actualizado 27 sept 2026*: Python ships the
+   ISO day, the page words it like every other date), the model that answered, *Umbral de
+   topics 0,85* — a link that opens Configuración at the threshold's row, where it is
+   explained — and a link to this document.
+2. **Qué es esto** — a short paragraph on what the page is for.
+3. **Three top tabs**: **Revisar topics** (`#revisar/…`, the default), **Preguntar** (`#ask`)
+   and **Configuración** (`#config`). Everything below, down to the sub-tabs, is inside
+   *Revisar topics*: the cost of asking the corpus is Preguntar's own line, not this strip.
+   The URL keeps the tab and its view, so a view survives a reload; the old `#posts`,
+   `#topics` and `#compare` links still open the same views (the URL is rewritten to
+   `#revisar/posts`, `#revisar/topics`, `#revisar/compare` in place, with no extra history
+   entry). *Revisar topics* returns to the sub-tab and view you left it on.
+4. **Coste y peticiones** — three figures and a folded table:
+   - **Total**: requests, input tokens and dollars across every logged pass. With none
+     logged yet but answers stored, the total is what those answers cost by their own tokens,
+     named as such (*sin pasadas registradas: lo que costaron las N evaluaciones guardadas,
+     estimado por sus propios tokens*); `—`, in ink rather than amber, only when nothing was
+     ever paid (*sin pasadas registradas: aún no se ha pagado nada*).
+   - **Media por post**: what one current stored answer cost on average, labelled
+     `media de K de las N evaluaciones vigentes` — K is how many could be priced (the
+     provider reported usage and has a price). Unpriced providers are named, not averaged in.
+   - **Evaluaciones vigentes**: how many current answers the side-car holds and what exactly
+     those cost.
+   - **Histórico por pasada** (click to unfold): one row per topics pass — an
+     `xbrain jev topics` run or a topics job from `xbrain jev serve` — newest first: start
+     date, requests, ok, failed, tokens, cost, model, and for an interrupted pass how many
+     calls were in flight and how many answers were not saved (a pass whose final save
+     failed shows its unsaved answers too). Asks are billed in the Preguntar tab instead.
+
+   Beside a logged total, answers no logged pass covers are named in one line
+   (`N evaluaciones fuera del registro de pasadas (~X $ según sus propios tokens) …`) and are
+   not added to the total: the side-car keeps only the latest answer per item, so it cannot
+   reconstruct the passes the log missed. If `runs.jsonl` has a line that cannot be read,
+   the strip shows that error (with the line number) in place of the total and the history,
+   `jev dashboard` repeats it on stderr, and the rest of the page renders as usual.
+5. **Three numbers**, each with a one-line explanation and a link to its posts in the Posts
+   tab. This is their one home: every Revisar sub-tab shows them, and Comparar does not repeat
+   them.
+   - *Jev confirma X de Y topics de enrich (Z %)* — enrich's topics that Jev also sees at or
+     above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`); *los
+     otros N* (`doubtful_pairs`) are candidates to remove, and the topics that left the
+     vocabulary are named. *ver los N posts con un topic que Jev no confirma* opens *Enrich
+     asigna y Jev no*.
+   - *Jev añadiría N topics que enrich no puso* — `missing_pairs`; *ver los N posts donde Jev
+     añadiría* opens *Jev añadiría topic*.
+   - *El topic principal coincide en P %* — `primary_agree_pct`, with *En K de N posts
+     comparados…*; *ver los N posts donde no coincide* opens *Primario distinto*.
+6. **Three sub-tabs**: **Posts**, **Topics** and **Comparar**, each described below, with
+   the page-wide *Vista* switch beside them. Preguntar and Configuración are described after
+   them.
+
+### The Posts tab
+
+**Left, the filters.** Seven views of the corpus. *Todos* shows every post (the page's own
+count of them, `totals.items`); the other six are report counts, and each view lists exactly
+the posts its number counts — which posts belong to which view is decided in Python, card by
+card, from the same comparison the report counts:
+
+| View | Lists | Number beside it |
+|---|---|---|
+| *Con discrepancias* (default) | posts with any disagreement | `posts_with_disagreement` |
+| *Enrich asigna y Jev no* | posts with a topic enrich put and Jev does not back | `posts_enrich_only` |
+| *Jev añadiría topic* | posts with a topic Jev backs and enrich did not put | `posts_jev_only` |
+| *Primario distinto* | posts whose primary topic is not Jev's choice | `posts_primary_differs` |
+| *Jev eligió «otro»* | posts where Jev answered "none of these" | `primary_fallback` |
+| *Sin evaluar por Jev* | posts with no current answer, never asked or stale | `items_unassessed` |
+
+Under them, the vocabulary's topics, most disagreement first, each read as *confirma/pone ·
+discrepan* (the list's header), counted over the **compared** posts only: *18/24* — of the
+posts enrich put there (`assigned`), how many Jev confirms (`backed`), in the colour of
+agreement — then how many disagree about it (`disagreeing` = enrich puts it and Jev does not
+back it, plus Jev backs it and enrich did not put it), in the pencil's. One line under the
+header, *Solo los posts comparados, con el filtro de arriba.*, carries the full definition as
+its tooltip. Clicking a topic narrows the
+current view, and a line under it says what the list now counts:
+
+- under *Con discrepancias*, the posts that disagree about that topic — exactly its
+  `disagreeing` number;
+- under *Enrich asigna y Jev no* / *Jev añadiría topic*, that one direction — its `doubtful`
+  / `missing` number;
+- under the other views, every post where enrich or Jev has the topic, including Jev's
+  primary choice, and including posts Jev has not evaluated (enrich's topics). Here the list
+  count (`mostrando N`) is the number to read.
+
+Click the topic again, or its chip above the list, to drop it. On a narrow screen the topic
+list starts folded.
+
+**Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
+card shows **the post through X's own embed** — the post as X shows it, loaded from X when the
+card comes near the screen — under a head of ours with `X ↗`, `nota ↗` and the toggle (X's
+embed already shows the author and date, so the head adds them only on the saved copy). On a
+wide screen Jev's block sits beside the post instead of under it, and stays in view while a
+long post scrolls; on a narrow one it goes under. The embed is a plain frame to X's embed page: X's script never runs in this page,
+where the served page keeps the token that can spend money. X receives the post id and your
+IP (and its own cookies in your browser). It gets no referrer: at most the page's origin
+(`file://` or the local port), never its path or data. See ARCHITECTURE.md (jev · *The X
+embed*).
+
+**The saved copy is always one click away.** *ver copia guardada* on a card swaps X's view for
+the copy XBrain saved (below), and *ver en X* swaps it back. The choice is per post: when the
+same post is on screen twice (Posts and a Preguntar result), both cards follow. The switch
+**Vista: X | copia guardada** beside the sub-tabs, and at the head of Preguntar's results (on a phone, on its own row) sets
+every card at once; this browser remembers it. Opening the page with `?embed=0`
+(`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every card on the
+saved copy. A card shows the saved copy by itself, with one line saying why (*… · se muestra
+la copia guardada*), when:
+
+- the post's id is not an X id (*Sin vista de X: el id de este post no es de X*);
+- the post is an X Article (it links `x.com/i/article/…`): X's view of an Article is only its
+  link, so the card opens on the saved copy (*Artículo de X: la vista de X solo enseña su
+  enlace*); *ver en X* still shows X's view;
+- X has not got the post — deleted, protected or a suspended account (*X no tiene este post*);
+- X did not answer within 8 seconds — no network, X blocked, the file opened offline (*X no
+  respondió en 8 s (¿sin red?)*). *ver en X* tries again.
+
+The saved copy is a share-style preview built from data XBrain already has, with nothing
+fetched from X:
+
+- the whole text (a long one starts folded behind *ver todo*);
+- up to four photos, from the vault's `_media/` folder (the same files the notes embed) by a
+  path relative to the page. A video shows the first extracted frame of **its own** video
+  source with ▶. A picture the page cannot show says why: *falta en _media/: corre xbrain
+  generate* (downloaded, not mirrored yet), *imagen sin descargar*, *la descarga falló*,
+  *el fichero ya no está*, or *vídeo sin fotograma extraído*;
+- the quoted post as a nested card (the same quoted post Jev read, cut at 600 characters),
+  or a *Post citado no disponible* box linking to it on X — saying *no se pudo leer* when a
+  fetch failed, or *sin leer todavía: corre xbrain refresh-quoted* when none was tried;
+- the fetched linked page as a mini card with its domain and kind (`artículo`, or
+  `x_article · página de X` — some of those hold scraped replies rather than an article),
+  marked *no se pudo leer* when the fetch failed, or else the first link in the post;
+- for an X Article, its body as XBrain fetched it, as text (any markup in it is shown, never
+  run), up to 2,000 characters cut at the end of a paragraph or sentence (marked *…*; a body
+  with no space to cut at is cut between two characters, never inside an emoji or an accented
+  letter), folded behind *ver todo*; a cut body ends with *sigue en X ↗* (https) and *nota ↗*
+  (the vault note has the whole article). The bodies add about 0.43 MB
+  to the page (201 Articles, measured 2026-09-27).
+
+Under the preview, **Jev vs enrich**: one row per topic either side has — enrich ✓ or —,
+Jev's probability as a bar (the tick is the threshold) and a number, and the verdict
+*coinciden* / *solo enrich* / *solo Jev* (or *sin juzgar* for a topic that left the
+vocabulary). When Jev's primary choice is a topic no other row names, it gets a row marked
+*primario de Jev*; it is not a separate disagreement (the primary line counts it). Then both
+primary topics, highlighted when they differ, with Jev's probability for its choice; the
+number of discrepancies, the model, when it was asked, and what the answer cost.
+`recortado` means the evidence was longer than `[jev].state_char_limit` and was cut before
+sending: the tweet always goes whole (it leads the state), what was dropped is the tail of
+the other sources.
+
+*Lo que vio Jev* (folded) lists each evidence surface Jev was sent — tweet, author, video
+title, video transcript, video frame descriptions, image descriptions, linked article title
+and body, thread, quoted post — with its size and whether the cut reached it, from the same
+`state_surfaces` split of the state `jev topics` sends. The tweet, the author and the quoted
+post are already on the card, so they point there instead of repeating it; every other
+surface shows at most **600 characters**, and the page says so when one is longer.
+
+A post Jev evaluated but enrich never enriched shows what Jev sees (its topics at the
+threshold and its primary), with nothing to compare. A post Jev has not answered for shows
+enrich's topics, the mark *topics sin revisar por Jev* (*topics revisados con datos antiguos*
+when its answer is stale) — once, in its Jev block; the words name what was not done, so on a
+Preguntar result, whose post Jev did read for the question, they never contradict its score —
+and a **copiar comando** button with the exact line that asks for it:
+`xbrain jev topics --id <id>`. A post with no evidence at all says *sin evidencia* instead,
+because `jev topics` skips it. The page never asks Jev anything.
+
+Search matches text, author, id and topics (slug or label); sort is *más discrepancias*
+(default), *más recientes* or *más caros*. Keys: **j** / **k** next / previous post, **n** /
+**p** next / previous post with a discrepancy. The filter, topic, search and sort live in the
+URL (`#revisar/posts?f=uneval&t=ai-coding&q=…&s=recent`), so a view can be bookmarked and survives a
+reload, including searches with `&`, `+`, `%` or `?`. The page follows the system's light or
+dark theme. If one post cannot be drawn, its card says so in one line and the rest draw.
+
+Below the list, one line names what the numbers leave out: stale and orphaned answers, and
+evaluated posts with no enrichment to compare against.
+
+It is **one file**: the data as a JSON blob in the page, no charting library, no external
+scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
+the vault loses the pictures and nothing else. Two things come off the network: the Google
+Fonts stylesheet, and X's embed for each card near the screen (a frame from
+`platform.twitter.com`; offline, the cards fall back to the saved copy after 8 s). Measured
+2026-09-26 on the real vault (2,609 posts, 293 evaluated):
+**3,799,403 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
+rows and evidence) and ~1.2 KB for the rest. The Topics and Comparar tabs' data is the
+confusion lists and bands (~19 KB of counts) and `post_sets` (~38 KB, ~130 bytes per evaluated
+post: pairs ~23 KB, primary diagonal ~5 KB, bands ~10 KB). With every post evaluated the page
+would be about **7.3 MB**. JavaScript draws everything; without it the page says so.
+
+### The Topics tab
+
+**The index** (`#revisar/topics`) lists the vocabulary's topics with, per topic, the `per_topic` row of
+the report: *Enrich lo pone* (`assigned`), *Jev confirma* (`backed`, at the threshold, which the
+header shows), *Acuerdo* (`backed_pct`, `—` when enrich never put it), *Jev lo añadiría*
+(`missing`), *Discrepancias* (`disagreeing`), and *Principal según enrich / según Jev*
+(`enrich_primary` / `jev_primary`). Each header says what it counts in one line (also the
+tooltip of every cell). Under the table, a line names the posts where Jev chose «otro»: they
+are not in the *Principal según Jev* column.
+
+By default the worst agreement comes first — the report's own order, by the exact ratio — among
+the topics enrich put on **at least 5 posts** (`TOPIC_MIN`, shipped as `topic_min`); the rest
+follow, marked *pocos datos*, since an agreement rate over one or two posts is noise. Clicking a
+header sorts by it (click again to reverse). *Acuerdo* sorts by the exact ratio, never the
+rounded percentage, and topics enrich never put go last in both directions. The URL keeps the
+order (`#revisar/topics?o=disagreeing&d=desc`) without adding a history entry per click, and the back
+link from a topic returns to it. On a phone the headers fold into each row and a drop-down
+offers the same orders.
+
+**A topic's page** (`#revisar/topics?t=<slug>`, bookmarkable) shows its description and numbers, then:
+
+- **Con qué se confunde**: from `topic_confusion`, what Jev put in its place where enrich put
+  this topic and Jev does not back it, and what enrich had where Jev adds it, with how many
+  posts. *nada en su lugar* is a post where the other side put nothing instead. The first eight
+  show; *ver todos* opens the rest.
+- **Topic principal**: from `primary_confusion`, what Jev chose where enrich picked this topic as
+  primary, and what enrich had where Jev picked it. *sin principal* is a post enrich left
+  without one; *(ninguno del vocabulario)* is Jev's «otro»; *(ya no está en el vocabulario)* is a
+  primary enrich chose that has since left `vocab.yaml`.
+- When a side is empty, it says what the row says: *Enrich no lo pone en ningún post comparado*,
+  *Enrich / Jev nunca lo elige como principal*, or that the two always agree.
+- Each row opens exactly its posts, as cards (`#revisar/topics?t=<slug>&cx=<enrich>~<jev>` or `&px=…`,
+  with `-` for "nothing"), scrolled into view; *quitar este cruce* goes back. A pair that does
+  not involve the topic, or no longer exists in these data, says *Ese cruce ya no existe en
+  estos datos* and shows the topic's groups; a post of the pair missing from the page is
+  counted (*N de M posts no están en esta página*). An unknown topic says it is not in the
+  current vocabulary.
+- Otherwise its posts, as the same cards as the Posts tab, in three groups — **Coinciden**
+  (`backed`), **Solo enrich** (`doubtful`), **Solo Jev** (`missing`) — twenty at a time, with
+  buttons that jump to each group.
+
+Links: *ver en Posts* opens the Posts tab on every post with this topic (`#revisar/posts?f=all&t=…`);
+*sus discrepancias en Posts* on the ones that disagree about it (`#revisar/posts?t=…`). On any card, a
+topic's name in the Jev vs enrich rows opens its page, and the Posts rail offers *ficha del
+topic* for the topic it is filtering by. Back and forward move between the index, a topic and a
+pair. If the tab ever fails to draw, it says so inside the tab.
+
+### The Comparar tab
+
+`#revisar/compare` compares Jev's decisions with enrich's in plain words. Every number is a report
+count, and every number opens the posts behind it.
+
+The three headline numbers are above the sub-tabs, with their links (see *Three numbers*);
+this tab does not say them a second time.
+
+1. **Los tres tipos de desacuerdo**: one column per kind with its post count
+   (`posts_enrich_only`, `posts_jev_only`, `posts_primary_differs`), the topic count behind the
+   first two (`doubtful_pairs`, `missing_pairs`), and *ver los posts*. A post can be in more than
+   one, so they do not add up.
+2. **Acuerdo por topic, peores primero**: the ten first topics in the Topics index's default
+   order (worst agreement first among the topics enrich put on at least 5 posts; the rest after,
+   marked *pocos datos*) with *Enrich lo pone*, *Jev confirma*, *Acuerdo* and *Discrepancias*,
+   which opens the Posts tab on the posts that disagree about the topic (`#revisar/posts?t=…`). *ver los
+   N en Topics* opens the full index.
+3. **Cruce del topic principal**: enrich's primary against Jev's. On the left, where they
+   coincide, per topic (`primary_both`); on the right, every pair where they do not
+   (`primary_confusion`), most posts first, with *sin principal* for a post enrich left without
+   one and *«otro» (ninguno del vocabulario)* for Jev's fallback. Ten show; *ver todos* opens
+   the rest (*ver todos (N topics más…)* on the left, *(N cruces más…)* on the right). A row
+   opens exactly its posts (`#revisar/compare?pd=<slug>`, `#revisar/compare?px=<enrich>~<jev>`).
+4. **Jev eligió «otro»**: `primary_fallback`, a link to those posts, and what primary enrich
+   had on them; each of those rows opens its posts under this section, including when it is
+   opened from the cross above. Read it as a likely hole in the vocabulary: a subject no topic
+   covers.
+5. **Qué seguro estaba Jev en los desacuerdos**: the `confidence_bands`, each with its
+   edges written as *probabilidad* at the threshold's own precision (the threshold is the one in
+   the header), its disagreements and its posts; the posts open as cards (`#revisar/compare?b=<key>`).
+
+One list is open at a time. A list opens under its section, as the same cards as the Posts tab,
+twenty at a time, scrolled into view (only when it is a different list from the one already
+open); *cerrar esta lista* goes back. Its heading counts the posts it lists; if the summary's
+count differs, a note says both. A URL naming more than one list opens the band, else the pair,
+else the diagonal, and the tab's URL keeps only that one. A URL naming a band, pair or topic
+these data do not have says *Ese grupo ya no existe en estos datos*; a post of the list missing
+from the page is counted. Leaving the tab and coming back (through the tab link) returns to the
+same list, and the Posts and Topics tabs keep their own views meanwhile.
+
+With stale, orphaned or unenriched answers, a line at the top says what the numbers leave out
+(the same words as under the Posts list). With nothing compared at all — a vocabulary edit that
+retired every answer — the tab says *Ningún post comparado todavía* instead of showing zeros,
+and a share with no base reads *—*, never *0,0 %*.
+
+On the real vault (2026-09-26, 293 evaluated posts) the bands read: of 331 topics enrich put
+that Jev does not back, 53 are below 0.2, 91 between 0.2 and 0.5 and **187 between 0.5 and the
+threshold**. Of the 221 Jev would add, 152
+sit between the threshold and 0.95 and 69 at 0.95 or above.
+
+### The Preguntar tab
+
+`#ask`: what was asked of the corpus with [`xbrain jev ask`](#xbrain-jev-ask--ask-the-corpus-a-question)
+(or from this tab, served), and what came of it. Everything on it is the blob's `asks`
+(`dashboard.asks_view`), built from `data/jev/asks/`: nothing on the tab calls Jev, and
+reopening a query costs nothing.
+
+- **Tus preguntas** (right; below on a narrow screen) opens with what asking has cost, every
+  query together: *Lo que ha costado preguntar: ~X $ en N pasadas y M peticiones* — plus
+  *(+K respuestas sin recuento)* when some answers came back without a token count, as the
+  *Consultas* line says it (`asks.cost`, `report.ask_cost_total` — the same total as `jev
+  report`'s *Consultas* line; *—* and why when `runs.jsonl` cannot be read; *Aún no se ha
+  pagado ninguna pregunta.* when none was). In one column (≤ 900 px, where the history goes
+  under the results) that line opens the tab instead, above the form. Then every query in
+  `data/jev/asks/index.json` (read as `jev ask` reads it: an entry the index lost is rebuilt
+  from its answer file and marked *reconstruida*), the last asked first. Each row has the
+  query, the day, how many of its results its default view shows (*20 de 808 leídos por Jev*;
+  asked with a minimum, *7 de 156 ≥ 0,50 · 808 leídos por Jev*), what its
+  logged passes cost (`report.ask_cost_by_query`; *—* and why when `runs.jsonl` cannot be
+  read), and how many times it was asked. A query whose file cannot be read says `ilegible`
+  and costs only its own row. A history that cannot be read is said above the list.
+- **The query open** (`#ask?q=<sha>`; without it, the last one asked; a sha the history lacks
+  says *Esta consulta no está en el historial*): the query, when it was asked, its filters
+  (*Sin filtros: todo el corpus* when none; several topics read *topics A o B*), its requests
+  and cost, and what the list shows: *Mostrando 20 de 808 leídos por Jev, de mayor a menor
+  probabilidad* — refined, *Mostrando 20 de 156 con relevancia ≥ 0,50 que pasan el refinado ·
+  808 leídos por Jev*. (*Leídos por Jev*: the posts with a current answer — Jev read each one
+  and said how likely it answers the question.)
+  The results are **ranked, not cut**: every post with a current answer, best first (ties by
+  post id), in the order Python ranked them (`ask.saved_results`). `[jev].threshold` is not a
+  results bar — it is the topic-membership bar, and here it only judges the topic filter the
+  query was asked with. (Until 2026-09-27 the results were the answers at or above 0.85; a
+  yes/no to an open question rarely reaches that, and the first real query showed *0 de 808*.
+  Entries written then reopen ranked, for free.)
+  **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers: *Mostrar*
+  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), then
+  pills that each open a small panel and name what is set: *Relevancia* (the minimum; by
+  default the query's `last_min`, set only by `jev ask --min` — none for most), *Topics* (the
+  topics among its answers, as checkboxes, each with how many answers it keeps under the rest of
+  the refine — `askTopicCounts`, the one counting function, tested against Python topic by
+  topic; a topic ticked in the link that no answer is in is still listed, at 0, and named),
+  *Fechas* (presets — every date, the last month, the last three months, this year — or a
+  range; empty means every date, never today) and *Autor* (read like the filter: spaces and a
+  leading `@` dropped, case ignored); **Quitar el refinado** goes back to the defaults. A panel
+  opens with the focus inside, keeps Tab inside, and closes on Escape (focus back on its pill)
+  or a click outside; one left open stays open while the refine redraws the list. It
+  asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
+  computed in Python per result post by `ask.refine_keys` (its day in UTC, its handle by
+  `ask.normalise_author`, its topics by `ask.post_topics`) plus `n`, the size of the state Jev
+  read; an answer that arrives without its keys is named as an error, never dropped. Each
+  query's answers ship as columns (`{ids, p, model, asked_at, exceptions}`: every current
+  answer in Python's ranked order, the model and minute asked once), and the page keeps what
+  `ask.refine_results` keeps — the
+  function `xbrain jev asks N --min … --topic …` prints with. The state is ONE object in the
+  URL hash (`#ask?q=<sha>&top=40&min=0.5&t=a,b&since=…&until=…&author=…`), so a refined view
+  is a link, and it survives a reload; opening a query from the history starts it unrefined, and
+  so does pressing *Preguntar y pagar* (a refine made while it runs stays at the end).
+- **While an ask runs** (served), its results **fill in and re-rank live**. Pressing *Preguntar
+  y pagar* opens the query's results right away (`#ask?q=<sha>`); the answers the query already
+  had are there at once, and each new answer appears **in its ranked place** as Jev gives it —
+  the cards already shown stay as they are (none is drawn again), those pushed past the top
+  make room for «Ver más» — except a card on your screen, which stays (the list is briefly
+  longer) until you scroll past it. A card that lands **above** one already on the list says
+  **nuevo** in verdigris for a few seconds, fading (with reduced motion it does not fade; it
+  just goes); the list's first fill, an answer that only extends its end, and the answers the
+  query already had are not marked. There is no progress-bar phase: the job block is ONE status
+  line under the query's title, above the refine bar and the gallery, and it **stays on screen
+  while you scroll the gallery** (sticky) — *Preguntando… k de N · M muy relevantes (≥ t) ·
+  ~X $ gastado* with **Parar** (what it keeps, «se guarda lo ya pagado», is its tooltip) and
+  **Ocultar**. k of N is posts asked of those to ask; M counts THIS job's answers (not the
+  ones the query already had: the same base as k) at or above `[jev].threshold` — the one bar at
+  which the page reads a Jev probability as «yes» — or at the refine's minimum once one is set,
+  and is left out while it is 0. The gallery says what it shows: *Mostrando S de K respondidos
+  hasta ahora* (*· M con relevancia ≥ min* when a minimum is set, *· R pasan el refinado* when a
+  refine is). The page looks at the job at once, then every second (at once again while more
+  answers wait than one reply carries — only after it took that reply's answers). If you have
+  scrolled into the list, **your place holds**: the first card on screen stays where it is while
+  answers land above it; with the list's top on screen you see them land. The free refine works
+  the whole time, and what you are typing in it is left alone. At the end the SAME list is
+  refilled with the saved results (`finish_ask`'s ranking, the order the terminal prints) — the
+  same order the live list already had, under the same refine: no card is drawn again, nothing
+  under you moves, no progress bar comes back, and the status line becomes one quiet line,
+  *Preguntado: N leídos · M muy relevantes (≥ t) · ~X $ gastado* (an end that was not clean —
+  stopped, the cap, failures — says so in full). A use that kept nothing (stopped before any
+  answer) goes back to what the tab showed before. The history lists the running query at the
+  top with the job's own numbers, *en curso · k de N · ~X $* — never its last use's day, count
+  or cost, nor *reconstruida* (a checkpoint writes the query's answer file before the job's end
+  records the history, so the page's data built mid-run rebuilds that row). A page that meets a
+  job another tab started follows it the same way; if the job it follows ends between two looks
+  and another starts, it reloads the data (the one that ended is in the history) and follows
+  the new one from its start.
+  The results are **recomputed when the page is built**: an answer to a post whose evidence
+  changed since is not a result. They are the **post cards themselves** (the ones in Posts,
+  with their own Jev block), each with a strip on top: *Responde a la pregunta*, the
+  probability as a number and a **bar** (its fill is the probability), the model and when, and
+  **Lo que vio Jev** — the same state a topics pass sends, surface by surface, so it is there
+  for a post topics never asked. Here the question is the context, not the topics audit: the
+  card's Jev block is folded behind one line, *Topics: A, B · 1 discrepancia* (or *· topics sin
+  revisar por Jev*). Where the list is at least 780 px wide, the strip and that fold sit
+  beside the post rather than above and below it. The results head writes dates as the rest
+  of the page does (*Filtros: desde 7 may 2026*). When nothing passes the refine, the tab says so and that
+  changing it is free.
+- **Launching** needs the server. The static `jev.html` says *Para preguntar desde esta
+  página, ábrela con `xbrain jev serve`* and, on its own line, the terminal command (never
+  broken inside a command); served, the tab has
+  the query box and the filters (see [`xbrain jev serve`](#xbrain-jev-serve--the-page-live-with-a-way-to-ask)).
+
+### The Configuración tab
+
+`#config`, read-only: what this page was built with and what Jev is asked. No value on it is
+written into the page's code; each comes from Python in the blob (`config`), so the tab shows
+what `xbrain jev topics` sends as of the last `xbrain jev dashboard`. To change a setting,
+edit `config.toml` and re-run `xbrain jev dashboard`.
+
+1. **Ajustes** — the eight `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
+   `config.toml` is validated against, read through `Config.jev_settings()`), each with the
+   value in effect, its default (*por defecto* or *por defecto: X*), one line on what changing
+   it does (the threshold moves every number but retires nothing; a new fallback retires every
+   answer; a new char limit only the posts whose cut moves; the model and concurrency retire
+   nothing) and its key. Each row can be linked to (`#cfg-<key>`; the header's *Umbral de
+   topics* opens the threshold's). The intro is three short lines, one per kind, then where
+   they change: *Cambian lo que ves en esta página:* the threshold, the fallback, the char
+   limit and `ask_top` (*Resultados que se muestran de una pregunta*); *Se usan en la próxima
+   pasada …:* the model (*Modelo que se pedirá*), the concurrency, `serve_max_usd` (*Tope por
+   trabajo de xbrain jev serve*) and `ask_max_usd` (*Tope sin preguntar de xbrain jev ask*),
+   from the terminal or through `xbrain jev serve`'s API; *Se cambian en config.toml, nunca
+   aquí.* Under the model, the models that answered the
+   current answers, most answers first, and the reminder that a stored answer does not record
+   which model was *requested*. Then the input price per provider from `INPUT_USD_PER_MTOK`
+   (not a config key) and *Los tokens de salida son gratis.*
+2. **Las preguntas exactas** — `build_topic_questions(vocab, fallback)` as sent: one yes/no
+   question per topic (*sí/no por topic = pertenencia, varios posibles*), shown with the first
+   one in wire order and all of them one click away, and the primary-topic choice (*elección =
+   el principal, uno solo; sus probabilidades suman 1*), shown with its escape option and every
+   option one click away. Instructions are English, descriptions verbatim. Below, the
+   questions' sha256 digest (`assess.questions_digest`, the half of each answer's contract that
+   is not the post): when it changes, every stored answer is stale.
+3. **El vocabulario** — every topic of `vocab.yaml` with its slug and description; each name
+   opens its page in the Topics tab.
+4. **Qué ve Jev de cada post** — the evidence surfaces in the order the state carries them
+   (`assess.STATE_SURFACE_KEYS`: the tweet first, then `xbrain.evidence`'s order for target
+   `topics`; `build_topic_state` sorts by it), the cut at `state_char_limit` and the exact line
+   a cut state ends with (`assess.CUT_MARKER`). The tweet goes first, so a cut reaches it only
+   when the tweet by itself is longer than the limit. A link leads to this section.
+5. **Ficheros** — each file by its path under `data/` (`jev/topics.json`, `jev/runs.jsonl`,
+   `vocab.yaml`, `jev/topics-report.json` / `.md`) and `jev.html`, with its absolute path,
+   *(aún no existe: lo crea …)* for one not written yet (the run log appears with the first
+   pass that sends a request), and whether a snapshot of `data/` carries it
+   (`snapshot.is_snapshotted`: only `vocab.yaml` here). Two notes: `data/` is not in git, and
+   Jev's answers and run log are not snapshotted while enrich's `topics.json` and `vocab.yaml`
+   are; re-doing `jev/topics.json` costs money and `snapshot restore` does not bring it back.
+6. **Coste de una pasada (estimación)** — the mean input tokens and dollars per current answer
+   (`report.post_cost_view`, the cost strip's own; when the two means average different
+   answers, the line says both counts), times the posts `xbrain jev topics` would ask now
+   (`assess.select_items`, the `--dry-run` count: never asked or stale, with evidence) and
+   times every post with evidence (as if everything were asked again), by
+   `report.estimate_selection`. An estimate at list price, labelled as such; `—` when no answer
+   has a token count to average, and the dollar figures say so when a provider has no price.
+
+If the tab ever fails to draw, it says so inside the tab (and logs the error to the console).
+
+**Limitation.** An assessment records the model that *answered*, never the one *requested*;
+the run log does not record it either. So the tab cannot say which `[jev].model` produced the
+stored answers.
+
+Two more things the page cannot tell you itself:
+
+- The **`nota ↗` deep link appears only for notes that exist** on disk, and photos only for
+  files already mirrored into `_media/`. `jev dashboard` runs independently of `xbrain
+  generate`, so run `generate` first or expect only `X ↗` and placeholders that say
+  *falta en _media/*.
+- It is **static**. It goes stale the moment the side-car, the run log, the corpus or
+  `vocab.yaml` moves. `dashboard.html` and `jev.html` are siblings — same directory, same
+  template mechanism, same visual language — but different commands write them and neither
+  regenerates the other. Re-run `xbrain jev dashboard` to refresh, or use `xbrain jev serve`,
+  which draws the page from the files each time you load it.
+
+`xbrain generate` links `jev.html` from `_index.md` by absolute `file://` URI, exactly as
+it links `dashboard.html`, **but only when the page is already on disk**: the link appears
+after your first `xbrain jev dashboard`, on the next `generate`.
+
+## `xbrain jev serve` — the page, live, with a way to ask
+
+```bash
+uv run xbrain jev serve                  # http://127.0.0.1:8765/, opened in your browser
+uv run xbrain jev serve --port 9000 --no-open
+```
+
+It serves the page `xbrain jev dashboard` writes, drawn live from the files: load it again
+after a `jev topics` in another terminal and the new answers are there. Its Configuración tab
+says so on the page's own row in *Ficheros*. It listens on **127.0.0.1 only**, and there is
+no option to listen on anything else. Photos are served from `<output_dir>/_media/`, the
+folder `xbrain generate` mirrors them into; the server looks up which photos exist once, when
+it starts, so photos mirrored later show after a restart.
+
+**On the page**, served, the «copiar comando» line of a post without an answer becomes a button:
+
+- **Evaluar este post** on a post with no current answer, and **Re-evaluar** on one that has
+  one;
+- **Evaluar los N siguientes sin evaluar** in the Posts toolbar (N is yours to type, 20 by
+  default);
+- **Evaluar este topic (N sin evaluar)** next to an open topic, in Posts and in Topics. N is
+  the posts the page lists under the topic in «Sin evaluar por Jev» (never asked, or asked
+  before the post or the vocabulary changed) that have something to ask about;
+- **Evaluar estos posts** on a pair in Topics and on each list the Comparar tab opens (a band,
+  a primary pair).
+
+**The Preguntar tab**, served, opens on the question: a large box, **Pregunta a tu archivo**
+(Enter estimates; Shift+Enter is a new line), and under it **Qué posts preguntar** — `jev
+ask`'s pre-filters as pills: *Topics* (a panel with a search box and every topic as a
+checkbox; none ticked = every topic; several = posts in any of them, and still every other
+filter; the pill keeps its name and says what is ticked, *Topics: AI Coding +1*, the whole
+list in its tooltip), *Fechas* (presets or a range, into *Desde* / *Hasta*), *Autor*, *Límite* (*Como
+mucho (posts)*, the `--limit`) and the checkbox *Solo posts con evaluación de topics
+vigente* — and one button, **Estimar lo que cuesta**, whose estimate opens in the block under
+the form. Beside each topic is how many posts it keeps **under the other filters**: the
+blob's `asks.topic_counts` (`ask.topic_counts`, the whole corpus) until you type a filter,
+then the server's answer to `GET /api/ask/counts` — never counted in the browser. When the
+server refuses a count (a range that runs backwards), the counts read *—* and the reason is
+said under the pills; new data (a job's end) asks again for the filters typed. Under the
+pills, one line:
+
+> Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después es gratis.
+
+and in the Topics panel, the rule a topic filter follows: *Un post está en un topic si enrich
+o Jev (≥ 0,85) lo ponen en él.* The box's placeholder is the kind of question that works best
+— about content, not topics (*Posts que explican cómo configurar hooks en Claude Code…*).
+
+These filters change the posts asked, and so the price: tick a second topic and the
+estimate's post count and cost grow with it. Everything about which results are SHOWN — how
+many, a minimum, topics, days, author — is the free **Refinar resultados** on the open query
+(see [The Preguntar tab](#the-preguntar-tab)); the page's ask never sends a minimum. There the estimate reads, for example:
+
+> 2 posts por preguntar · 4 descartados por los filtros. Coste estimado: ~0,00009 $ — 2 posts
+> × ~1.000 tokens por llamada, más el texto de los posts (348 caracteres ≈ 87 tokens, a 4
+> caracteres por token). Aún sin preguntas pagadas: cifras de partida.
+
+That is the command's estimate (see [Estimate and confirmation](#estimate-and-confirmation)):
+a fixed cost per call plus the posts' text. Once answers have been paid for it says *Cifras
+ajustadas con K respuestas ya pagadas*, and the figures are the ones fitted on them. Then
+comes a query asked before in other words, if any (*Ya preguntaste algo casi igual …*: it is
+paid separately), then the cap. The button that spends says **Preguntar y pagar ~X $**. When
+every post the filters keep has already answered this query it says **Ver resultados
+(gratis)**, and the estimate adds *No se paga nada; se anota como una consulta más en el
+historial*: it still runs, asks nobody, builds no client, and counts the query once more.
+
+When an ask you followed from the tab ends and was recorded, the tab opens its results. One
+stopped before keeping any answer stays where it is and says *no quedó en el historial*. A
+history that could not be written after the answers were paid says *N respuestas pagadas y
+guardadas en <fichero>; el historial no se pudo escribir: …*. Reopening a query from
+**Tus preguntas** asks the server nothing.
+
+A button opens a block **in the page, right under it** — under the card whose *Evaluar este
+post* you pressed, under the Posts toolbar, the topic, the list, or the Preguntar form — never a
+panel floating over the page. Focus moves into it; Escape closes it (not while a job runs:
+*Ocultar* is the word for that) and focus goes back to the button. When the place it sat under
+is redrawn away (another filter, another list), the block moves to the top of its tab
+(*Revisar topics* for a topics pass, under the form in *Preguntar* for an ask). A block closed
+with no job followed forgets where it was opened, so a job another tab starts later goes to its
+own place. An ask's estimate is for the form as it was: editing the question or a filter
+afterwards holds **Preguntar y pagar** and says *La pregunta cambió desde la estimación: vuelve
+a estimar.*; undoing the edit gives the estimate back. The block
+shows the server's estimate first: *«Coste estimado: ~X $ (coste medio por post de las
+N evaluaciones ya pagadas × M posts). Tope: <cap> $. Al llegar se para; lo que ya esté en
+vuelo termina y puede pasarlo por poco (como mucho <concurrency> posts).»*, with
+what it skips. The button that spends says so and how much: **Evaluar y pagar ~X $**. It only
+works when the server allows the job. The checkbox *Volver a evaluar también los posts que ya
+tienen evaluación vigente: se pagan otra vez y se sustituye su evaluación (antes se guarda una
+copia)* is `force`. It is **never ticked for you**, not even on **Re-evaluar** or on a Comparar
+list, whose posts all have answers: unticked, those say there is nothing to ask. Ticking or
+clearing it re-estimates, and the box is held while that estimate is out, so the panel never
+confirms a `force` the box does not show. A refusal from the server shows in the panel, in
+its own words.
+
+After you confirm, the panel shows a progress bar and *k de N posts · respuestas · ~X $
+gastado*. «Gastado» includes what was **charged at the estimate's mean** (answers with no token
+count or from a provider with no price, named there) — see the cap below. **Parar (se guarda
+lo ya pagado)** stops the job softly (`POST /api/job/cancel`): nothing more is sent, the calls
+in flight are waited for, saved and logged, and the job ends *Interrumpido (lo paraste desde
+la página)*. **Ocultar** only hides the panel; the job goes on. The panel comes back by itself
+when a job does not end cleanly: stopped by the cap or the server, failed, with failed calls,
+paid answers not saved, a pass not logged, or a server that stopped answering (the page
+retries a few times, then offers **Recargar la página**). The outcome names the backup made
+before a `force` (`topics.<fecha>.bak`).
+
+When the job ends, the page loads the new data and redraws in place: the cards on screen are
+swapped where they are, and the header, the run history, the numbers and the open tab are
+redrawn. A page opened or reloaded while a job runs, or left open in another tab, follows that
+job too, and an idle page loads the new data when a job it did not follow ends (it asks
+`/api/job` every few seconds); when that job did not end cleanly, the panel opens and says how
+(*Una evaluación de topics lanzada en otra pestaña* / *Una pregunta lanzada en otra pestaña*).
+Such a block opens in the job's own tab — a topics pass in *Revisar topics*, an ask in
+*Preguntar* — and when you are on another tab, that tab's name carries a small badge:
+*en curso* while a job runs there, *aviso* when an end there needs reading.
+After a refused **Evaluar y pagar**, the button comes back only when the confirmation is still
+good: a malformed request (400) or a job thread that could not start (503 *no se pudo
+arrancar*); never while the server is stopping. A refusal because another job runs (409)
+follows that job. The static `jev.html` never shows these buttons (its data says it is not
+served) and keeps «copiar comando». The served page is sent with a content security policy: no script from
+any host, requests only to its own server, X's embed the only outside frame, and no other site
+can put the page in a frame of its own.
+
+Those buttons call a small JSON API to run a topics pass over chosen posts, or an ask over
+the corpus; anything else on this machine that has the page's token can call it too (`curl`
+with the token copied from `GET /api/data`). Every step is the terminal's, run by the same
+code:
+
+1. **Estimate** (`POST /api/topics/estimate`). The pick is one of `ids` (some posts), `topic`
+   (the posts the page lists under it: enrich's topics and Jev's rows), `unevaluated` (the
+   next N posts without a current answer), `pair` (`{kind: cx|px|pd, key}`, the posts behind
+   a pair of the Topics or Comparar tab) or `band` (the posts in a confidence band), plus
+   `force` (re-ask current answers). The server runs `select_items`, the `--dry-run` count,
+   and answers `posts` (how many it would ask, and their `ids`), `skipped_current`,
+   `skipped_no_evidence`, `forced`, `remaining`, and what it would cost — `usd` and `tokens`,
+   **an estimate**: the mean cost of the answers already paid for (the Configuración tab's
+   figure) times the posts. When the job may run, `allowed` is true and `confirm_token` is a
+   one-time confirmation that expires after 10 minutes; otherwise `refusal` says why.
+2. **Evaluate** (`POST /api/topics/evaluate`, the same pick plus `confirm_token`). It starts
+   **one** background job and answers 202 with its view. Under the pass lock the job reads
+   the side-car again, selects again and prices again, and is refused (409) if the posts are
+   no longer exactly the ones estimated (another pass answered some meanwhile) or the price
+   went over the cap. Then it runs the same pass as `xbrain jev topics`: the `--force`
+   backup, checkpoints every 25 answers, one line in `data/jev/runs.jsonl`, the same key
+   (`TYPESAFE_API_KEY`). The confirmation is spent when the job is claimed, so a job refused
+   under the lock needs a new estimate; a 409 because a job is already running spends
+   nothing.
+3. **Progress** (`GET /api/job`): `state` (`running`, then `done`, `interrupted` or
+   `error`), the job's `number` (1, 2, … per server), `done` of `total`, `answered`, `failed_calls`, `tokens`, `usd` spent,
+   `tokens_unknown`, `unpriced_providers` and `charged_at_estimate` (answers charged the
+   mean because they could not be priced), then the `outcome` — `ok` saved (and their
+   `ids`), `failed` with the first `failures`, `unsaved`, whether the pass was `logged` —
+   and, for an interrupted job, the `reason` (`tope`, `servidor parado`, `cancelado`). A job
+   that finished every post is `done` with no reason, even if it ended at the cap. The view
+   stops changing when the job ends. `usd` includes the reservations charged for answers that
+   could not be priced (`charged_at_estimate`).
+   **An ask's answers as they arrive** (`GET /api/job?since=<cursor>`): the same view plus
+   `stream` — `{from, next, answers, more, expected, min}`. `since=0` starts at the job's
+   first answer; `next` is the cursor for the following poll (`<job number>-<index>`); a
+   cursor from another job starts this one from 0, and one past this job's end, or anything
+   that is not a cursor (or a second `since`, or another parameter), is a 400. `answers` is
+   the job's stream from the cursor, in **arrival order**: first the answers the query already
+   had (ranked, `cached: true`), then each one the pass banks (`cached: false`), each
+   `{id, p, model, asked_at, keys, cached}` plus `surfaces` for a post whose card has no Jev
+   block — what the saved results carry for it after the job (`dashboard.streamed_answer`,
+   through `ask.answer_view`). At most 100 per reply (`service.STREAM_PAGE`); `more` says
+   others are waiting. `expected` is how many answers there will be if every post answers;
+   `min` is the minimum the results open at (the query's last one, as `finish_ask` keeps it).
+   Across polls no answer is missed or handed over twice, whatever the concurrency. It is read
+   from the job's memory, never from a file; a topics job, or no job, has `stream: null` (and so
+   does an ask whose stream could not be prepared: display only, it never stops the job). The
+   stream is held `service.STREAM_KEEP_S` (120 s) after the job ends, for a page still behind
+   (every page takes the saved results at the end); then its entries are let go and a cursor
+   before the end gets no answers and `next` at the end. The same guards as every GET: the
+   `Host` is checked on every request, and a foreign `Origin` is refused when one is sent.
+4. **Stop** (`POST /api/job/cancel`, body `{}`, the same token and `Origin` as any POST): the
+   running job stops softly — nothing queued is sent, the calls in flight are waited for,
+   saved and logged — and ends `interrupted` with reason `cancelado`. It answers 200 with the
+   job's view (still `running` until those calls come back) and 409 *no hay ningún trabajo en
+   curso* when none runs.
+
+**Asking** is the same four steps, with its own pick and pass:
+
+- `POST /api/ask/estimate` takes `query` (required; normalised like the command's, at most
+  2,000 characters) and, optionally, `topics` (a list; an older page's single `topic` is read
+  as one), `since` and `until` (`AAAA-MM-DD`; a range that runs backwards is refused),
+  `author`, `only_evaluated`, `limit` and `min` (0–1, the results' minimum): exactly
+  `xbrain jev ask`'s flags (`AskFilters.from_json`), planned by the command's own
+  `ask.plan_ask`. The confirmation is bound to all of them, `min` included. It answers the same fields as a topics estimate (no `forced`, no
+  `per_post`) plus `query_sha`, `dropped` (by the filters), `candidates`, `chars`,
+  `cost_model` (`{per_call, chars_per_token, measured, answers}`) and `similar` (queries
+  asked before that differ only in case, punctuation or spacing). Its `usd` is the estimate of
+  `ask.plan_ask`, the same call `jev ask` makes. A query no post can answer (the filters keep
+  nothing with evidence) is refused, and so is one with no price; one every candidate already
+  answered is **allowed at 0 $**.
+- `POST /api/ask/evaluate` (the same body plus `confirm_token`): under the lock the job plans
+  again and refuses (409) unless `ask.same_selection` holds and the price still fits; then
+  `run.run_ask` — the command's pass, its checkpoints, its `runs.jsonl` line with `kind: "ask"`
+  and `query_sha` — through the same cap by reservation, and, still under the lock,
+  `ask.finish_ask`. Its one rule decides what goes into `data/jev/asks/index.json`:
+  - every use that kept answers is recorded, a soft stop included;
+  - a use with nothing to ask (every answer cached) is recorded too;
+  - nothing is recorded when the use was stopped before keeping any answer, or when every
+    call failed.
+
+  The job view adds `query_sha`. Its `outcome` adds `sent` (the calls that reached the vendor:
+  0 when every answer was cached, which is a clean end and has nothing to log), `results` (the
+  answers at or above `min`: every answer when there is none), `answered` and `recorded`. When the history cannot be written after the
+  answers were paid, the job still ends `done`, with `history_error` and the answers' `file`.
+- The served cap for an ask is **`[jev].serve_max_usd`**, like any server job.
+  `[jev].ask_max_usd` is the terminal's confirmation threshold and does not apply here.
+- `GET /api/ask/counts?since=…&until=…&author=…&only_evaluated=true` takes the filters as a
+  query string (each at most once; `only_evaluated` is `true` or `false`; anything else is a
+  400) and answers `{posts, topic_counts}`: how many posts the filters keep, and how many each
+  topic would keep under them (`ask.topic_counts`, the same rule as `filter_posts` with that one
+  topic). It reads only and costs nothing, under the same guards as `/api/asks`, and reads the
+  server's cached posts and topics answers (reloaded only when items, vocabulary or the topics
+  side-car change): it never rebuilds the page's data, even mid-job.
+- `GET /api/asks` is the tab's data, `{history, surfaces, topic_counts, error}` (the blob's `asks`), and
+  `GET /api/ask/<sha>` one query of it plus `surfaces`, what Jev read for each of its results
+  (404 for a sha the history lacks). Both are read-only and cost nothing. The routes are
+  `/api/ask/estimate` and `/api/ask/evaluate` rather than one `/api/ask`: the same
+  `/api/<kind>/…` pair as topics, so both kinds go through one flow and one set of guards.
+
+Every estimate and job view carries its `kind` (`topics` or `ask`): the server has ONE job
+slot for both, and both take the pass lock. The page's data is `GET /api/data`
+(the same blob the page embeds); its `serve.finished_job` is the `number` of the last job whose
+files that data already includes (with its `serve.finished_at`), which is how an idle tab knows
+a job ended since: every job view carries its `number` (1, 2, … per server). The time alone
+could not say it: it is to the second, and two jobs can end in the same one (a free ask right
+after another).
+
+**What stops a job from spending more than you meant:**
+
+- **The cap, `[jev].serve_max_usd`** (default 1.00 $). An estimate above it gets no
+  confirmation (equal is allowed). While the job runs, each post's expected cost is
+  **reserved before it is sent** — for topics the estimate's mean, or the job's own priced
+  mean once that is higher; for an ask the post's own planned price (its characters by the
+  cost model), raised when the job's answers turn out dearer than planned — and no post is
+  sent when spent + reserved for the posts in flight + its
+  own reservation would pass the cap. An answer then replaces its reservation with its real
+  cost; one with no token count, or from a provider with no price (a `jev-latest` answering
+  as a new model can be one), is **charged the reservation, never $0**, and the job view
+  lists those. A call that raises is charged its reservation too (it may have been answered
+  and billed before it failed). So the bill can pass the cap only by what the posts in flight
+  at that moment cost above their reservation: up to `concurrency` posts' worth of the
+  difference — 8 with the default. When the cap stops a job, what was answered is saved and logged and the job
+  says `interrupted` with reason `tope`. The terminal's `xbrain jev topics` has no cap.
+- **No mean, no job.** When no current answer has both a token count and a price, there is
+  nothing to estimate from and the cap cannot be checked, so there is no confirmation. Run a
+  small pass from the terminal first (`xbrain jev topics --limit 5`).
+- **One job at a time**, and never beside a terminal pass (the pass lock).
+- **A confirmation is for one pick, once, for 10 minutes.** It is bound to the pick as asked,
+  `force` included, not just to the posts it came to: «post 3» and «the next unevaluated
+  post» can both be post 3 today, and confirming one does not confirm the other.
+- **Only this page can ask.** The page carries a random token the server makes when it
+  starts; every POST needs it, needs an `Origin` that is this server, and needs a JSON body
+  of at most 64 KiB. Every request needs a `Host` that is this server (`127.0.0.1:<port>` or
+  `localhost:<port>`), so a web page elsewhere cannot reach the API even by pointing its own
+  name at your machine. `/_media/` serves images and videos only, never SVG or HTML.
+- **Re-asking current answers is explicit** (`force`), as `--force` is in the terminal, and
+  it makes the same backup first.
+
+**Stopping never throws away what was paid for.** «Parar» on the page stops the job the same
+soft way and leaves the server running. Ctrl-C (or a stop of any kind from the server) stops accepting requests, answers 503 *el servidor se está parando* to a new job,
+sends no queued post, **waits for the calls already in flight**, saves every answer that came
+back and logs the pass as interrupted — then exits **130**. The job's thread is not a daemon:
+even a second Ctrl-C leaves Python waiting for that save. The terminal then says what the
+last job did: `Último trabajo: interrupted (servidor parado) · N evaluaciones guardadas ·
+M fallidas`, the backup if one was made, and a run-log line that could not be written (the
+line itself is in the server's log, to append by hand). A failed job is logged as an error
+and an interrupted one as a warning, as they happen.
+
+The server builds the page once before it listens, so a corrupt side-car or a missing
+vocabulary is refused the way `jev dashboard` refuses it. Unlike `jev dashboard`, it serves a
+corpus with **no answers yet**: that is where a first job can start, once a terminal pass has
+given it a mean to estimate from.
+
+## `xbrain jev ask` — ask the corpus a question
+
+```bash
+uv run xbrain jev ask "¿qué posts explican cómo configurar hooks en Claude Code?" --dry-run
+uv run xbrain jev ask "¿qué posts explican cómo configurar hooks en Claude Code?"
+uv run xbrain jev asks        # the queries asked so far, and what each has cost
+```
+
+You write a question in any language, and Jev says **post by post** whether each post
+answers it. The results are **ranked**: every post with a current answer, best first — a search
+ranks, it does not cut. It prints the first `[jev].ask_top` (20). `[jev].threshold` (0.85) is
+the bar for topic *membership*, not for results: a yes/no to an open question rarely reaches it
+(the first real query, 808 posts, topped out at 0.80). Jev writes no answer text. It filters and scores; reading the posts is up to you.
+
+**What each post is asked.** One call per post, with the same `state` a topics pass sends
+(the post, its thread, the quoted post, the article, the transcript, the image descriptions:
+see [What Jev reads](#it-asks-once-per-item-in-parallel)) and one yes/no question:
+
+| | |
+|---|---|
+| instructions | ``Does the post in `post` answer or directly address the user's request?`` |
+| true | your query, verbatim |
+| false | `The post does not address this request.` |
+
+Each post is judged **alone** against your request, so a post's probability does not depend
+on which other posts were asked with it. The query is normalised before it is sent and
+filed: Unicode NFC, and runs of spaces or newlines become one space. Case and punctuation
+are kept, because they reach Jev.
+
+### Flags
+
+| Flag | What it does |
+|---|---|
+| `--topic SLUG` | only posts that enrich put in that topic (primary or not) **or** whose **current** Jev topics answer backs it at `[jev].threshold`. Repeat it for several: a post in **any** of them is kept (and every other filter still applies). A slug that is neither in the vocabulary nor used by enrich is refused |
+| `--since AAAA-MM-DD` · `--until AAAA-MM-DD` | only posts created in those days, both days included (UTC). `--since` after `--until` is refused |
+| `--author HANDLE` | only posts by that account (`@` and case ignored; a blank one is refused) |
+| `--only-evaluated` | only posts with a current Jev topics answer |
+| `--limit N` | ask at most N posts (the rest are counted as `fuera del límite`); below 1 is refused |
+| `--min P` | *relevancia mínima*: only answers at or above P are results (0–1; default 0 = none). It changes only what is shown and recorded as the use's `last_min` (the default of its later refines), never what is asked or paid. To look again with another minimum, refine the saved query for free: `xbrain jev asks 1 --min P` |
+| `--top N` | how many results to print (default `[jev].ask_top`, 20; the rest are counted). At least 1 |
+| `--all` | print every result |
+| `--yes` | do not ask for confirmation above `[jev].ask_max_usd` |
+| `--dry-run` | count and estimate, then stop. Needs no key, takes no lock, writes nothing |
+
+The filters decide what is **paid for**. Narrow a query with them, and look at `--dry-run`,
+before asking the whole corpus.
+
+### What it prints
+
+An **illustrative** run, not a measured one. The numbers are made up to be consistent: a
+corpus of 2,609 posts with 12 without evidence, 754 left out by filters, 1,843 to ask, and
+the prior cost model below (1,843 × 1,000 + 4,570,812 / 4.0 = 2,985,703 tokens):
+
+```text
+1843 posts por preguntar · 12 sin evidencia · 754 descartados por los filtros
+estimación: ~2985703 tokens de entrada (~0.1254 $) · 4570812 caracteres · a priori: 1000 tokens por petición + 4.00 caracteres por token
+  50/1843
+  …
+1843 respuestas · 0 fallidas · 2961320 tokens de entrada (~0.1244 $) · modelo jev-1.13.0 → …/data/jev/asks/9f2c….json
+pasada registrada → …/data/jev/runs.jsonl
+Resultados: los 20 primeros de 1843 leídos por Jev, de mayor a menor probabilidad
+  0.98 ██████████  1834…  @someone  2026-05-02  Claude Code hooks: PreToolUse and PostToolUse, with …  https://x.com/…
+  0.81 ████████··  1790…  @other  2026-04-11  My hooks setup for Claude Code …  https://x.com/…
+  …
+  … y 1823 más (--top N o --all para verlos)
+Esta consulta ha costado: 1 pasada · 1843 peticiones · 2961320 tokens de entrada (~0.1244 $)
+```
+
+The first line accounts for every post: to ask, `ya respondidos` (the cache, free),
+`sin evidencia`, `fuera del límite` and `descartados por los filtros`. The results cover every
+post the filters kept that has a **current** answer, including answers paid for in earlier
+runs of the same query, ranked by probability (ties by post id). Each result line is the
+probability as a number and as a ten-cell bar (one cell per 0.1, rounded), the post id, the
+author, the day, the post on one line and its link. With `--min P` the header says how many
+reach it: `Resultados: los 20 primeros de 156 con relevancia ≥ 0.5 · 808 leídos por Jev, de
+mayor a menor probabilidad` (*leídos por Jev*: the posts with a current answer). `--threshold`,
+the old results cut, is refused with a message pointing to `--min`. The last line is everything this query has cost, from
+the run log.
+
+When a query already asked differs from yours only in case, punctuation or spacing, it says
+so before paying — `consulta parecida ya hecha: «…» (usa el texto exacto para reaprovechar
+sus respuestas)` — because the cache is per exact query. It never blocks.
+
+### Estimate and confirmation
+
+Before asking, the command estimates the input tokens as
+**posts × tokens per call + characters ÷ characters per token**. The characters are the
+ones the calls will send: each selected post's `state`, cut exactly as the call cuts it, plus
+the question's text. The per-call term is the fixed prompt the provider bills around every
+call, whatever the post.
+
+The two numbers are **fitted** (least squares) on the ask answers already paid for, over every
+query, once answers of at least two different sizes exist. Until then they are the prior:
+**1,000 tokens per call and 4.0 characters per token** (`defaults.DEFAULT_ASK_TOKENS_PER_CALL`,
+`DEFAULT_CHARS_PER_TOKEN`). The prior comes from a fit over 293 real topics answers
+(2026-09-27): about **4.34 characters per token** on the evidence, and about **1,050 fixed
+tokens per call** beyond the topic questions. The line says which model it used (`a priori` or
+`medido en N respuestas`). The sums the fit needs are kept in `data/jev/asks/index.json`, so
+an estimate never reads every answer file. Answers saved but never folded in (a crash between
+saving the file and writing the history) are folded in on the next read: that file is newer
+than `index.json`. Tokens are priced by the same formula every bill
+uses ([Vendor facts](#vendor-facts-with-their-dates)).
+
+When the estimate is at or under `[jev].ask_max_usd` (default `0.25 $`), it asks Jev with no
+prompt. Above the cap it asks `¿Preguntar igualmente?` first. A no, or no answer, exits 1
+having asked nothing; `--yes` answers yes for you.
+
+**The prompt never holds the lock.** After you confirm, it takes the pass lock, plans again
+and refuses — asking nothing — if the posts it would pay for changed meanwhile (another pass
+answered some, the corpus moved), or if the price moved past what was agreed: above the
+estimate you said yes to, or, when nobody was asked, above the cap. `--yes` agreed to spend
+without asking, so it is held to neither.
+
+**What a whole-corpus query costs, estimated, not measured.** The corpus in
+[What a pass actually costs](#what-a-pass-actually-costs) has 2,609 posts, of which 2,601
+have evidence (the other 8 are never asked). Each call sends a mean of **2,646 characters**:
+2,476 of evidence plus about 170 of question. With the topics fit above (1,050 fixed tokens
+per call, 4.34 characters per token), that is 2,601 × 1,050 + 2,601 × 2,646 ÷ 4.34 ≈ 4.3 M
+tokens, **about 0.18 $**. The prior (2,601 × 1,000 + 2,601 × 2,646 ÷ 4.0) estimates the same
+corpus at 0.18 $ as well. Most of it is the per-call part: an ask
+has one question, but every call still carries the provider's fixed prompt. The bill is the
+one the run reports from the provider's usage.
+
+### It never pays twice for the same answer
+
+Each query has its own file, `data/jev/asks/<sha>.json`. `<sha>` is the sha256 of the
+normalised query, and the file holds the query and one `AskAssessment` per post:
+`probability`, `provider`, `model`, `asked_at`, `state_chars`, `truncated`, `prompt_chars` and
+the token counts. Each answer carries a **contract**: sha256 of a version string, the state
+as sent and the question's digest, built like a topics contract (see
+[Staleness](#staleness-when-an-assessment-stops-counting)). So:
+
+- asking the **same query** again asks only posts with no current answer. With nothing new
+  it sends nothing, logs nothing and prints the results for free;
+- a post whose **evidence changed** (new text, a fetched article, a transcript, a different
+  `state_char_limit` cut) is asked again, and only that post;
+- a **different query** is a different file. Change one word and every post is a new
+  question.
+
+The file is written atomically, checkpointed every 25 answers like the topics side-car, and
+kept after Ctrl-C (exit 130). A file that does not parse, holds a record filed under the
+wrong post, or names another query is **refused**, never read as empty. For a file of
+another query the message says so: move it out of `data/jev/asks/` (or fix it by hand) and
+run again.
+
+### History, and what a query has cost
+
+`data/jev/asks/index.json` keeps **one entry per query**. It records when the query was first
+and last asked and how many times, plus its **last use**: the posts with a current answer
+(`last_evaluated`), how many reach its minimum (`last_results`; all of them without one), the
+minimum (`last_min`, 0 = none) and the filters (`last_filters`, with `topics` as a list).
+`last_min` is set by `jev ask --min` (0 when the flag is not given) and is only the default of
+a later refine: the page ships every current answer whatever it is, and an ask from the page
+sends no minimum, so it keeps the query's `last_min`. An entry rebuilt from its answer file
+counts every answer in the file in `last_evaluated` and `last_results`.
+Entries written before results were ranked also carry `last_threshold`, the old results cut:
+it is read and never used, and never written again, so they reopen ranked. Every use is in the run log: each ask
+pass that sent a request appends a `runs.jsonl` line with `kind: "ask"` and the query's
+`query_sha`, with the same fields and the same every-exit-path guarantee as a topics pass (see
+[It logs the pass](#it-logs-the-pass-datajevrunsjsonl)). The page's
+[Preguntar tab](#the-preguntar-tab) lists this history with each query's results, recomputed
+when the page is built, at no cost; served, it can also ask.
+
+**What a query has cost** is summed from those lines and priced when read, like every bill:
+
+- `jev ask` prints it after the results (`Esta consulta ha costado: …`);
+- `xbrain jev asks` lists every query, newest first, each headed `N. <sha8> «query»`, with its
+  dates, how many times it was asked, its last use and its cost; `xbrain jev asks N` (that
+  number, 1 = the last) or `xbrain jev asks <sha prefix>` reprints that query's saved results,
+  refined with `--top N`/`--all`, `--min P` (default: its last minimum), `--topic`
+  (repeatable), `--since`, `--until` and `--author` (`ask.refine_results`): no client is
+  built, nothing is asked, nothing is written. The header counts what passes: *Resultados: los
+  20 primeros de 187 que pasan el refinado (topic agentic-engineering) con relevancia ≥ 0.5 ·
+  808 leídos por Jev*, and the tail (*… y 167 más*) adds up to it;
+- `jev report` adds a `Consultas (jev ask): …` line under `Histórico:`.
+
+Every topics cost view (`jev report`'s `Histórico:`, the page's cost strip, per-pass table and
+«fuera del registro») counts **topics passes only**. An ask never moves a topics number, and
+never writes `data/jev/topics.json`.
+
+A use is recorded unless it was interrupted before any answer was kept. An interrupted pass
+that kept answers is recorded, so the history never lags its file. If the history loses an
+entry anyway (a crash between the two writes, a deleted `index.json`), the next read rebuilds
+it from the query's file and marks it `rebuilt` (`reconstruida desde sus respuestas`). Its last
+use is then counted over the whole file, with no minimum and no filters. A corrupt
+`index.json` is refused before any prompt or payment.
+
+### One pass at a time
+
+An ask takes the same pass lock as `jev topics` and a `jev serve` job (`data/jev/.lock`),
+from planning again through asking to writing the file and the history, but **not while the
+confirmation waits**. A second pass is refused with exit 75. `--dry-run` takes no lock.
+
+### Labelling queries (search quality)
+
+The question's wording has **not been tuned** for search yet, and there is no default minimum:
+results are ranked, and where a useful cut lies (if anywhere) is what labelled queries would
+show. A few queries labelled by hand are what that tuning needs. To label one:
+
+1. Look at the cost first: `xbrain jev ask "<query>" --dry-run`. Without filters the query
+   pays for the whole corpus (about 0.18 $, see above).
+2. Run it and print more of the ranking, so the posts near the edge show:
+   `xbrain jev ask "<query>" --top 50`. `--top` changes only what is printed; the posts asked
+   are the same.
+3. Copy the printed list to a note, one line per post: its id, its probability, and your
+   label: `sí` (it answers the query), `no`, or `parcial`.
+4. Label at least the top 20. Add any post you know answers the query that is missing from
+   the list, with its id. Its probability is in `data/jev/asks/<sha>.json` under that id.
+5. Do 3–5 queries of different shapes: a how-to ("cómo configurar hooks en Claude Code"), a
+   data request ("posts con datos de estudios sobre creatina"), a story ("hilos donde alguien
+   cuenta cómo levantó una ronda seed").
+
+The answers are cached, so re-reading a labelled query costs nothing: in the terminal, or in
+the page's Preguntar tab, where each result's card shows what Jev read.
+
+## Staleness: when an assessment stops counting
+
+Every stored assessment carries a `contract`: a sha256 over the contract version, the state
+as sent, and a digest of the **questions that went with it** — each question's type,
+instructions and criteria. A stored assessment is *current* while recomputing that hash
+today gives the same value.
+
+| Change | Assessment | Why |
+|---|---|---|
+| Re-enriching the item | **still current** | the comparison against `enrich` is recomputed at report time — this is the event the report exists to look at |
+| Reordering `vocab.yaml` | **still current** | the question set is canonical: one vocabulary, one wire form |
+| Changing `[jev].model` or the provider | **still current** | the contract binds what Jev was *asked*, never who answered |
+| New or edited evidence text | **stale** | a different state was sent |
+| Adding, removing or re-describing a topic | **stale** | the questions changed |
+| A different `[jev].fallback_option` | **stale** | the Choice offers different options |
+| Changing `state_char_limit` so an item's cut moves | **stale, for those items only** | a different prefix was sent. An item shorter than both limits is untouched |
+
+Stale records are **excluded from every number** in the report and the dashboard, never
+compared as if they were current, and **counted** (`caducadas`) so the exclusion is visible.
+On the dashboard their post is still a card, marked *topics revisados con datos antiguos*,
+under *Sin evaluar por Jev*. An *orphaned*
+record — one whose item is no longer in the store — gets its own counter (`huérfanas`): a
+different event with the same symptom. `xbrain jev topics` re-asks exactly the stale ones.
+
+`output_fingerprint` on each record says which `enrich` assignment existed at ask time. It
+is **informational only** and never consulted for currency: comparing it would retire an
+assessment the moment the item was re-enriched.
+
+**`xbrain vocab` says what it just retired.** Any write of `vocab.yaml` moves the questions
+digest, so it expires the whole side-car at once — a re-worded description does it as surely
+as a new topic. Rather than leave that to be discovered by the next report's `0 vigentes`,
+`vocab --apply` and `vocab --executor api` print it:
+
+```text
+2583 evaluaciones de Jev quedan caducadas: `xbrain jev topics` las vuelve a pedir (y a facturar).
+```
+
+A plain `jev topics` is the whole remedy — a retired record is not current, so it is selected
+without `--force`, and `--force` would additionally re-bill whatever is still current.
+
+A worksheet export (`vocab --executor claude-code` or `manual`) writes no vocabulary, so it
+retires nothing and says nothing.
+
+## Where the files live, and what protects them
+
+| Path | What it is |
+|---|---|
+| `data/jev/topics.json` | the side-car: one `TopicAssessment` per item id |
+| `data/jev/topics.<UTC stamp>.bak` | a copy of the side-car, written before a `--force` run re-asks a current record. Never pruned |
+| `data/jev/runs.jsonl` | the run log: one line per pass that sent a request (`jev topics`, a job from `jev serve`, or `jev ask`, marked `kind: "ask"`). Append-only |
+| `data/jev/asks/<sha>.json` | one `jev ask` query: the query and one answer per post. Same standing as the side-car: not snapshotted, not in git |
+| `data/jev/asks/index.json` | the history of queries asked |
+| `data/jev/.lock` | the pass lock: held (a kernel `flock`) by the one pass running. Its text says who holds it; empty otherwise |
+| `data/jev/topics-report.json` · `.md` | the comparison, rewritten on every `jev report` |
+| `<output_dir>/jev.html` | the page, rewritten on every `jev dashboard` |
+
+`<output_dir>` is the path the CLI prints: your vault root joined with
+`[paths].output_subdir` from `config.toml` (`learnings/x-knowledge/` in the examples here).
+The config key is the subdirectory; `<output_dir>` is the absolute path it resolves to.
+
+> **`data/topics.json` and `data/jev/topics.json` are different files.** The first holds the
+> synthesised topic pages and is part of the store. The second holds Jev's assessments and
+> is a side-car. Only the first is snapshotted.
+
+The run log `data/jev/runs.jsonl` lives beside the side-car and shares its standing: not
+snapshotted, not in git (`data/` is gitignored), never rewritten — only appended to.
+
+**This file costs money to regenerate and `snapshot restore` will not bring it back.** Four
+consequences:
+
+- **It is not snapshotted.** `xbrain snapshot create` copies the four flat store artifacts
+  from `data/`; `data/jev/topics.json` is one level down and is not among them. `xbrain
+  snapshot restore` therefore rolls the store back and leaves the side-car at its newer
+  state. A restore reverts **`vocab.yaml` as well as `items.json`**, and the contract hashes
+  the vocabulary-derived questions digest — so a restore from before a `vocab --regenerate`
+  moves the digest and retires **every record at once**, a full re-bill; only a restore that
+  leaves both the item's evidence and the vocabulary untouched leaves an assessment current.
+  Retired records are reported as `caducadas`, and `xbrain jev topics` re-asks — and re-pays
+  for — them. Either way staleness is **detected, never consumed**: a reverted item is never
+  compared against an answer about its newer text.
+- **It is not in git.** `data/` is gitignored in full, so there is no `git checkout` back to
+  a good copy. A corrupt file is repaired by hand or paid for again — which is why a
+  malformed side-car raises instead of quietly starting from `{}`.
+- **`--force` keeps a copy, and it is the only automatic one.** A run that actually re-asks
+  a current assessment copies the side-car to `data/jev/topics.<UTC stamp>.bak` first and
+  says so:
+
+  ```text
+  Copia de seguridad: data/jev/topics.2026-09-22T18-30-05-123Z.bak
+  ```
+
+  Taken before the client is built — so a copy that cannot be written stops a run before it
+  is billed — and before the first checkpoint, so it is the file as it was. A `--force` that
+  re-asks nothing current writes no copy: the trigger is the re-ask (`N forzados`), not the
+  flag. To restore one, stop any running `jev` command and move the `.bak` back over
+  `data/jev/topics.json`.
+
+  **They are never pruned.** Nothing deletes them — not `jev topics`, not
+  `snapshot restore`, not a retention rule — because the copy an operator wants is the one
+  from before the run they regret, which the tool cannot know. Delete them by hand; each is
+  the size of the side-car.
+- **Two passes at once are refused.** The file is rewritten wholesale on every save, so two
+  passes that each loaded it would each save their own map and the second would drop the
+  first one's records. `jev topics`, `jev ask` and `jev serve`'s jobs hold `data/jev/.lock`
+  from reading the side-car to saving it, and a second pass is refused — exit 75 in the
+  terminal (see [Daily use](#daily-use)).
+
+It is written atomically and dumped sorted and pretty, so an unchanged corpus re-dumps
+byte-identically and a hand `diff` between two runs shows only what moved.
+
+## Vendor facts, with their dates
+
+These are the only dated third-party claims in the Jev layer, and this is the one place
+they are recorded. Everything else that needs them points here. Re-check them when the
+`jev-latest` alias advances.
+
+| Fact | Value | Source, dated |
+|---|---|---|
+| Request budget | 64k tokens for `state` **plus all questions**, and 32k for `state` plus the single longest question | docs.typesafe.ai/models, 2026-09-22 |
+| Input price | `0.042 $` per million **input** tokens for `jev-1.13.0`; output tokens are free | docs.typesafe.ai/models, 2026-09-22 |
+| Rate limits | 250k tokens/second and 1,200 requests/minute, `429` over either | docs.typesafe.ai/models, 2026-09-22 |
+| Concurrency | throughput saturates around **8** concurrent requests | PriorBench, 2026-09-20 — an independent benchmark, **not** a TypeSafe figure |
+
+Two readings that follow from the first row and are easy to get backwards:
+
+- **The 64k budget is the one that binds here**, not the 32k one, because a call sends one
+  question per vocabulary topic plus the Choice. It tightens as `[vocab].target_count`
+  grows.
+- **`state_char_limit` is a bound on the evidence, not a defence of that budget.** Cutting
+  the state shrinks only the state half of it; the question half does not move.
+
+And one that follows from the third row, for the same reason:
+
+- **Of the two rate ceilings, the REQUEST one binds on this corpus.** At ~6k input tokens
+  per call, 1,200 req/min is 20 req/s, which is ~120k tok/s — 48 % of the 250k tok/s limit
+  while the request rate is at 100 % of its own. The token ceiling would bind first only
+  above ~12.5k tokens per call, roughly double what this corpus sends. So a sustained `429`
+  is answered by lowering `[jev].concurrency`, not by cutting `state_char_limit` (which, by
+  the line above, moves almost nothing).
+
+The price is per *version* while `[jev].model` defaults to the moving `jev-latest` alias,
+so every figure derived from it is an estimate. Each stored assessment records the concrete
+model that answered, so a report can always say what it priced.
+
+## Troubleshooting
+
+Operator-facing failures print as `Error: <mensaje>` and exit 1. Two exits are not failures:
+another pass holding the pass lock exits **75** (try again when it ends), and Ctrl-C exits
+**130** after saving what was paid.
+
+```text
+Error: TYPESAFE_API_KEY no encontrada: expórtala o pégala en <repo>/.env (ver .env.example)
+```
+
+No key in the environment and none in `<repo>/.env`. Nothing was called and nothing was
+written. `xbrain jev topics --dry-run` reports whether a key is visible without spending.
+
+```text
+Error: el SDK de TypeSafe no está disponible (…): instala las dependencias con `uv sync --extra dev --locked` y vuelve a lanzar el comando
+```
+
+The key was accepted but the vendor SDK is not importable — usually a half-finished
+install. Re-run the install command from [the README](../README.md#installation). Note the
+`--extra dev --locked`: a bare `uv sync` prunes the environment to the resolved set, and
+`dev` is an *extra*, so it would uninstall `pytest`, `ruff`, `mypy`, `poe`, `bandit` and
+`detect-secrets` — repairing the SDK and silently removing `uv run poe check`. No call was
+made.
+
+```text
+Error: Jev: configuración inválida (…)
+Error: TYPESAFE_API_KEY vacía: ponla en el entorno o en <repo>/.env
+```
+
+The key reached the SDK and was rejected before any request — typically a stray whitespace
+or non-ASCII character that survived `.env` parsing.
+
+```text
+  FALLO <id>: Jev API: …          (on stderr, the first 10; then `  … y N fallos más`)
+```
+
+Those items failed after the SDK's retries; everything else was saved. Re-run `xbrain jev
+topics` — only the failures are pending. Sustained `Jev API: … 429` means the rate limit;
+lower `[jev].concurrency`.
+
+```text
+Error: ninguna de las N evaluaciones terminó: N fallos, K motivos distintos; primero: …
+```
+
+Every call failed: a wrong key, no network, or the API is down. **Nothing was written** —
+the side-car is exactly as it was. Read `K` before the quoted reason: **one** distinct
+motive is a single cause — a key, a quota, an outage — so fixing that one thing and
+re-running is the whole remedy, while **many** means the failures are per item and the
+quoted one does not cover the rest.
+
+```text
+Interrumpido: N evaluaciones nuevas guardadas (M en total) en <path>     (exit 130)
+```
+
+Ctrl-C. N is this run's new records, M is the file total. Re-run to continue; the banked
+records count as `vigentes` and are not re-billed. Under `--force` the noun is
+`evaluaciones re-evaluadas` instead of `evaluaciones nuevas`, because those records are
+re-bills rather than new work. `Interrumpido: nada nuevo que guardar` means the interrupt
+arrived before the first answer and nothing was written.
+
+```text
+Error: no se pudo guardar <path> (N evaluaciones pagadas sin guardar): …
+```
+
+The run completed and the write failed — a full disk, a permission, a read-only mount. **N
+records were billed and are lost.** The run log books them as `unsaved`, never `ok` (the ones
+an earlier checkpoint saved stay `ok`). Fix the path and re-run.
+
+```text
+Error: el vocabulario está vacío: ejecuta `xbrain vocab` antes de `xbrain jev topics`
+```
+
+No vocabulary to ask about. Raised before the first call, so it costs nothing.
+
+```text
+Error: [jev].fallback_option 'otro' choca con un slug del vocabulario
+```
+
+The escape option and a real topic are the same string, which would make "none of these"
+and that topic the same option. Pick another name in `config.toml`. Also raised before any
+call — as are a duplicate slug and a topic with a blank description.
+
+```text
+Error: <path>: side-car ilegible (…)
+```
+
+`data/jev/topics.json` is unparseable, is not a JSON object, or holds a record this build
+refuses. It is **not** silently discarded: returning an empty map would re-ask and re-pay
+for the whole corpus and then overwrite whatever was still readable. Repair the file by
+hand from a copy, or delete it and pay again.
+
+```text
+Error: ids desconocidos: a, b
+Error: --limit debe ser >= 1
+Error: --threshold debe estar en [0.0, 1.0]
+```
+
+Operator errors, caught before anything is asked or written. A threshold above 1.0 would
+make every assignment doubtful and below 0.0 would make everything backed — a plausible
+file of noise over the last good one, which is why the bound is checked before the write.
+
+```text
+Error: 0 evaluaciones vigentes de N guardadas (S caducadas, H huérfanas): …
+```
+
+The vocabulary or the evidence moved and retired the stored contracts. See
+[Staleness](#staleness-when-an-assessment-stops-counting). The remedy is `xbrain jev
+topics`, and it is a re-bill.
+
+**`Error: <path>/runs.jsonl: registro de pasadas ilegible en la línea N (…)`**
+One line of the run log does not parse: a line cut short by a crash mid-write, or a hand
+edit. **Split it, never delete it.** A file written before the torn-line guard existed can
+hold a fragment with a complete, valid record glued straight after it on the same line —
+that record is a paid pass. Put the record on its own line and delete only the fragment.
+`jev report` refuses until it is fixed (and writes nothing); `jev dashboard` still renders,
+with the error in place of the cost strip.
+
+**`no se pudo registrar la pasada en …; añádela a mano:`**
+`jev topics` could not append to the run log (disk full, permissions). The pass itself is
+fine: its answers are saved and its exit code is unchanged. The next line on stderr is the
+JSON record; append it to `data/jev/runs.jsonl` once the disk is fixed.
+
+**A red *"La página no pudo dibujarse"* banner on `jev.html`**
+The page's script failed while loading. The numbers are in `xbrain jev report`; report the
+message in the banner as a bug. (A post that fails to draw later shows *no se pudo dibujar*
+on its own card instead, and the rest of the page keeps working.)
+
+**Cards show *falta en _media/: corre xbrain generate* instead of photos**
+The photos are downloaded (`data/media/`) but not yet mirrored into the vault, which
+`xbrain generate` does. Run it, then `xbrain jev dashboard` again.
+
+**The dashboard shows `—` as the total cost**
+No pass has been logged yet: the side-car was filled before the run log existed (or by a
+copy of xbrain that does not write it). The `fuera del registro` line under the figures
+gives those answers' cost from their own tokens.
+
+**The dashboard numbers look old**
+It is a static page. Re-run `xbrain jev dashboard`, or use `xbrain jev serve`, which draws it
+from the files on every load.
+
+```text
+Error: otra pasada de Jev está en curso (…): espera a que termine y vuelve a lanzarla. Candado: data/jev/.lock
+```
+
+Another pass holds the lock: a `jev topics` in another terminal, or a job started through
+`jev serve`. Nothing was read or spent, and `jev topics` exits **75** (EX_TEMPFAIL), so a
+script can retry. Wait for it, or stop it (Ctrl-C saves what it had). The lock goes with the
+process, so if nothing is running there is nothing to delete, even if the file still names a
+pass that crashed.
+
+```text
+Error: el puerto 8765 está ocupado o no se puede usar (…): elige otro con --port
+```
+
+Another program (or another `jev serve`) listens there. `--port 0` takes any free port and
+prints it.
+
+**An estimate answers `"allowed": false` with *no hay coste medio con el que estimar***
+No current answer has a token count and a price to average, so the server cannot check the
+cap and will not start a job. Run `xbrain jev topics --limit 5` in the terminal once.
+
+**An estimate's `refusal` says *pasa del tope por trabajo***
+The estimate is above `[jev].serve_max_usd`. Choose fewer posts, raise the cap in
+`config.toml` (and restart the server), or run the pass from the terminal.
+
+**A job ends with `"state": "interrupted"` and `"reason": "tope"`**
+The next post's reserved cost would have taken the job past the cap. What it answered is
+saved and logged; the rest is still pending, and the next estimate counts it.
+`"reason": "servidor parado"` is the same after a Ctrl-C or a stop.
+
+**A job ends with `"state": "error"` and *TYPESAFE_API_KEY no encontrada***
+The server never needs the key to serve the page, so a missing key shows only when a job
+builds its client — after it took the pass lock, before anything was sent. Nothing was
+spent. Put the key in the environment or in `<repo>/.env` and restart the server.
+
+**`409` *la selección cambió desde la estimación … vuelve a estimar***, or *el precio estimado
+cambió*: between the estimate and the evaluate, another pass answered some of those posts,
+the data changed, or the mean moved past the cap. Nothing was spent, but the confirmation
+was: estimate again. *la confirmación caducó* means it was older than 10 minutes.
+
+**`503` *el servidor se está parando***
+The server is stopping (Ctrl-C). No new job starts; the running one is saving what it has.
+
+**`403` *Host no permitido* / *Origin no permitido* / *falta el token de este servidor***
+The request did not come from the page this server served: another host name, another tab's
+origin, or a page loaded from an earlier run of the server (the token is new each start).
+Reload the page from the URL `xbrain jev serve` printed.
+
+**Photos mirrored while the server runs do not show**
+The server looks up which photos exist once, when it starts (thousands of file checks on an
+iCloud vault). Restart `xbrain jev serve` after `xbrain generate`.
+
+---
+
+## See also
+
+- [ARCHITECTURE.md § jev](../ARCHITECTURE.md#jev) — how the layer is built: the call shape,
+  the contract, the seams, and why the side-car is not the store.
+- [docs/troubleshooting.md](troubleshooting.md) — everything in XBrain that is not Jev.
+- [docs/tutorial.md](tutorial.md) — the pipeline this compares against, end to end.
+- [`config.toml.example`](../config.toml.example) — the `[jev]` block, annotated.
