@@ -718,6 +718,9 @@ class _AskKind:
             }
         return outcome, {
             "results": len(found.ranked),
+            # The minimum `results` is cut at (`finish_ask`'s: this use's, else the query's
+            # last): the page names it beside the count.
+            "min": use_minimum(plan, pick.minimum),
             "answered": found.answered,
             "recorded": found.recorded,
         }

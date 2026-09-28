@@ -66,7 +66,7 @@ With that in place:
    state_char_limit = 100000   # evidence is cut here; assessments record the pre-cut length
    serve_max_usd = 1.0         # the most one job started from `xbrain jev serve` may cost
    ask_max_usd = 0.25          # `xbrain jev ask` asks for confirmation above this estimate
-   ask_top = 20                # results `jev ask` prints / the Preguntar tab shows first
+   ask_top = 20                # results `jev ask` prints / the Preguntar tab's page size
    ```
 
 Every `[jev]` key is also documented inline in
@@ -100,7 +100,7 @@ The full option list:
 | `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
 | `xbrain jev serve` | `--port INTEGER` (default 8765; 0 = any free port) · `--no-open` (do not open the browser) |
 | `xbrain jev ask QUERY` | `--topic` · `--since` · `--until` · `--author` · `--only-evaluated` · `--limit` · `--min` · `--top` · `--all` · `--yes` · `--dry-run` ([details](#xbrain-jev-ask--ask-the-corpus-a-question)) |
-| `xbrain jev asks [N\|SHA]` | no argument: lists the queries asked (each as `N. <sha8> «query»`) and what each cost · with `N` or a sha prefix, reprints that query refined: `--top` · `--all` · `--min` · `--topic` · `--since` · `--until` · `--author` ([details](#history-and-what-a-query-has-cost)) |
+| `xbrain jev asks [N\|SHA]` | no argument: lists the queries asked (each as `N. <sha8> «query»`) and what each cost · with `N` or a sha prefix, reprints that query refined: `--top` · `--page` · `--all` · `--min` · `--topic` · `--since` · `--until` · `--author` ([details](#history-and-what-a-query-has-cost)) |
 
 Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed, a busy
 port, a `jev ask` confirmation answered no) · **75** `jev topics` or `jev ask` refused because
@@ -622,7 +622,9 @@ current view, and a line under it says what the list now counts:
 Click the topic again, or its chip above the list, to drop it. On a narrow screen the topic
 list starts folded.
 
-**Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
+**Right, the posts**, fifty per page (*Por página* offers 10, 20, 50 or 100), sorted,
+grouped and paged by the [list view](#the-list-view-sort-group-and-pages) — the same controls as
+Preguntar's results. Each
 card shows **the post through X's own embed** — the post as X shows it, loaded from X when the
 card comes near the screen — under a head of ours with `X ↗`, `nota ↗` and the toggle (X's
 embed already shows the author and date, so the head adds them only on the saved copy). On a
@@ -699,11 +701,16 @@ and a **copiar comando** button with the exact line that asks for it:
 `xbrain jev topics --id <id>`. A post with no evidence at all says *sin evidencia* instead,
 because `jev topics` skips it. The page never asks Jev anything.
 
-Search matches text, author, id and topics (slug or label); sort is *más discrepancias*
-(default), *más recientes* or *más caros*. Keys: **j** / **k** next / previous post, **n** /
-**p** next / previous post with a discrepancy. The filter, topic, search and sort live in the
-URL (`#revisar/posts?f=uneval&t=ai-coding&q=…&s=recent`), so a view can be bookmarked and survives a
-reload, including searches with `&`, `+`, `%` or `?`. The page follows the system's light or
+Search matches text, author, id and topics (slug or label). *Ordenar*: *Discrepancias*
+(default: most disagreement first, the order Python ships), *Recientes*, *Antiguos*, *Autor
+A–Z*, *Topic* (enrich's primary topic, A–Z) or *Coste* (most expensive answer first).
+*Agrupar*: by topic (the card's topics, enrich's and Jev's — a post under each), author or
+month. Keys: **j** / **k** next / previous post, **n** / **p** next / previous post with a
+discrepancy — across pages: walking past the last card of a page turns to the next. The
+filter, topic, search, sort, grouping, page and page size live in the URL
+(`#revisar/posts?f=uneval&t=ai-coding&q=…&s=recent&group=month&page=2&size=20`), so a view can
+be bookmarked and survives a reload, including searches with `&`, `+`, `%` or `?`; a filter,
+topic, search, sort or grouping starts again at page 1. The page follows the system's light or
 dark theme. If one post cannot be drawn, its card says so in one line and the rest draw.
 
 Below the list, one line names what the numbers leave out: stale and orphaned answers, and
@@ -720,6 +727,37 @@ rows and evidence) and ~1.2 KB for the rest. The Topics and Comparar tabs' data 
 confusion lists and bands (~19 KB of counts) and `post_sets` (~38 KB, ~130 bytes per evaluated
 post: pairs ~23 KB, primary diagonal ~5 KB, bands ~10 KB). With every post evaluated the page
 would be about **7.3 MB**. JavaScript draws everything; without it the page says so.
+
+### The list view: sort, group and pages
+
+Preguntar's results and Revisar › Posts are shown through ONE list view (the page's `lvSort`,
+`lvGroups`, `lvPage`, `lvFacet`, `lvPager`, `lvBar`): display over data the page already has —
+the blob's ranked answers and refine keys, the cards' fields. Nothing is asked, nothing is
+priced, and it costs nothing; every count it shows (a group's size, a facet's number, «k–m de
+N») is counted there, from those fields. It is JavaScript and not Python because nothing in it
+is a report number: it only orders, splits and counts what Python already decided belongs in
+the list, and the tests compare each order, group and count with a brute force in Python.
+
+- **Ordenar** (a segmented control). The list arrives in its **base order** — relevance for an
+  ask (Python's ranking: probability, then post id), *más discrepancias* for Posts — and every
+  other sort is **stable** over it: ties keep the base order. *Recientes* / *Antiguos* by the
+  post's moment; *Autor A–Z* by the handle as the author filter reads it; *Topic* by enrich's
+  primary topic (its label, A–Z; posts with none last).
+- **Agrupar** (pills): *Sin agrupar*, *Topic*, *Autor*, *Mes* (the post's month in UTC, as the
+  day filters read days). Grouped by topic, **a post appears under each of its topics** (an ask
+  result's topics are its refine keys' — what the topic filter matches; a Posts card's are its
+  `slugs`), and the list says how many entries that makes of how many posts. Each group has a
+  head with its name and count that folds or unfolds it (kept while the page is open); sorting
+  applies within each group. The groups follow each other *con su mejor post primero* (the
+  default: the group holding the best post of the base order — for an ask, the best
+  relevance), *los más grandes primero* or *por nombre* (months newest first); the group of
+  posts without one (*Sin topic*, …) always goes last.
+- **Por página** 10 · 20 · 50 · 100 (and the list's own default when it is not one of them:
+  `[jev].ask_top` for an ask, 50 for Posts), and the **pager** — *k–m de N* and «‹ 1 2 3 … 41
+  ›», each number a link (so the keyboard, the back button and a reload know it; the current
+  page is `aria-current`), over and under the list. A sort, filter or grouping starts at page 1;
+  a new page size keeps the first post you were looking at on the page shown. A page past the
+  last shows the last. The page and its size are in the URL.
 
 ### The Topics tab
 
@@ -842,8 +880,8 @@ reopening a query costs nothing.
 - **The query open** (`#ask?q=<sha>`; without it, the last one asked; a sha the history lacks
   says *Esta consulta no está en el historial*): the query, when it was asked, its filters
   (*Sin filtros: todo el corpus* when none; several topics read *topics A o B*), its requests
-  and cost, and what the list shows: *Mostrando 20 de 808 leídos por Jev, de mayor a menor
-  probabilidad* — refined, *Mostrando 20 de 156 con relevancia ≥ 0,50 que pasan el refinado ·
+  and cost, and what the list shows: *Mostrando 1–20 de 808 leídos por Jev, de mayor a menor
+  probabilidad* (the end names the sort in effect: *los más recientes primero*, …) — refined, *Mostrando 1–20 de 156 con relevancia ≥ 0,50 que pasan el refinado ·
   808 leídos por Jev*. (*Leídos por Jev*: the posts with a current answer — Jev read each one
   and said how likely it answers the question.)
   The results are **ranked, not cut**: every post with a current answer, best first (ties by
@@ -852,16 +890,21 @@ reopening a query costs nothing.
   query was asked with. (Until 2026-09-27 the results were the answers at or above 0.85; a
   yes/no to an open question rarely reaches that, and the first real query showed *0 de 808*.
   Entries written then reopen ranked, for free.)
-  **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers: *Mostrar*
-  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), then
+  **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers with
   pills that each open a small panel and name what is set: *Relevancia* (the minimum; by
   default the query's `last_min`, set only by `jev ask --min` — none for most), *Topics* (the
   topics among its answers, as checkboxes, each with how many answers it keeps under the rest of
   the refine — `askTopicCounts`, the one counting function, tested against Python topic by
   topic; a topic ticked in the link that no answer is in is still listed, at 0, and named),
   *Fechas* (presets — every date, the last month, the last three months, this year — or a
-  range; empty means every date, never today) and *Autor* (read like the filter: spaces and a
-  leading `@` dropped, case ignored); **Quitar el refinado** goes back to the defaults. A panel
+  range; empty means every date, never today) and *Autor* (read like the filter: spaces and
+  every leading `@` dropped, case ignored — `@@Dana` is `dana`, as in Python; its panel also
+  lists the authors among the answers, most first, each with how many answers it keeps under
+  the rest of the refine — a click picks one); under them, the [list view](#the-list-view-sort-group-and-pages)'s
+  bar — *Ordenar* (*Relevancia*, the default, *Recientes*, *Antiguos*, *Autor A–Z*, *Topic*),
+  *Agrupar* and *Por página* (10, 20, 50 or 100; `[jev].ask_top` by default) — and the pager,
+  over and under the list, instead of «Ver más». **Restablecer** goes back to every default:
+  no refine, relevance, no grouping, page 1. A panel
   opens with the focus inside, keeps Tab inside, and closes on Escape (focus back on its pill)
   or a click outside; one left open stays open while the refine redraws the list. It
   asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
@@ -872,14 +915,16 @@ reopening a query costs nothing.
   answer in Python's ranked order, the model and minute asked once), and the page keeps what
   `ask.refine_results` keeps — the
   function `xbrain jev asks N --min … --topic …` prints with. The state is ONE object in the
-  URL hash (`#ask?q=<sha>&top=40&min=0.5&t=a,b&since=…&until=…&author=…`), so a refined view
-  is a link, and it survives a reload; opening a query from the history starts it unrefined, and
+  URL hash (`#ask?q=<sha>&min=0.5&t=a,b&since=…&until=…&author=…&sort=recent&group=topic&go=size&size=50&page=3`),
+  so a refined view is a link, and it survives a reload and the back button (each change is a
+  history entry); a link from before the pager (`top=40`) opens as one page of 40; opening a query from the history starts it unrefined, and
   so does pressing *Preguntar y pagar* (a refine made while it runs stays at the end).
 - **While an ask runs** (served), its results **fill in and re-rank live**. Pressing *Preguntar
   y pagar* opens the query's results right away (`#ask?q=<sha>`); the answers the query already
   had are there at once, and each new answer appears **in its ranked place** as Jev gives it —
   the cards already shown stay as they are (none is drawn again), those pushed past the top
-  make room for «Ver más» — except a card on your screen, which stays (the list is briefly
+  go to the next page — the page number never changes under you: on page 2, you stay on page 2
+  while the list grows — except a card on your screen, which stays (the list is briefly
   longer) until you scroll past it. A card that lands **above** one already on the list says
   **nuevo** in verdigris for a few seconds, fading (with reduced motion it does not fade; it
   just goes); the list's first fill, an answer that only extends its end, and the answers the
@@ -890,7 +935,7 @@ reopening a query costs nothing.
   **Ocultar**. k of N is posts asked of those to ask; M counts THIS job's answers (not the
   ones the query already had: the same base as k) at or above `[jev].threshold` — the one bar at
   which the page reads a Jev probability as «yes» — or at the refine's minimum once one is set,
-  and is left out while it is 0. The gallery says what it shows: *Mostrando S de K respondidos
+  and is left out while it is 0. The gallery says what it shows: *Mostrando k–m de K respondidos
   hasta ahora* (*· M con relevancia ≥ min* when a minimum is set, *· R pasan el refinado* when a
   refine is). The page looks at the job at once, then every second (at once again while more
   answers wait than one reply carries — only after it took that reply's answers). If you have
@@ -901,7 +946,8 @@ reopening a query costs nothing.
   same order the live list already had, under the same refine: no card is drawn again, nothing
   under you moves, no progress bar comes back, and the status line becomes one quiet line,
   *Preguntado: N leídos · M muy relevantes (≥ t) · ~X $ gastado* (an end that was not clean —
-  stopped, the cap, failures — says so in full). A use that kept nothing (stopped before any
+  stopped, the cap, failures — says so in full, and its count of results names the minimum
+  they are cut at: *7 resultados con relevancia ≥ 0,50*). A use that kept nothing (stopped before any
   answer) goes back to what the tab showed before. The history lists the running query at the
   top with the job's own numbers, *en curso · k de N · ~X $* — never its last use's day, count
   or cost, nor *reconstruida* (a checkpoint writes the query's answer file before the job's end
@@ -1445,10 +1491,13 @@ when the page is built, at no cost; served, it can also ask.
   dates, how many times it was asked, its last use and its cost; `xbrain jev asks N` (that
   number, 1 = the last) or `xbrain jev asks <sha prefix>` reprints that query's saved results,
   refined with `--top N`/`--all`, `--min P` (default: its last minimum), `--topic`
-  (repeatable), `--since`, `--until` and `--author` (`ask.refine_results`): no client is
-  built, nothing is asked, nothing is written. The header counts what passes: *Resultados: los
-  20 primeros de 187 que pasan el refinado (topic agentic-engineering) con relevancia ≥ 0.5 ·
-  808 leídos por Jev*, and the tail (*… y 167 más*) adds up to it;
+  (repeatable), `--since`, `--until` and `--author` (`ask.refine_results`), a page at a time
+  with `--page N` (of `--top` each, as the Preguntar tab pages them: `jev asks 1 --top 20
+  --page 3` prints the tab's page 3; a page past the last is refused and says how many there
+  are; not with `--all`): no client is built, nothing is asked, nothing is written. The header
+  counts what passes: *Resultados: los 20 primeros de 187 que pasan el refinado (topic
+  agentic-engineering) con relevancia ≥ 0.5 · 808 leídos por Jev* (*los 41–60 de …* on page
+  3), and the tail (*… y 167 más (--page 2 para la siguiente página, …)*) adds up to it;
 - `jev report` adds a `Consultas (jev ask): …` line under `Histórico:`.
 
 Every topics cost view (`jev report`'s `Histórico:`, the page's cost strip, per-pass table and

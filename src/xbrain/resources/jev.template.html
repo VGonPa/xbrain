@@ -240,7 +240,8 @@ details.hist[open]>summary{margin-bottom:8px}
 .media figure{margin:0;position:relative;background:var(--surface-2);min-height:110px}
 .media img{display:block;width:100%;height:100%;max-height:380px;object-fit:cover}
 .play{position:absolute;inset:0;display:grid;place-items:center;font-size:34px;color:#fff;text-shadow:0 2px 8px #000;pointer-events:none}
-.noimg{display:grid;place-items:center;height:110px;color:var(--faint);font-size:13px;padding:0 10px;text-align:center}
+.noimg{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;height:110px;color:var(--faint);font-size:13px;padding:0 10px;text-align:center}
+.noimg .noplay{font-size:22px;line-height:1;color:var(--muted)}
 .tw.quoted{border:1px solid var(--line);border-radius:var(--r-m);padding:10px 12px;margin-top:10px;background:var(--bg);max-width:550px}
 .tw.quoted .twt{font-size:15.5px;margin:6px 0 0}
 .lc{display:flex;flex-direction:column;gap:2px;border:1px solid var(--line);border-radius:var(--r-m);padding:9px 12px;margin-top:10px;text-decoration:none;color:var(--text);max-width:550px}
@@ -424,7 +425,43 @@ details.saw[open]>summary{color:var(--text)}
 /* A new answer's card comes in with a short fade (none with reduced motion: the global guard). */
 @keyframes cardin{from{opacity:0}}
 .asklist>.card.fresh{animation:cardin .15s ease-out}
-.askmore{margin:6px 0 12px}
+/* The list view (PR 17): sort as a segmented control, grouping as pills, a quiet pager. */
+.lvbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 22px;margin:14px 0 0}
+#posts-bar{margin:0 0 4px}
+.lvlab{font-size:13px;color:var(--muted);white-space:nowrap}
+.lvseg,.lvgrp,.lvper{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%}
+/* The list column may be narrower than the sort control: the track scrolls, the page does not. */
+.browse>*{min-width:0}
+.lvgrp{flex-wrap:wrap;gap:6px}
+.lvgrp .lvlab{margin-right:2px}
+.segtrack{display:inline-flex;gap:2px;padding:3px;background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r-m);overflow-x:auto;min-width:0;scrollbar-width:none}
+.segtrack button{background:none;border:0;border-radius:7px;padding:4px 11px;font-size:14px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.segtrack button:hover{color:var(--text)}
+.segtrack button[aria-pressed="true"]{background:var(--surface);color:var(--text);font-weight:500;box-shadow:0 0 0 1px var(--line)}
+.lvgrp .preset[aria-pressed="true"],.askauthors .preset[aria-pressed="true"]{background:var(--surface-2);color:var(--text);border-color:var(--muted);font-weight:500}
+.lvbar select{background:var(--surface);color:var(--text);border:1px solid var(--ctl);border-radius:var(--r-s);padding:3px 6px;font-size:13.5px}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:6px 16px;flex-wrap:wrap;margin:12px 0}
+.pager:empty{display:none}
+.prange{font-size:13.5px;color:var(--faint)}
+.pnums{display:flex;align-items:center;gap:2px;flex-wrap:wrap}
+.pn,.pa{display:inline-grid;place-items:center;min-width:34px;height:34px;padding:0 6px;border-radius:var(--r-s);font-size:14px;color:var(--muted);text-decoration:none}
+.pa{font-size:18px}
+a.pn:hover,a.pa:hover{background:var(--surface);color:var(--text)}
+.pn[aria-current="page"]{color:var(--text);font-weight:600;box-shadow:inset 0 -2px 0 var(--text);border-radius:0}
+.pa.off{opacity:.35}
+.pgap{color:var(--faint);padding:0 4px}
+.lvhead{margin:22px 0 10px;padding-top:10px;border-top:1px solid var(--line)}
+.lvlist>.lvhead:first-child,.lvlist>.lvnote+.lvhead{margin-top:4px}
+.lvfold{display:flex;align-items:baseline;gap:10px;background:none;border:0;padding:2px 0;cursor:pointer;color:var(--text);font-size:16px;font-weight:600;text-align:left}
+.lvfold .chev{width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:translateY(-3px) rotate(45deg);opacity:.7;flex:none}
+.lvfold[aria-expanded="false"] .chev{transform:translateY(-1px) rotate(-45deg)}
+.lvfold .lvn{font-size:13.5px;font-weight:400;color:var(--faint)}
+.lvfold .lvcont{font-size:13px;font-weight:400;color:var(--faint)}
+.lvnote{margin:0 0 10px}
+.askauthors{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;max-height:220px;overflow:auto}
+.askauthors .preset{display:inline-flex;gap:6px;align-items:baseline}
+.askauthors .tcount{color:var(--faint);font-size:12.5px}
+.askauthors .muted{flex-basis:100%;margin:2px 0 0}
 .askside{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;min-width:0;padding-left:24px;border-left:1px solid var(--line-2)}
 .askside .tsec{margin-top:0;font-size:16px}
 .askside>.muted{font-size:13px}
@@ -446,6 +483,9 @@ details.saw[open]>summary{color:var(--text)}
   .askform textarea{font-size:19px;padding:12px 14px;min-height:84px}
   .askhead .tsec{font-size:21px}
   #ask-vista-host{float:none;margin:0 0 10px}
+  /* A phone shows every sort at once: the segments wrap rather than hide off the edge. */
+  .lvseg{align-items:flex-start;flex-direction:column;gap:4px}
+  .segtrack{flex-wrap:wrap;overflow:visible}
   .pop{position:fixed;left:16px;right:16px;top:auto;bottom:16px;max-width:none;max-height:70vh;overflow:auto}
 }
 
@@ -678,19 +718,15 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line-2);
       <div>
         <div class="controls">
           <input type="search" id="search" placeholder="Buscar por texto, autor, id o topic…" aria-label="Buscar posts">
-          <select id="sort" aria-label="Ordenar">
-            <option value="disc">Más discrepancias primero</option>
-            <option value="recent">Más recientes primero</option>
-            <option value="cost">Más caros primero</option>
-          </select>
           <span class="count" id="count">—</span>
           <span class="evalnext" id="evalnext" hidden></span>
         </div>
         <div class="chipline" id="active"></div>
         <p class="keys">Teclado: <kbd>j</kbd>/<kbd>k</kbd> siguiente / anterior post · <kbd>n</kbd>/<kbd>p</kbd> siguiente / anterior con discrepancias</p>
-        <div id="cards"></div>
-        <div id="sentinel"></div>
-        <button class="more" id="more" hidden>Mostrar más</button>
+        <div id="posts-bar"></div>
+        <nav id="pager-top"></nav>
+        <div id="cards" class="lvlist"></div>
+        <nav id="pager"></nav>
         <p class="muted" id="excluded"></p>
       </div>
     </div>
@@ -947,8 +983,9 @@ const REVISAR = ['posts', 'topics', 'compare'];
     rewritten in place (`readHash`), so a bookmark keeps working. */
 const ROUTE = {posts: 'revisar/posts', topics: 'revisar/topics', compare: 'revisar/compare', ask: 'ask', config: 'config'};
 const topOf = (tab) => (REVISAR.includes(tab) ? 'revisar' : tab);
-/** The whole Posts view: filter, topic, search, sort. The hash carries it (bookmarkable). */
-const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc'};
+/** The whole Posts view: filter, topic, search, sort, grouping (and how the groups follow each
+    other), page and page size. The hash carries it (bookmarkable). */
+const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc', g: '', go: 'best', page: 1, size: 50};
 /** The Revisar sub-tab last shown: a bare `#revisar` returns to it. */
 let lastSub = 'posts';
 
@@ -985,16 +1022,43 @@ function readHash() {
   view.f = (FILTERS.some(x => x.key === f) && f) || 'disc';
   view.t = LABEL[params.get('t')] ? params.get('t') : '';
   view.q = params.get('q') || '';
-  view.s = ['disc', 'recent', 'cost'].includes(params.get('s')) ? params.get('s') : 'disc';
+  view.s = POSTS_SORTS.some(([k]) => k === params.get('s')) ? params.get('s') : 'disc';
+  const lv = lvRead(params, PAGE);
+  view.g = lv.group;
+  view.go = lv.go;
+  view.page = lv.page;
+  view.size = lv.size;
+}
+
+/** The list view's part of a hash (`group`, `go`, `page`, `size`), read strictly: an unknown
+    or malformed value is its default. */
+function lvRead(params, size) {
+  const int = (v) => (/^\d+$/.test(v || '') && Number(v) >= 1 ? Number(v) : null);
+  const group = params.get('group');
+  const go = params.get('go');
+  return {group: LV_GROUPS.some(([k]) => k && k === group) ? group : '',
+    go: LV_ORDERS.some(([k]) => k === go) ? go : 'best',
+    page: int(params.get('page')) || 1, size: int(params.get('size')) || size};
+}
+
+/** The Posts view as a hash, with `over` changed: only what differs from the defaults. */
+function postsHash(over) {
+  const v = Object.assign({}, view, over || {});
+  const params = new URLSearchParams();
+  if (v.f !== 'disc') params.set('f', v.f);
+  if (v.t) params.set('t', v.t);
+  if (v.q) params.set('q', v.q);
+  if (v.s !== 'disc') params.set('s', v.s);
+  if (v.g) params.set('group', v.g);
+  if (v.g && v.go !== 'best') params.set('go', v.go);
+  if (v.size !== PAGE) params.set('size', String(v.size));
+  if (v.page > 1) params.set('page', String(v.page));
+  return hashHref('posts', params);
 }
 
 function writeHash() {
-  const params = new URLSearchParams();
-  if (view.f !== 'disc') params.set('f', view.f);
-  if (view.t) params.set('t', view.t);
-  if (view.q) params.set('q', view.q);
-  if (view.s !== 'disc') params.set('s', view.s);
-  const hash = hashHref('posts', params);
+  if (pageView && view.page > pageView.pages) view.page = pageView.pages;
+  const hash = postsHash();
   // The Posts tab link carries the view, so leaving for another tab and coming back keeps it.
   setTabHref('posts', hash);
   if (view.tab !== 'posts') return;
@@ -1085,7 +1149,7 @@ function renderRail() {
   h.textContent = 'Posts';
   rail.appendChild(h);
   FILTERS.forEach(f => {
-    rail.appendChild(railButton(view.f === f.key, f.name, countSpan(nf(f.count())), () => { view.f = f.key; update(); }));
+    rail.appendChild(railButton(view.f === f.key, f.name, countSpan(nf(f.count())), () => { view.f = f.key; view.page = 1; update(); }));
   });
   // The 45 topics are a long list: on a narrow screen they start folded so the posts are
   // not a screen-height away. The reader's choice survives the rail being redrawn.
@@ -1118,6 +1182,7 @@ function renderRail() {
     c.appendChild(el('span', 'dn ' + (r.disagreeing ? 'd' : 'z'), nf(r.disagreeing)));
     box.appendChild(railButton(view.t === t.slug, t.label, c, () => {
       view.t = view.t === t.slug ? '' : t.slug;
+      view.page = 1;
       update();
     }, t.description));
     if (view.t === t.slug) {
@@ -1257,9 +1322,13 @@ function mediaGrid(media) {
       img.alt = m.desc || '';
       fig.appendChild(img);
     } else {
-      fig.appendChild(el('div', 'noimg', WHY[m.why] || 'imagen no disponible'));
+      // No picture: a video's ▶ goes ABOVE the words saying why, never over them.
+      const none = el('div', 'noimg');
+      if (m.type === 'video') none.appendChild(el('span', 'noplay', '▶'));
+      none.appendChild(el('span', null, WHY[m.why] || 'imagen no disponible'));
+      fig.appendChild(none);
     }
-    if (m.type === 'video') fig.appendChild(el('span', 'play', '▶'));
+    if (m.type === 'video' && m.src) fig.appendChild(el('span', 'play', '▶'));
     if (m.desc) fig.title = m.desc;
     g.appendChild(fig);
   });
@@ -1820,11 +1889,280 @@ function safeCard(p) {
 }
 /* end cards */
 
-/* ---------------------------------------------------------------- list: filter, sort, pages */
+/* ---------------------------------------------------------------- list view: sort, group, page */
+/* list view */
+/* THE list view (PR 17): how a list of posts already on the page is ORDERED, GROUPED and
+   PAGED, for Preguntar's results and for Revisar › Posts alike. Pure functions over data the
+   page already has (the blob's ranked answers and refine keys, the cards' fields): nothing is
+   asked, nothing is priced, and every count a reader sees about a group or a facet comes from
+   here (`lvGroups`, `lvFacet`). A list is described by an ACCESSOR `acc`: per item, its time
+   (ms), its author (a handle read as `askAuthor` reads it), its topics, its primary topic and
+   its month (`YYYY-MM`, UTC). The list comes in its BASE order — relevance for an ask
+   (Python's ranking: probability, then id), «más discrepancias» for Posts — and that order is
+   every tie-break: a sort is stable over it. */
+
+/** Page sizes offered (the list's own default is added when it is not one of them). */
+const LV_SIZES = [10, 20, 50, 100];
+/** Grouping: none, each topic (a post is under EACH of its topics), author, month. */
+const LV_GROUPS = [['', 'Sin agrupar'], ['topic', 'Topic'], ['author', 'Autor'], ['month', 'Mes']];
+/** How groups follow each other: the group holding the best post of the base order first
+    (for an ask, the best relevance), the biggest first, or by name (months: newest first). */
+const LV_ORDERS = [['best', 'el de su mejor post primero'], ['size', 'los más grandes primero'], ['name', 'por nombre']];
+const lvText = new Intl.Collator('es', {sensitivity: 'base', numeric: true});
+/** A string key, empty last. */
+const lvCmp = (a, b, cmp) => (!a === !b ? cmp(a, b) : a ? -1 : 1);
+const lvCode = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** The sorts, each a comparator over two items (ties: the base order, by stability). */
+const LV_SORT = {
+  base: null,
+  recent: (acc) => (a, b) => acc.time(b) - acc.time(a),
+  old: (acc) => (a, b) => acc.time(a) - acc.time(b),
+  author: (acc) => (a, b) => lvCmp(acc.author(a), acc.author(b), lvCode),
+  topic: (acc) => (a, b) => lvCmp(acc.primary(a) ? label(acc.primary(a)) : '', acc.primary(b) ? label(acc.primary(b)) : '', (x, y) => lvText.compare(x, y)),
+  cost: (acc) => (a, b) => acc.cost(b) - acc.cost(a),
+};
+
+/** `list` (base order) sorted by `sort` — a key of LV_SORT; anything else is the base. */
+function lvSort(list, sort, acc) {
+  const by = LV_SORT[sort];
+  return by ? list.slice().sort(by(acc)) : list.slice();
+}
+
+/** A group key's name, as its header says it. */
+function lvGroupName(group, key) {
+  if (group === 'topic') return key ? label(key) : 'Sin topic';
+  if (group === 'author') return key ? '@' + key : 'Sin autor';
+  if (group === 'month') {
+    if (!key) return 'Sin fecha';
+    const d = new Date(key + '-15T12:00:00Z');
+    return d.toLocaleDateString('es-ES', {month: 'long', year: 'numeric', timeZone: 'UTC'});
+  }
+  return '';
+}
+
+/** `sorted` split into groups (`group`: '' = one group holding every item): each
+    `{key, name, items, best}` with its items in `sorted`'s order — a post with several topics
+    is in each of them. `best` is the lowest base position among its items (`base`: id → its
+    position in the base order). Groups ordered by `order` (LV_ORDERS), ties by name; the
+    group of items with no key («Sin topic», …) always goes last. */
+function lvGroups(sorted, group, order, acc, base) {
+  if (!group) return [{key: '', name: '', items: sorted, best: 0}];
+  const keysOf = {
+    topic: (x) => (acc.topics(x).length ? acc.topics(x) : ['']),
+    author: (x) => [acc.author(x) || ''],
+    month: (x) => [acc.month(x) || ''],
+  }[group];
+  const groups = new Map();
+  sorted.forEach(x => keysOf(x).forEach(k => {
+    if (!groups.has(k)) groups.set(k, {key: k, name: lvGroupName(group, k), items: [], best: Infinity});
+    const g = groups.get(k);
+    g.items.push(x);
+    g.best = Math.min(g.best, base.get(acc.id(x)));
+  }));
+  const byName = (a, b) => (group === 'month' ? lvCode(b.key, a.key) : lvText.compare(a.name, b.name) || lvCode(a.key, b.key));
+  const by = {best: (a, b) => a.best - b.best, size: (a, b) => b.items.length - a.items.length, name: () => 0}[order] || (() => 0);
+  return [...groups.values()].sort((a, b) => lvCmp(a.key, b.key, (x, y) => 0) || by(a, b) || byName(a, b));
+}
+
+/** One page of `groups`: the items of the groups not folded (`folded`: the keys of the folded
+    ones), numbered in order, `size` per page. `rows` is what the page draws, in order: a
+    group's head where its first item falls (a folded group's head where it would have), again
+    at the top of a page its items continue on (`cont`), then the page's items. `flat` is every
+    item in order, each with its group — the list j/k walk. `page` is clamped to 1…pages. */
+function lvPage(groups, size, page, folded, grouped) {
+  const flat = [];
+  groups.forEach(g => { if (!folded.has(g.key)) g.items.forEach(x => flat.push({g: g, x: x})); });
+  const total = flat.length;
+  const pages = Math.max(1, Math.ceil(total / size));
+  page = Math.min(Math.max(1, Math.floor(page) || 1), pages);
+  const from = (page - 1) * size;
+  const to = Math.min(total, from + size);
+  const rows = [];
+  let at = 0;
+  groups.forEach(g => {
+    const n = folded.has(g.key) ? 0 : g.items.length;
+    if (grouped) {
+      const here = n ? at >= from && at < to : (at >= from && at < to) || (page === pages && at === total);
+      if (here) rows.push({head: true, g: g, cont: false, folded: !n});
+      else if (n && at < from && at + n > from) rows.push({head: true, g: g, cont: true, folded: false});
+    }
+    for (let j = 0; j < n; j++) if (at + j >= from && at + j < to) rows.push({head: false, g: g, x: g.items[j], i: at + j});
+    at += n;
+  });
+  return {total: total, pages: pages, page: page, from: from, to: to, rows: rows, flat: flat};
+}
+
+/** How many of `items` carry each value (`valuesOf(item)`: its values; each counted once per
+    item): the facet counts beside a filter's options. */
+function lvFacet(items, valuesOf) {
+  const counts = {};
+  items.forEach(x => new Set(valuesOf(x)).forEach(v => { counts[v] = (counts[v] || 0) + 1; }));
+  return counts;
+}
+
+/** The page numbers a pager offers: the first, the last, the current and its neighbours, and
+    «…» for each gap (a gap of one number shows that number instead). */
+function lvPageItems(page, pages) {
+  const want = new Set([1, pages, page - 1, page, page + 1].filter(n => n >= 1 && n <= pages));
+  const out = [];
+  let last = 0;
+  [...want].sort((a, b) => a - b).forEach(n => {
+    if (n - last === 2) out.push(last + 1);
+    else if (n - last > 2) out.push('…');
+    out.push(n);
+    last = n;
+  });
+  return out;
+}
+
+/** «1–20 de 808» (or «0 de 0»). */
+const lvRange = (pg, noun) => (pg.total ? nf(pg.from + 1) + '–' + nf(pg.to) : '0') + ' de ' + (noun ? pl(pg.total, noun[0], noun[1]) : nf(pg.total));
+
+/** A page change that the reader made: the list's head is brought into view after the draw. */
+let lvJump = '';
+function lvLanded() {
+  const id = lvJump;
+  lvJump = '';
+  const box = id && $(id);
+  if (box && box.getBoundingClientRect().top < 0) box.scrollIntoView({block: 'start', behavior: 'instant'});
+}
+
+/** The pager: «‹ 1 2 3 … 41 ›», each a link to that page (`hrefOf(n)`) so the keyboard, the
+    back button and a reload all know it; the current page is `aria-current`. `id` names it;
+    `jump` is the element brought into view after a page change. Nothing when there is one page. */
+function lvPager(pg, hrefOf, id, jump, noun) {
+  const nav = el('nav', 'pager');
+  nav.id = id;
+  nav.setAttribute('aria-label', 'Páginas');
+  nav.appendChild(el('span', 'prange', lvRange(pg, noun)));
+  if (pg.pages < 2) return nav;
+  const list = el('span', 'pnums');
+  const go = (n, text, cls, aria) => {
+    const off = n < 1 || n > pg.pages;
+    const a = off ? el('span', cls + ' off', text) : link(hrefOf(n), cls, text);
+    if (off) a.setAttribute('aria-disabled', 'true');
+    if (aria) a.setAttribute('aria-label', aria);
+    if (!off && n === pg.page && cls === 'pn') a.setAttribute('aria-current', 'page');
+    if (!off) a.addEventListener('click', () => { lvJump = jump; });
+    return a;
+  };
+  list.appendChild(go(pg.page - 1, '‹', 'pa', 'Página anterior'));
+  lvPageItems(pg.page, pg.pages).forEach(n => list.appendChild(n === '…' ? el('span', 'pgap', '…') : go(n, nf(n), 'pn', 'Página ' + n)));
+  list.appendChild(go(pg.page + 1, '›', 'pa', 'Página siguiente'));
+  nav.appendChild(list);
+  return nav;
+}
+
+/** The view bar over a list: «Ordenar» as a segmented control, «Agrupar» as pills (and, when
+    grouped, how the groups follow each other), «Por página». `state`: {sort, group, go, size};
+    `sorts`: [[key, name]…]; `set(change)` moves the state (a new hash). */
+function lvBar(id, state, sorts, set) {
+  const bar = el('div', 'lvbar');
+  bar.id = id;
+  const seg = el('div', 'lvseg');
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Ordenar');
+  seg.appendChild(el('span', 'lvlab', 'Ordenar'));
+  const track = el('span', 'segtrack');
+  seg.appendChild(track);
+  sorts.forEach(([key, name]) => {
+    const b = el('button', null, name);
+    b.type = 'button';
+    b.id = id + '-sort-' + key;
+    b.dataset.sort = key;
+    b.setAttribute('aria-pressed', String(state.sort === key));
+    b.addEventListener('click', () => { if (state.sort !== key) set({sort: key}); });
+    track.appendChild(b);
+  });
+  bar.appendChild(seg);
+  const grp = el('div', 'lvgrp');
+  grp.setAttribute('role', 'group');
+  grp.setAttribute('aria-label', 'Agrupar');
+  grp.appendChild(el('span', 'lvlab', 'Agrupar'));
+  LV_GROUPS.forEach(([key, name]) => {
+    const b = el('button', 'preset', name);
+    b.type = 'button';
+    b.id = id + '-group-' + (key || 'none');
+    b.setAttribute('aria-pressed', String(state.group === key));
+    b.addEventListener('click', () => { if (state.group !== key) set({group: key}); });
+    grp.appendChild(b);
+  });
+  if (state.group) {
+    const order = el('select');
+    order.id = id + '-go';
+    order.setAttribute('aria-label', 'Orden de los grupos');
+    LV_ORDERS.forEach(([key, name]) => {
+      const o = el('option', null, 'grupos: ' + name);
+      o.value = key;
+      order.appendChild(o);
+    });
+    order.value = state.go;
+    order.addEventListener('change', () => set({go: order.value}));
+    grp.appendChild(order);
+  }
+  bar.appendChild(grp);
+  const per = el('label', 'lvper');
+  per.appendChild(el('span', 'lvlab', 'Por página'));
+  const size = el('select');
+  size.id = id + '-size';
+  [...new Set(LV_SIZES.concat([state.size, state.fallback]))].filter(Boolean).sort((a, b) => a - b).forEach(n => {
+    const o = el('option', null, nf(n));
+    o.value = String(n);
+    size.appendChild(o);
+  });
+  size.value = String(state.size);
+  size.addEventListener('change', () => set({size: Number(size.value)}));
+  per.appendChild(size);
+  bar.appendChild(per);
+  return bar;
+}
+
+/** A group's head: its name and how many it holds, a button that folds or unfolds it.
+    `cont`: the group continues from the page before. */
+function lvHead(row, count, onToggle) {
+  const h = el('div', 'lvhead');
+  h.dataset.key = 'h|' + row.g.key + (row.cont ? '|cont' : '');
+  h.dataset.group = row.g.key;
+  const b = el('button', 'lvfold');
+  b.type = 'button';
+  b.setAttribute('aria-expanded', String(!row.folded));
+  b.appendChild(el('span', 'chev'));
+  b.appendChild(el('span', 'lvname', row.g.name));
+  b.appendChild(el('span', 'lvn', nf(count)));
+  if (row.cont) b.appendChild(el('span', 'lvcont', 'sigue'));
+  b.title = row.folded ? 'Desplegar este grupo' : 'Plegar este grupo';
+  b.addEventListener('click', onToggle);
+  h.appendChild(b);
+  return h;
+}
+/* end list view */
+
+/* ---------------------------------------------------------------- list: filter, sort, group, pages */
+/** Posts per page by default (the size selector offers LV_SIZES too). */
 const PAGE = 50;
-let shown = [];      // the filtered, sorted posts
-let drawn = 0;       // how many of them are in the DOM
-let cursor = -1;     // the current card (j/k/n/p)
+/** Revisar › Posts' sorts: its base order («más discrepancias», decided in `jev/dashboard.py`)
+    first, then the list view's. */
+const POSTS_SORTS = [['disc', 'Discrepancias'], ['recent', 'Recientes'], ['old', 'Antiguos'],
+  ['author', 'Autor A–Z'], ['topic', 'Topic'], ['cost', 'Coste']];
+/** A Posts card's fields as the list view reads them (`lvSort`, `lvGroups`). Topics are the
+    card's `slugs` (enrich's and Jev's, what the topic filter matches); the primary is
+    enrich's; the month is the post's, in UTC. */
+const postsAcc = {
+  id: (p) => p.id,
+  time: (p) => Date.parse(p.created),
+  author: (p) => askAuthor(p.author.handle),
+  topics: (p) => p.slugs,
+  primary: (p) => (p.enrich && p.enrich.primary) || '',
+  month: (p) => new Date(p.created).toISOString().slice(0, 7),
+  cost: (p) => (p.jev && p.jev.cost_usd != null ? p.jev.cost_usd : -1),
+};
+let shown = [];      // every entry of the list in reading order, `{g, x}` (grouped by topic, a post once per topic)
+let pageView = null; // the page on screen (`lvPage`)
+let cursor = -1;     // the current entry (j/k/n/p), an index into `shown`
+/** The groups folded, per grouping (`topic|<slug>`…): kept while the page is open. */
+const postsFolded = new Set();
+const foldedOf = (set, group) => new Set([...set].filter(k => k.startsWith(group + '|')).map(k => k.slice(group.length + 1)));
 
 function matches(p) {
   if (view.f !== 'all' && !p.in.includes(view.f)) return false;
@@ -1841,47 +2179,88 @@ function matches(p) {
   return hay.indexOf(q) !== -1;
 }
 
-function sorted(list) {
-  // DATA.posts is already in "más discrepancias" order (decided in `jev/dashboard.py`).
-  if (view.s === 'recent') return list.slice().sort((a, b) => (a.created < b.created ? 1 : a.created > b.created ? -1 : 0));
-  if (view.s === 'cost') {
-    const cost = p => (p.jev && p.jev.cost_usd != null ? p.jev.cost_usd : -1);
-    return list.slice().sort((a, b) => cost(b) - cost(a));
-  }
-  return list;
+/** A card of a list, keyed by its group and post (`data-key`): a post under two topics is two
+    cards; only the first carries the element id (`post-<id>`). */
+function listCard(p, key, first, make) {
+  const a = make(p);
+  a.dataset.key = key;
+  if (!first) a.removeAttribute('id');
+  return a;
 }
 
-function drawMore() {
-  const box = $('cards');
-  const upto = Math.min(shown.length, drawn + PAGE);
-  const frag = document.createDocumentFragment();
-  for (let i = drawn; i < upto; i++) frag.appendChild(safeCard(shown[i]));
-  box.appendChild(frag);
-  drawn = upto;
-  $('more').hidden = drawn >= shown.length;
-  $('more').textContent = 'Mostrar ' + nf(Math.min(PAGE, shown.length - drawn)) + ' más (quedan ' + nf(shown.length - drawn) + ')';
+/** Moves the Posts view (sort, group, page, size…) and writes it to the hash as a new
+    history entry: back returns to the page before. A change other than the page (or size)
+    starts at page 1; a new size keeps the first post on screen on the page shown. */
+function postsSet(change) {
+  // The bar's names (`sort`, `group`) are the Posts view's `s` and `g`.
+  change = Object.assign({}, change);
+  if ('sort' in change) { change.s = change.sort; delete change.sort; }
+  if ('group' in change) { change.g = change.group; delete change.group; }
+  if (!('page' in change)) change.page = 1;
+  if ('size' in change && pageView) change.page = Math.floor(pageView.from / change.size) + 1;
+  Object.assign(view, change);
+  lvJump = 'posts-bar';
+  const hash = postsHash();
+  if (location.hash === hash) update(); else location.hash = hash;
 }
 
 function renderCount() {
-  $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + pl(DATA.posts.length, 'post', 'posts');
+  $('count').textContent = 'mostrando ' + nf(new Set(shown.map(e => e.x.id)).size) + ' de ' + pl(DATA.posts.length, 'post', 'posts');
 }
 
 function renderList() {
-  shown = sorted(DATA.posts.filter(matches));
-  drawn = 0;
+  const posts = DATA.posts.filter(matches);
+  const sorted = lvSort(posts, view.s === 'disc' ? 'base' : view.s, postsAcc);
+  const base = new Map(DATA.posts.map((p, i) => [p.id, i]));
+  const groups = lvGroups(sorted, view.g, view.go, postsAcc, base);
+  const folded = foldedOf(postsFolded, view.g);
+  pageView = lvPage(groups, view.size, view.page, folded, !!view.g);
+  shown = pageView.flat;
   cursor = -1;
-  $('cards').replaceChildren();
+  $('posts-bar').replaceWith(lvBar('posts-bar', {sort: view.s, group: view.g, go: view.go, size: view.size, fallback: PAGE},
+    POSTS_SORTS, postsSet));
   renderCount();
-  if (!shown.length) {
+  const box = $('cards');
+  box.replaceChildren();
+  const hrefOf = (n) => postsHash({page: n > 1 ? n : 1});
+  // «posts», or «entradas» when the pages do not hold the posts one to one (grouped by topic,
+  // or with groups folded).
+  const noun = pageView.total !== posts.length ? ['entrada', 'entradas'] : ['post', 'posts'];
+  $('pager-top').replaceWith(lvPager(pageView, hrefOf, 'pager-top', 'posts-bar', noun));
+  $('pager').replaceWith(lvPager(pageView, hrefOf, 'pager', 'posts-bar', noun));
+  if (!posts.length) {
     const why = !DATA.posts.length ? 'No hay posts.'
       : view.q ? 'Ningún post coincide con la búsqueda.'
       : 'Ningún post coincide con este filtro.';
-    $('cards').appendChild(el('p', 'empty', why));
-    $('more').hidden = true;
+    box.appendChild(el('p', 'empty', why));
     return;
   }
-  drawMore();
+  if (view.g === 'topic' && pageView.total > posts.length) {
+    const note = el('p', 'muted lvnote', 'Un post con varios topics sale en cada uno: ' +
+      pl(pageView.total, 'entrada', 'entradas') + ' de ' + pl(posts.length, 'post', 'posts') + '.');
+    note.id = 'posts-dup';
+    box.appendChild(note);
+  }
+  const firsts = new Set();
+  const frag = document.createDocumentFragment();
+  pageView.rows.forEach(row => {
+    if (row.head) {
+      frag.appendChild(lvHead(row, row.g.items.length, () => {
+        const k = view.g + '|' + row.g.key;
+        if (postsFolded.has(k)) postsFolded.delete(k); else postsFolded.add(k);
+        renderList();
+      }));
+      return;
+    }
+    const first = !firsts.has(row.x.id);
+    firsts.add(row.x.id);
+    frag.appendChild(listCard(row.x, row.g.key + '|' + row.x.id, first, safeCard));
+  });
+  box.appendChild(frag);
+  lvLanded();
 }
+
+
 
 function renderActive() {
   const box = $('active');
@@ -1889,7 +2268,7 @@ function renderActive() {
   if (view.t) {
     const b = el('button', 'chipx', 'Topic: ' + label(view.t) + ' ✕');
     b.type = 'button';
-    b.addEventListener('click', () => { view.t = ''; update(); });
+    b.addEventListener('click', () => { view.t = ''; view.page = 1; update(); });
     box.appendChild(b);
     if (SERVED()) box.appendChild(topicEvalButton(view.t));
   }
@@ -1904,13 +2283,19 @@ function update() {
 }
 
 /* ---------------------------------------------------------------- keyboard */
+/** Goes to entry `index` of the list: its page is drawn first when it is another one. */
 function goTo(index) {
   if (index < 0 || index >= shown.length) return;
-  while (drawn <= index) drawMore();
+  if (index < pageView.from || index >= pageView.to) {
+    view.page = Math.floor(index / view.size) + 1;
+    writeHash();
+    renderList();
+  }
   const prev = document.querySelector('.card.cur');
   if (prev) prev.classList.remove('cur');
   cursor = index;
-  const node = $('post-' + shown[index].id);
+  const e = shown[index];
+  const node = [...$('cards').querySelectorAll(':scope > .card')].find(c => c.dataset.key === e.g.key + '|' + e.x.id);
   node.classList.add('cur');
   node.focus({preventScroll: true});
   node.scrollIntoView({block: 'start', behavior: SCROLL});
@@ -1920,13 +2305,13 @@ function onKey(e) {
   if (view.tab !== 'posts' || e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = (e.target && e.target.tagName) || '';
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-  const disagrees = (p) => p.in.includes('disc');
+  const disagrees = (i) => shown[i].x.in.includes('disc');
   if (e.key === 'j') goTo(cursor + 1);
   else if (e.key === 'k') goTo(Math.max(0, cursor - 1));
   else if (e.key === 'n') {
-    for (let i = cursor + 1; i < shown.length; i++) if (disagrees(shown[i])) { goTo(i); break; }
+    for (let i = cursor + 1; i < shown.length; i++) if (disagrees(i)) { goTo(i); break; }
   } else if (e.key === 'p') {
-    for (let i = cursor - 1; i >= 0; i--) if (disagrees(shown[i])) { goTo(i); break; }
+    for (let i = cursor - 1; i >= 0; i--) if (disagrees(i)) { goTo(i); break; }
   } else return;
   e.preventDefault();
 }
@@ -2730,7 +3115,7 @@ const CONFIG_SETTINGS = {
   ask_max_usd: {name: 'Tope sin preguntar de xbrain jev ask', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
     why: 'por encima de esta estimación, `xbrain jev ask` pide confirmación antes de preguntar (`--yes` la da por dada). No cambia nada de esta página.'},
   ask_top: {name: 'Resultados que se muestran de una pregunta', page: true, fmt: (v) => nf(v),
-    why: 'cuántos resultados de una pregunta enseña primero la pestaña Preguntar («Ver más» añade otros tantos) y cuántos imprime `xbrain jev ask` (`--top N`, `--all`). Los resultados van ordenados por lo seguro que está Jev de que el post responde; no cambia lo que se pregunta ni lo que cuesta.'},
+    why: 'cuántos resultados de una pregunta enseña cada página de la pestaña Preguntar (el tamaño de página por defecto; se cambia allí mismo: 10, 20, 50 o 100) y cuántos imprime `xbrain jev ask` (`--top N`, `--page N`, `--all`). Los resultados van ordenados por lo seguro que está Jev de que el post responde; no cambia lo que se pregunta ni lo que cuesta.'},
 };
 /** The files, by `config.files` key: what each one is, and the command that creates it. The
     name, path, whether it exists and whether a snapshot carries it are Python's. */
@@ -3002,23 +3387,34 @@ function renderConfig() {
 /* What was asked of the corpus (`xbrain jev ask`, or this tab when served): the query history
    and, for the query open, its results RANKED by probability, best first — every post with a
    current answer (at or above the minimum the query was asked with, if any), the first
-   `[jev].ask_top` shown and «Ver más» adding as many — the same cards as Posts, each with its
+   shown a page at a time (`[jev].ask_top` per page by default), sortable, groupable (the list
+   view) — the same cards as Posts, each with its
    probability (a number and a bar) and what Jev read. `[jev].threshold` is not a results cut.
    Everything is `DATA.asks` (`dashboard.asks_view`): reopening a query costs nothing. The
    static page shows it all; launching a query needs `xbrain jev serve`. */
 /** The query open (its sha, or '' for the last one asked) and THE refine state of its results:
-    one object, which the hash serialises (`askHref`), so a refined view is a link. `top` null =
-    `[jev].ask_top`; `min` null = the minimum the query was last asked with. */
+    one object, which the hash serialises (`askHref`), so a refined view is a link. `size` null =
+    `[jev].ask_top`; `page` null = 1; `sort`/`group`/`go` '' = relevance, none, best first; `min` null = the minimum the query was last asked with. */
+/** The results' sorts: Python's ranking (probability, then id) first — the base every other
+    sort breaks its ties by. */
+const ASK_SORTS = [['rel', 'Relevancia'], ['recent', 'Recientes'], ['old', 'Antiguos'], ['author', 'Autor A–Z'], ['topic', 'Topic']];
 /** THE refine fields, once: each one's hash key, its default, how the hash is read into it
     and how it is written back (`null` = left out of the hash). `askNoRefine`, `readAskHash`
     and `askHref` are all driven by this table, so a field is added in one place. */
 const ASK_REFINE_FIELDS = (() => {
   const num = (v) => (v === null || v === '' || isNaN(Number(v)) ? null : Number(v));
   const text = {default: () => '', parse: (v) => v || '', serialise: (v) => v || null};
+  const count = {default: () => null,
+    parse: (v) => { const n = num(v); return n !== null && n >= 1 ? Math.floor(n) : null; },
+    serialise: (v) => (v == null ? null : String(v))};
+  const pick = (options) => ({default: () => '', parse: (v) => (options.includes(v) ? v : ''), serialise: (v) => v || null});
   return {
-    top: {key: 'top', default: () => null,
-      parse: (v) => { const n = num(v); return n !== null && n >= 1 ? Math.floor(n) : null; },
-      serialise: (v) => (v == null ? null : String(v))},
+    // The list view (PR 17): sort, grouping and how groups follow each other, page size and page.
+    sort: Object.assign({key: 'sort'}, pick(ASK_SORTS.map(([k]) => k).filter(k => k !== 'rel'))),
+    group: Object.assign({key: 'group'}, pick(LV_GROUPS.map(([k]) => k).filter(Boolean))),
+    go: Object.assign({key: 'go'}, pick(LV_ORDERS.map(([k]) => k).filter(k => k !== 'best'))),
+    size: Object.assign({key: 'size'}, count),
+    page: Object.assign({key: 'page'}, count),
     min: {key: 'min', default: () => null,
       parse: (v) => { const n = num(v); return n !== null && n >= 0 && n <= 1 ? n : null; },
       serialise: (v) => (v == null ? null : String(v))},
@@ -3063,6 +3459,8 @@ let askCountsError = null;
 function readAskHash(params) {
   askView.q = params.get('q') || '';
   askView.refine = Object.fromEntries(Object.entries(ASK_REFINE_FIELDS).map(([name, f]) => [name, f.parse(params.get(f.key))]));
+  // A link from before the pager (`top=40`: the first 40) is the first page of 40.
+  if (askView.refine.size == null && params.has('top')) askView.refine.size = ASK_REFINE_FIELDS.size.parse(params.get('top'));
 }
 
 /** A query's link, with a refine state when given: only what differs from the defaults. */
@@ -3182,7 +3580,7 @@ function askField(text, input, cls) {
   return box;
 }
 
-/** `[jev].ask_top`: how many results are drawn first, and how many «Ver más» adds. */
+/** `[jev].ask_top`: the results' page size by default. */
 const askTop = () => DATA.config.settings.find(s => s.key === 'ask_top').value;
 
 /** One form control bound to `askForm[key]`. */
@@ -3580,6 +3978,7 @@ function askResults(row) {
   }
   const refine = askEffective(row, askView.refine);
   box.appendChild(askRefineBar(row, refine));
+  box.appendChild(el('nav', null)).id = 'ask-pager-top';
   // The live list of this query, at the job's end: refilled in place with the final ranking,
   // so the cards the reader is looking at stay (the same nodes, X's frames not reloaded).
   const old = $('ask-list');
@@ -3589,12 +3988,27 @@ function askResults(row) {
   reach.id = 'ask-reach';
   head.appendChild(reach);
   box.appendChild(list.el);
+  box.appendChild(el('nav', null)).id = 'ask-pager';
+  askPagers(box, row.sha, list.pg, list.kept.length);
   return box;
+}
+
+/** The two pagers of the results (over and under the list), for the page `pg` shows of the
+    `kept` results: its pages hold entries when they are not the results one to one (grouped by
+    topic, or with groups folded). */
+function askPagers(root, sha, pg, kept) {
+  const hrefOf = (n) => askHref(sha, Object.assign({}, askView.refine, {page: n > 1 ? n : null}));
+  const noun = pg.total !== kept ? ['entrada', 'entradas'] : ['resultado', 'resultados'];
+  ['ask-pager-top', 'ask-pager'].forEach(id => {
+    const old = root.querySelector('#' + id);
+    if (old) old.replaceWith(lvPager(pg, hrefOf, id, 'ask-refine', noun));
+  });
 }
 
 /** The refine state in effect for `row`: the hash's, with the query's defaults filled in. */
 function askEffective(row, r) {
-  return {top: r.top || askTop(), min: r.min == null ? (row.min || 0) : r.min, topics: r.topics.slice(),
+  return {size: r.size || askTop(), page: r.page || 1, sort: r.sort || 'rel', group: r.group || '', go: r.go || 'best',
+    min: r.min == null ? (row.min || 0) : r.min, topics: r.topics.slice(),
     since: r.since, until: r.until, author: r.author};
 }
 
@@ -3621,43 +4035,76 @@ const askAuthor = (a) => String(a || '').trim().replace(/^@+/, '').trim().toLowe
     `ask.answer_view`), said on the page — never an answer that silently vanishes. */
 const askKeyless = (ranked, keys) => ranked.filter(r => !keys[r.id]).map(r => r.id);
 
-/** THE counting of the refine bar: how many of `ranked` each topic keeps under the rest of
-    `refine` (its own `topics` ignored) — `ask.refine_results` by that one topic, counted in
-    one pass over the keys. Every topic of an answer is offered, and every topic ticked even at
-    0. PR 17's facets count through this same function. */
+/** THE counting of the refine bar's topics: how many of `ranked` each topic keeps under the
+    rest of `refine` (its own `topics` ignored) — `ask.refine_results` by that one topic,
+    counted by the list view's facet (`lvFacet`). Every topic of an answer is offered, and every
+    topic ticked even at 0. */
 function askTopicCounts(ranked, refine, keys) {
   const counts = {};
   ranked.forEach(r => (keys[r.id] ? keys[r.id].t : []).forEach(t => { counts[t] = 0; }));
   refine.topics.forEach(t => { counts[t] = 0; });
-  askRefined(ranked, Object.assign({}, refine, {topics: []}), keys)
-    .forEach(r => keys[r.id].t.forEach(t => { counts[t] += 1; }));
-  return counts;
+  return Object.assign(counts, lvFacet(askRefined(ranked, Object.assign({}, refine, {topics: []}), keys), r => keys[r.id].t));
+}
+
+/** The refine bar's authors: how many of `ranked` each author keeps under the rest of
+    `refine` (its own `author` ignored), most first, then by handle. */
+function askAuthorCounts(ranked, refine, keys) {
+  const counts = lvFacet(askRefined(ranked, Object.assign({}, refine, {author: ''}), keys), r => [keys[r.id].a]);
+  return Object.entries(counts).sort((a, b) => b[1] - a[1] || lvCode(a[0], b[0]));
 }
 
 const askRefining = (refine) => !!(refine.topics.length || refine.since || refine.until || String(refine.author || '').trim());
+
+/** An answer's fields as the list view reads them (`lvSort`, `lvGroups`): the refine keys
+    (day, handle, topics — Python's) and, for the time and the primary topic, its post's card. */
+function askAcc(keys, byId) {
+  return {
+    id: (r) => r.id,
+    time: (r) => (byId[r.id] ? Date.parse(byId[r.id].created) : Date.parse(keys[r.id].d + 'T00:00:00Z')),
+    author: (r) => keys[r.id].a,
+    topics: (r) => keys[r.id].t,
+    primary: (r) => { const p = byId[r.id]; return (p && p.enrich && p.enrich.primary) || ''; },
+    month: (r) => keys[r.id].d.slice(0, 7),
+    cost: () => 0,
+  };
+}
+
+/** The groups folded on the results, per grouping (`topic|<slug>`…): kept while the page is open. */
+const askFolded = new Set();
+
+/** How the results are ordered, in words: the end of «Mostrando …». */
+const ASK_SORT_WORDS = {rel: 'de mayor a menor probabilidad', recent: 'los más recientes primero',
+  old: 'los más antiguos primero', author: 'por autor, de la A a la Z', topic: 'por topic principal, de la A a la Z'};
 
 /** The results list, a component: (ranked answers, refine state in effect, context) → its
     element and the sentence saying what it shows. A live ask's answers (they arrive and are
     ranked by `askOrder`) refill the same list (`askFillList`), never a second one. */
 function askResultList(ranked, refine, ctx, reuse) {
-  const wrap = reuse || el('div', 'asklist');
+  const wrap = reuse || el('div', 'asklist lvlist');
   wrap.id = 'ask-list';
   if (ctx.live) wrap.dataset.live = ctx.sha;
   else delete wrap.dataset.live;
   return Object.assign({el: wrap}, askFillList(wrap, ranked, refine, ctx));
 }
 
-/** Fills — or, for a live ask, refills — the list `wrap` with `ranked` kept by `refine`, top
-    first. A card already in the list is KEPT (matched by post id), never drawn again: only new
-    answers get a new card, put in their ranked place, and the cards past the top are taken
-    out. Existing cards are never moved relative to each other (their order is fixed: a live
-    ask only ever adds answers), so a frame in one (X's embed) is never reloaded. */
+/** Fills — or, for a live ask, refills — the list `wrap` with the page of `ranked` the refine
+    state asks for: kept by the refine, sorted, grouped, paged (the list view). A card already in
+    the list is KEPT (matched by its key: group and post), never drawn again: only new answers
+    get a new card, put in their place, and what falls off the page is taken out. A live ask
+    only ever ADDS answers, so existing cards never move relative to each other and a frame in
+    one (X's embed) is never reloaded; the page number stays while the list grows. */
 function askFillList(wrap, ranked, refine, ctx) {
   const keys = askKeys();
   const kept = askRefined(ranked, refine, keys);
-  const shown = Math.min(kept.length, refine.top);
   const keyless = askKeyless(ranked, keys);
-  const had = new Map([...wrap.querySelectorAll(':scope > .card')].map(n => [n.dataset.id, n]));
+  const byId = postById();
+  const acc = askAcc(keys, byId);
+  const sorted = lvSort(kept, refine.sort === 'rel' ? 'base' : refine.sort, acc);
+  const base = new Map(kept.map((r, i) => [r.id, i]));
+  const groups = lvGroups(sorted, refine.group, refine.go, acc, base);
+  const pg = lvPage(groups, refine.size, refine.page, foldedOf(askFolded, refine.group), !!refine.group);
+  askShownPage = pg;
+  const had = new Map([...wrap.querySelectorAll(':scope > .card, :scope > .lvhead')].map(n => [n.dataset.key, n]));
   const nodes = [];
   if (keyless.length) {
     const bad = el('p', 'err', pl(keyless.length, 'respuesta llegó', 'respuestas llegaron') +
@@ -3666,15 +4113,40 @@ function askFillList(wrap, ranked, refine, ctx) {
     bad.id = 'ask-keyless';
     nodes.push(bad);
   }
-  const byId = postById();
+  if (refine.group === 'topic' && pg.total > kept.length) {
+    const key = 'dup|' + pg.total + '|' + kept.length;
+    const note = had.get(key) || el('p', 'muted lvnote', 'Un post con varios topics sale en cada uno: ' +
+      pl(pg.total, 'entrada', 'entradas') + ' de ' + pl(kept.length, 'post', 'posts') + '.');
+    note.id = 'ask-dup';
+    note.dataset.key = key;
+    nodes.push(note);
+  }
   // While an ask runs, a card on the reader's screen is not taken away under them when better
-  // answers push it past the top: it stays (the list is briefly longer) until it is off screen.
+  // answers push it off the page: it stays (the page is briefly longer) until it is off screen.
   const held = ctx.live ? askOnScreen(wrap) : new Set();
-  let listed = 0;
-  kept.forEach((r, i) => {
-    if (!byId[r.id] || !(i < shown || (held.has(r.id) && had.has(r.id)))) return;
-    nodes.push(had.get(r.id) || askCard(byId[r.id], r, ctx.sha));
-    if (i >= shown) listed++;
+  const firsts = new Set();
+  const cardOf = (g, r) => {
+    const key = g.key + '|' + r.id;
+    const first = !firsts.has(r.id);
+    firsts.add(r.id);
+    const node = had.get(key) || listCard(byId[r.id], key, first, (p) => askCard(p, r, ctx.sha));
+    if (first) node.id = 'ask-post-' + r.id; else node.removeAttribute('id');
+    return node;
+  };
+  pg.rows.forEach(row => {
+    if (row.head) {
+      const key = 'h|' + row.g.key + (row.cont ? '|cont' : '');
+      const old = had.get(key);
+      const fresh = lvHead(row, row.g.items.length, () => {
+        const k = refine.group + '|' + row.g.key;
+        if (askFolded.has(k)) askFolded.delete(k); else askFolded.add(k);
+        askKeepAnchor(renderAsk, true);
+      });
+      nodes.push(old && old.textContent === fresh.textContent ? old : fresh);
+    } else if (byId[row.x.id]) nodes.push(cardOf(row.g, row.x));
+  });
+  pg.flat.slice(pg.to).forEach(e => {
+    if (byId[e.x.id] && held.has(e.g.key + '|' + e.x.id)) nodes.push(cardOf(e.g, e.x));
   });
   if (!kept.length) {
     const none = el('p', 'empty', ctx.live && !ctx.answered
@@ -3685,63 +4157,70 @@ function askFillList(wrap, ranked, refine, ctx) {
     none.id = 'ask-empty';
     nodes.push(none);
   }
-  if (shown + listed < kept.length) {
-    const left = kept.length - shown - listed;
-    const more = el('button', 'evalb askmore', 'Ver ' + nf(Math.min(askTop(), left)) + ' más (quedan ' + nf(left) + ')');
-    more.type = 'button';
-    more.id = 'ask-more';
-    more.addEventListener('click', () => askRefineTo(ctx.sha, {top: shown + askTop()}));
-    nodes.push(more);
-  }
   // In place: a node already where it belongs stays put; a new one is inserted, pushing the
   // rest down; what is left over at the end is no longer shown.
   nodes.forEach((node, i) => { if (wrap.children[i] !== node) wrap.insertBefore(node, wrap.children[i] || null); });
   while (wrap.children.length > nodes.length) wrap.lastElementChild.remove();
+  // Grouped by topic, or with groups folded, the pages hold entries, not the kept posts.
+  const range = (pg.total ? nf(pg.from + 1) + '–' + nf(pg.to) : '0') +
+    (pg.total !== kept.length ? ' de ' + pl(pg.total, 'entrada', 'entradas') : '');
+  const words = ', ' + ASK_SORT_WORDS[refine.sort] + '.';
+  if (ctx.live) return {kept: kept, pg: pg, reach: askLiveReach(ranked, kept, range, refine, ctx.live) + words};
   const what = nf(kept.length) + (refine.min > 0 ? ' con relevancia ≥ ' + dec(refine.min, 2) : '') +
     (askRefining(refine) ? ' que pasan el refinado' : '');
-  if (ctx.live) return {kept: kept, shown: shown, reach: askLiveReach(ranked, kept, shown, refine, ctx.live)};
   const read = askRead(ctx.answered);
-  const reach = 'Mostrando ' + nf(shown) + ' de ' +
-    (kept.length === ctx.answered && !(refine.min > 0) && !askRefining(refine) ? read : what + ' · ' + read) +
-    ', de mayor a menor probabilidad.';
-  return {kept: kept, shown: shown, reach: reach};
+  const reach = 'Mostrando ' + range + ' de ' +
+    (kept.length === ctx.answered && !(refine.min > 0) && !askRefining(refine) ? read : what + ' · ' + read) + words;
+  return {kept: kept, pg: pg, reach: reach};
 }
 
-/** The cards of `wrap` on the reader's screen, by post id, when the list starts above the top
-    of the screen (the reader has scrolled into it); none otherwise. */
+/** The cards of `wrap` on the reader's screen, by key (group and post), when the list starts
+    above the top of the screen (the reader has scrolled into it); none otherwise. */
 function askOnScreen(wrap) {
   const on = new Set();
   if (!wrap.isConnected || wrap.getBoundingClientRect().top >= 0) return on;
   for (const card of wrap.querySelectorAll(':scope > .card')) {
     const r = card.getBoundingClientRect();
     if (r.top >= innerHeight) break;
-    if (r.bottom > 0) on.add(card.dataset.id);
+    if (r.bottom > 0) on.add(card.dataset.key);
   }
   return on;
 }
 
-/** A live ask's gallery line: how many it shows of the answers so far, M at or above the
-    minimum in effect, what the refine keeps. The job's progress (k of N) and spending are the
-    status line's (`askStatusText`), right above: not said twice. */
-function askLiveReach(ranked, kept, shown, refine, row) {
-  let t = 'Mostrando ' + nf(shown) + ' de ' + nf(row.answered) + ' respondidos hasta ahora';
+/** A live ask's gallery line: which of the answers so far it shows (their range on this
+    page), M at or above the minimum in effect, what the refine keeps. The job's progress (k of
+    N) and spending are the status line's (`askStatusText`), right above: not said twice. */
+function askLiveReach(ranked, kept, range, refine, row) {
+  let t = 'Mostrando ' + range + ' de ' + nf(row.answered) + ' respondidos hasta ahora';
   if (refine.min > 0) t += ' · ' + nf(ranked.filter(r => r.p >= refine.min).length) + ' con relevancia ≥ ' + dec(refine.min, 2);
   if (askRefining(refine)) t += ' · ' + nf(kept.length) + ' pasan el refinado';
-  return t + ', de mayor a menor probabilidad.';
+  return t;
 }
 
 /** How many posts of the query Jev read (each has a current answer): «808 leídos por Jev». */
 const askRead = (n) => pl(n, 'leído por Jev', 'leídos por Jev');
 
-/** Moves the refine state (merged with `change`) into the hash: the view follows it. */
+/** Moves the refine state (merged with `change`) into the hash: the view follows it. Any
+    change but the page's starts at page 1; a new page size keeps the first result on screen
+    on the page shown. */
 function askRefineTo(sha, change) {
+  change = Object.assign({}, change);
+  if ('size' in change && !('page' in change)) {
+    const pg = askShownPage;
+    const n = pg ? Math.floor(pg.from / (change.size || askTop())) + 1 : 1;
+    change.page = n > 1 ? n : null;
+  } else if (!('page' in change)) change.page = null;
   // The state moves NOW: a second change before the hash is read back builds on this one.
   askView.refine = Object.assign({}, askView.refine, change);
+  lvJump = 'ask-refine';
   location.hash = askHref(sha, askView.refine);
 }
+/** The page the results show (the last fill's), for a page-size change. */
+let askShownPage = null;
 
-/** «Refinar resultados (gratis)»: top, minimum, topics, days and author over this query's
-    saved answers. Every change is a new hash; nothing is asked or paid. */
+/** «Refinar resultados (gratis)»: minimum, topics, days and author over this query's saved
+    answers, then how they are shown — sorted, grouped, paged (the list view's bar). Every
+    change is a new hash; nothing is asked or paid. */
 function askRefineBar(row, refine) {
   const bar = el('section', 'askrefine');
   bar.id = 'ask-refine';
@@ -3757,8 +4236,6 @@ function askRefineBar(row, refine) {
     input.addEventListener('change', () => askRefineTo(row.sha, {[key]: read(input.value)}));
     return input;
   };
-  pills.appendChild(askField('Mostrar', field('refine-top', 'number', String(refine.top), {min: '1', step: '1'}, 'top',
-    (v) => { const n = numOrNull(v); return n && n >= 1 ? Math.floor(n) : null; }), 'inline'));
   pills.appendChild(popPill('refine-rel', 'Relevancia', () => (refine.min > 0 ? 'Relevancia ≥ ' + dec(refine.min, 2) : ''), (pop) => {
     pop.appendChild(askField('Relevancia mínima (0–1)', field('refine-min', 'number', refine.min > 0 ? String(refine.min) : '',
       {min: '0', max: '1', step: '0.05', placeholder: 'sin mínimo'}, 'min',
@@ -3794,10 +4271,30 @@ function askRefineBar(row, refine) {
     (since, until) => askRefineTo(row.sha, {since: since, until: until})));
   pills.appendChild(popPill('refine-who', 'Autor', () => (String(refine.author || '').trim() ? '@' + refine.author.trim().replace(/^@+/, '') : ''), (pop) => {
     pop.appendChild(askField('Autor', field('refine-author', 'text', refine.author, {placeholder: '@handle', size: '16', autocomplete: 'off', spellcheck: 'false'}, 'author', (v) => v.trim())));
+    // The authors among the answers, each with how many it keeps under the rest of the refine:
+    // a click picks one.
+    const authors = askAuthorCounts(answers, refine, keys);
+    const list = el('div', 'askauthors');
+    list.id = 'refine-authors';
+    list.setAttribute('role', 'group');
+    list.setAttribute('aria-label', 'Autores de estas respuestas');
+    authors.slice(0, ASK_AUTHORS_SHOWN).forEach(([handle, n]) => {
+      const b = el('button', 'preset');
+      b.type = 'button';
+      b.dataset.author = handle;
+      b.setAttribute('aria-pressed', String(askAuthor(refine.author) === handle));
+      b.appendChild(el('span', null, '@' + handle));
+      b.appendChild(el('span', 'tcount', nf(n)));
+      b.addEventListener('click', () => askRefineTo(row.sha, {author: askAuthor(refine.author) === handle ? '' : handle}));
+      list.appendChild(b);
+    });
+    if (authors.length > ASK_AUTHORS_SHOWN) list.appendChild(el('p', 'muted', 'y ' + pl(authors.length - ASK_AUTHORS_SHOWN, 'autor más', 'autores más') + ': escribe su @.'));
+    pop.appendChild(list);
   }));
-  const clear = el('button', 'evalb', 'Quitar el refinado');
+  const clear = el('button', 'evalb', 'Restablecer');
   clear.type = 'button';
   clear.id = 'refine-clear';
+  clear.title = 'quita el refinado y vuelve al orden por relevancia, sin agrupar, en la página 1';
   // The state is reset NOW, like any other refine change: a change right after builds on it.
   clear.addEventListener('click', () => askRefineTo(row.sha, askNoRefine()));
   pills.appendChild(clear);
@@ -3809,15 +4306,23 @@ function askRefineBar(row, refine) {
     note.id = 'refine-absent';
     bar.appendChild(note);
   }
+  bar.appendChild(lvBar('ask-view', {sort: refine.sort, group: refine.group, go: refine.go, size: refine.size, fallback: askTop()},
+    ASK_SORTS, (change) => askRefineTo(row.sha, Object.assign({}, change,
+      change.sort ? {sort: change.sort === 'rel' ? '' : change.sort} : {},
+      'group' in change ? {group: change.group} : {},
+      change.go ? {go: change.go === 'best' ? '' : change.go} : {},
+      change.size ? {size: change.size === askTop() ? null : change.size} : {}))));
   return bar;
 }
+/** How many authors the «Autor» panel lists, most answers first. */
+const ASK_AUTHORS_SHOWN = 12;
 
-/** A history row's count, in the query's default view: the first `[jev].ask_top` of the
-    answers at its own minimum, and how many answered. */
+/** A history row's count, in the query's default view: its first page (`[jev].ask_top`) of
+    the answers at its own minimum, and how many answered. */
 function askHistoryCount(row) {
   const refine = askEffective(row, askNoRefine());
   const kept = askRefined(askAnswers(row), refine, askKeys()).length;
-  const shown = Math.min(kept, refine.top);
+  const shown = Math.min(kept, refine.size);
   const answered = askRead(row.answered);
   if (refine.min > 0) return nf(shown) + ' de ' + nf(kept) + ' ≥ ' + dec(refine.min, 2) + ' · ' + answered;
   return nf(shown) + ' de ' + answered;
@@ -4029,6 +4534,7 @@ function askLiveDraw() {
     const out = askFillList(list, askLive.answers, refine, {answered: row.answered, sha: row.sha, live: row});
     const reach = $('ask-reach');
     if (reach) reach.textContent = out.reach;
+    askPagers($('ask-results'), row.sha, out.pg, out.kept.length);
     const bar = $('ask-refine');
     const active = document.activeElement;
     const typing = bar && bar.contains(active) && active.tagName === 'INPUT' && active.type !== 'checkbox';
@@ -4053,12 +4559,13 @@ function askKeepAnchor(change, always) {
     for (const card of list.querySelectorAll(':scope > .card')) {
       const r = card.getBoundingClientRect();
       if (r.top >= innerHeight) break;
-      if (r.bottom > 0) marks.push({id: card.dataset.id, top: r.top});
+      if (r.bottom > 0) marks.push({key: card.dataset.key, top: r.top});
     }
   }
   change();
-  for (const mark of marks) {
-    const again = document.getElementById('ask-post-' + mark.id);
+  const after = $('ask-list');
+  for (const mark of after ? marks : []) {
+    const again = [...after.querySelectorAll(':scope > .card')].find(c => c.dataset.key === mark.key);
     if (!again) continue;
     const moved = again.getBoundingClientRect().top - mark.top;
     if (Math.abs(moved) >= 0.5) scrollBy({top: moved, behavior: 'instant'});
@@ -4769,7 +5276,8 @@ function outcomeText(job) {
   if (!o) return 'No se guardó nada.';
   const saved = kindWords(job.kind).saved;
   let t = pl(o.ok, saved[0], saved[1]) +
-    (o.results == null ? '' : ' · ' + pl(o.results, 'resultado', 'resultados')) + ' · ' + spentText(job);
+    (o.results == null ? '' : ' · ' + pl(o.results, 'resultado', 'resultados') +
+      (o.min > 0 ? ' con relevancia ≥ ' + dec(o.min, 2) : '')) + ' · ' + spentText(job);
   if (o.failed) t += ' · ' + pl(o.failed, 'fallida', 'fallidas') + ': ' + o.failures.map(f => f[0] + ' (' + f[1] + ')').join('; ');
   if (o.unsaved) t += ' · ' + pl(o.unsaved, 'respuesta pagada sin guardar', 'respuestas pagadas sin guardar');
   if (job.backup) t += ' · copia previa de las evaluaciones: ' + job.backup;
@@ -4887,13 +5395,13 @@ function refresh(blob) {
   renderExcluded();
   if (view.tab === 'posts') {
     const byId = postById();
-    shown = shown.map(p => byId[p.id]).filter(Boolean);
+    shown = shown.filter(e => byId[e.x.id]).map(e => ({g: e.g, x: byId[e.x.id]}));
     renderRail();
     renderActive();
     renderCount();
     document.querySelectorAll('#cards > .card').forEach(node => {
       const p = byId[node.dataset.id];
-      if (p) node.replaceWith(safeCard(p));
+      if (p) node.replaceWith(listCard(p, node.dataset.key, !!node.id, safeCard));
     });
   }
   if (view.tab === 'topics') renderTopics();
@@ -4968,7 +5476,6 @@ function boot() {
   readHash();
   showTab();
   $('search').value = view.q;
-  $('sort').value = view.s;
   update();
   if (view.tab === 'topics') {
     renderTopics();
@@ -4979,14 +5486,11 @@ function boot() {
   if (view.tab === 'compare') showCompare();
   if (view.tab === 'ask') renderAsk();
   if (view.tab === 'config') renderConfig();
-  $('search').addEventListener('input', function () { view.q = this.value.trim(); update(); });
-  $('sort').addEventListener('change', function () { view.s = this.value; update(); });
-  $('more').addEventListener('click', drawMore);
+  $('search').addEventListener('input', function () { view.q = this.value.trim(); view.page = 1; update(); });
   addEventListener('hashchange', () => {
     readHash();
     showTab();
     $('search').value = view.q;
-    $('sort').value = view.s;
     if (view.tab === 'posts') update();
     if (view.tab === 'topics') {
       const before = shownTopic;
@@ -5016,11 +5520,6 @@ function boot() {
   // A frame takes the theme it was drawn in: the system theme changing redraws them.
   // Every card again (an argument would be read as a post id): the frames take the new theme.
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => redrawPreviews());
-  if ('IntersectionObserver' in window) {
-    new IntersectionObserver((entries) => {
-      if (entries.some(e => e.isIntersecting) && drawn < shown.length && view.tab === 'posts') drawMore();
-    }, {rootMargin: '600px'}).observe($('sentinel'));
-  }
 }
 
 try {

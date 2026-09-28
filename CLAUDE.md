@@ -736,11 +736,16 @@ generates an Obsidian wiki.
   The page reads the history with `load_history(skip_unreadable=True)`. `--topic`
   (repeatable, OR) judges Jev at `[jev].threshold` (`ask.post_topics`); results are RANKED,
   never cut at it — only `--min` cuts (`last_min`, just the refine's default: the page ships
-  every answer, and its ask sends no min so it keeps the last one), `[jev].ask_top` is how
-  many show first; an old entry's `last_threshold` is read, never used. A saved query is
-  refined for free (`ask.refine_results`; `jev asks N --min/--topic/--since/--until/--author/--top`;
+  every answer, and its ask sends no min so it keeps the last one), `[jev].ask_top` is the
+  default page size; an old entry's `last_threshold` is read, never used. A saved query is
+  refined for free (`ask.refine_results`; `jev asks N --min/--topic/--since/--until/--author/--top/--page`;
   the page's «Refinar resultados» over `asks.keys`, fields in `ASK_REFINE_FIELDS`, topic
-  counts by `askTopicCounts`, state in the hash). Every answer reaches the page through
+  counts by `askTopicCounts`, state in the hash). Results and Revisar › Posts are sorted,
+  grouped (topic/author/month; a post under each of its topics) and PAGED by ONE page-side
+  list view (`lvSort`/`lvGroups`/`lvPage`/`lvFacet`/`lvPager`/`lvBar`, PR 17): stable over the
+  base order, state in the hash (`sort/group/go/size/page`; ask's pre-pager `top` = size), JS
+  on purpose (display over shipped fields, no report number), brute-forced against Python in
+  `tests/test_jev_page_listview_browser.py`; a live ask refills the page the hash names. Every answer reaches the page through
   `ask.answer_view`, as columns (`dashboard.answer_columns`: `{ids, p}` + model/minute once).
   A running ask STREAMS its answers (`GET /api/job?since=<cursor>`, `<number>-<index>`; at most
   `service.STREAM_PAGE` per reply): the query's current answers first, then each one

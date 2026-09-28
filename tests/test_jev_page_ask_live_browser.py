@@ -136,6 +136,8 @@ const sLiveView = () => ({
   ids: sQResults().map(r => r.id),
   nuevo: [...document.querySelectorAll('#ask-list > .card')].filter(c => seen(c.querySelector('.askr .nuevo'))).map(c => c.dataset.id),
   more: txt(sId('ask-more')),
+  pager: txt(document.querySelector('#ask-pager .prange')),
+  page: txt(document.querySelector('#ask-pager [aria-current="page"]')),
   empty: txt(sId('ask-empty')),
   number: askLive ? askLive.number : null,
   live: sId('ask-list') ? sId('ask-list').dataset.live || null : null,
@@ -349,6 +351,11 @@ def live(tmp_path_factory) -> dict[str, Any]:
     return seen
 
 
+def _range(n: int) -> str:
+    """The first page's range as the gallery line says it: «1–n», or «0» with nothing."""
+    return f"1–{n}" if n else "0"
+
+
 def _ids(n: int) -> list[str]:
     """The ids of the first `n` posts the pool asks (selection order = store order): after
     `n` released, exactly these have answered."""
@@ -415,7 +422,7 @@ def test_every_answer_arrives_once_and_each_look_shows_the_ranked_top(live):
         assert set(look["ids"][TOP:]) <= set(look["before"]), look
         assert look["ids"] == [post for post in expected if post in set(look["ids"])], look
         assert look["reach"].startswith(
-            f"Mostrando {min(len(expected), TOP)} de {len(so_far)} respondidos hasta ahora"
+            f"Mostrando {_range(min(len(expected), TOP))} de {len(so_far)} respondidos hasta ahora"
         )
         _nuevo_rule(look, expected)
     assert sorted(so_far) == sorted(PLANNED) and len(so_far) == len(set(so_far))
@@ -438,8 +445,8 @@ def test_a_new_answer_lands_in_its_ranked_place_and_the_cards_there_stay(live):
     assert anchored["ids"] == ranked8[:TOP] + held
     assert anchored["tags"] == [("w1" if post in _ids(4) else None) for post in anchored["ids"]]
     assert set(_ids(8)[4:]) <= set(anchored["nuevo"])
-    left = 2 - len(held)
-    assert anchored["more"] == (f"Ver {left} más (quedan {left})" if left else None)
+    # The pager (PR 17) counts the page as it is: the six of page 1 of eight answers.
+    assert anchored["more"] is None and anchored["pager"] == "1–6 de 8 resultados"
 
 
 @_requires_chrome
@@ -488,7 +495,7 @@ def test_the_free_refine_works_while_the_ask_runs(live):
     assert after["ids"] == _ranked(_ids(16), 0.6)[:TOP]
     over = len(_ranked(_ids(16), 0.6))
     assert after["reach"] == (
-        f"Mostrando {over} de 16 respondidos hasta ahora · "
+        f"Mostrando {_range(over)} de 16 respondidos hasta ahora · "
         f"{over} con relevancia ≥ 0,60, de mayor a menor probabilidad."
     )
     # The status line counts at the refine's minimum once one is set.
@@ -543,7 +550,7 @@ def test_the_final_list_is_finish_asks_ranking_in_the_live_order(live):
     assert live_order == expected == end["ids"]
     # Its refine stayed; the head is the history's now.
     assert "min=0.6" in end["hash"] and end["live"] is None
-    assert end["reach"].startswith(f"Mostrando {TOP} de ")
+    assert end["reach"].startswith(f"Mostrando 1–{TOP} de ")
     assert end["history"][0]["text"].startswith(LIVE_QUERY + " · ")
     assert "en curso" not in end["history"][0]["text"]
 
@@ -722,7 +729,7 @@ def test_asked_again_the_live_list_opens_at_the_querys_minimum_with_its_answers(
     assert first["ids"] == _reranked(cached, 0.5) == cached
     assert first["nuevo"] == []
     assert first["reach"] == (
-        "Mostrando 2 de 2 respondidos hasta ahora · 2 con relevancia ≥ 0,50, "
+        "Mostrando 1–2 de 2 respondidos hasta ahora · 2 con relevancia ≥ 0,50, "
         "de mayor a menor probabilidad."
     )
     # The status line counts this job's answers only: the two it had are not «relevantes» of it.
@@ -752,7 +759,7 @@ def test_asked_again_cached_answers_are_never_nuevo_and_the_list_never_recuts_at
     # The end takes the blob's row at the SAME minimum: the live list was already it.
     final = _reranked(so_far, 0.5)[:TOP]
     assert end["before_end"]["ids"] == final == end["ids"]
-    assert "min=" not in end["hash"] and end["reach"].startswith(f"Mostrando {TOP} de ")
+    assert "min=" not in end["hash"] and end["reach"].startswith(f"Mostrando 1–{TOP} de ")
 
 
 @_requires_chrome
@@ -982,3 +989,107 @@ def test_a_running_ask_is_looked_at_at_once_then_about_every_second(live):
     # A retry after a failed look would be 500 ms; a look is never hurried or lagging.
     assert 950 <= gaps[len(gaps) // 2] <= 1100
     assert gaps[0] >= 900
+
+
+# ------------------------------------------------------------------ PR 17: the page holds
+
+#: The reader on page 2 of 2 per page (a link: `size=2&page=2`) while the stream grows the
+#: list: every look shows ranks 3–4 of the answers so far, and the page never changes.
+_PAGED_PROBE = (
+    (
+        "<script>"
+        + _SERVE_JS
+        + _ASK_JS
+        + _REFINE_JS
+        + _LIVE_JS
+        + r"""
+(async () => {
+  await sStep('start', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')), 'el formulario');
+    sId('ask-q').value = '__QUERY__';
+    sId('ask-q').dispatchEvent(new Event('input', {bubbles: true}));
+    sPress(sId('ask-form'), 'Estimar lo que cuesta');
+    await sWait(() => sPanel().go, 'la estimación');
+    sId('ask-go').click();
+    await sWait(() => sId('ask-list') && sId('ask-list').dataset.live && location.hash.startsWith('#ask?q='), 'la lista en vivo');
+    location.hash = '#ask?q=' + askLive.sha + '&size=2&page=2';
+    await sWait(() => location.hash.endsWith('&size=2&page=2') && sId('ask-list') && sId('ask-list').dataset.live, 'la página 2');
+    scrollTo({top: 0, behavior: 'instant'});
+    return sLiveView();
+  });
+  let k = 0;
+  for (const n of [4, 4, 2, 6, 8]) {
+    await sStep('wave' + (k + n), async () => {
+      scrollTo({top: 0, behavior: 'instant'});
+      const r0 = sRefreshed;
+      await sRelease(n);
+      k += n;
+      if (k < __POSTS__) await sAnswered(k);
+      else await sWait(() => sRefreshed > r0, 'el final del trabajo');
+      return sLiveView();
+    });
+  }
+  await sStep('absorbed', async () => sAbsorbed);
+  sDone();
+})();
+</script>"""
+    )
+    .replace("__QUERY__", LIVE_QUERY)
+    .replace("__POSTS__", str(POSTS))
+)
+
+
+@pytest.fixture(scope="module")
+def paged(tmp_path_factory) -> dict[str, Any]:
+    client = _Gated()
+    finished: list[Any] = []
+    real = service_module.finish_ask
+
+    def _spy(*args: Any, **kw: Any):
+        found = real(*args, **kw)
+        finished.append(found)
+        return found
+
+    class _Releasing(JevService):
+        def probe_release(self, n: int) -> None:
+            client.release(n)
+
+    seen = _served_dump(
+        tmp_path_factory.mktemp("ask-paged"),
+        _PAGED_PROBE,
+        make_client=lambda: client,
+        repo=_live_repo,
+        base=_Releasing,
+        patch=lambda mp: mp.setattr(service_module, "finish_ask", _spy),
+    )
+    seen["finished"] = [[item.id for item, _ in found.ranked] for found in finished]
+    return seen
+
+
+@_requires_chrome
+def test_a_reader_on_page_two_stays_on_page_two_while_the_list_grows(paged):
+    """PR 17: the stream never moves the reader to another page. After EVERY look, the cards
+    are ranks 3–4 of the answers so far (Python's `(-p, id)`), the hash and the pager still say
+    page 2 — and at the end, page 2 of `finish_ask`'s ranking."""
+    start = _step(paged, "start")
+    absorbed = _step(paged, "absorbed")
+    so_far: list[str] = []
+
+    assert start["hash"].endswith("&size=2&page=2")
+    assert len(absorbed) >= 4
+    for look in absorbed:
+        so_far += look["got"]
+        expected = _ranked(so_far)
+        assert look["ids"] == expected[2:4], look
+        assert look["hash"].endswith("&size=2&page=2"), look
+        if len(so_far) > 2:
+            assert look["page"] == "2", look
+            assert look["reach"].startswith(
+                f"Mostrando 3–{min(4, len(so_far))} de {len(so_far)} respondidos hasta ahora"
+            ), look
+    end = _step(paged, f"wave{POSTS}")
+    (ranking,) = paged["finished"]
+    assert end["live"] is None and end["hash"].endswith("&size=2&page=2")
+    assert end["ids"] == ranking[2:4] == _ranked(list(PLANNED))[2:4]
+    assert end["page"] == "2" and end["pager"] == f"3–4 de {POSTS} resultados"

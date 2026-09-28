@@ -264,6 +264,7 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
     assert sorted(served.client.asked) == ["1", "2", "3", "4", "5"]
     assert job["outcome"]["ok"] == 5 and job["outcome"]["logged"] is True
     assert job["outcome"]["results"] == len(ranked()) == 5
+    assert job["outcome"]["min"] == 0.0
     assert job["outcome"]["recorded"] is True
     assert job["usd"] == pytest.approx(5 * tokens_cost_usd(100, "typesafe"))
     records = load_asks(served.cfg.jev_asks_dir / f"{query.sha}.json", query)
@@ -947,6 +948,8 @@ def test_an_ask_that_sends_no_minimum_keeps_the_querys_last_one(served: _AskServ
     entry = _entry(served.cfg)
     assert (entry.times, entry.last_min, entry.last_results) == (2, 0.5, len(ranked(0.5)))
     assert job["outcome"]["results"] == len(ranked(0.5))
+    # The count is cut at the query's last minimum: the outcome names it (PR 14 re-review m4).
+    assert job["outcome"]["min"] == 0.5
     [row] = served.request("GET", "/api/asks")[1]["history"]
     assert row["min"] == 0.5
     # A minimum that IS sent is recorded, 0 included.

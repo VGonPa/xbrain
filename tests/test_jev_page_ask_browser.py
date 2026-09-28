@@ -100,6 +100,9 @@ const sQView = () => ({
   history: sQHistory(),
   results: sQResults(),
   more: txt(document.getElementById('ask-more')),
+  // The pager under the list (PR 17): the range it says and the page that is current.
+  pager: txt(document.querySelector('#ask-pager .prange')),
+  page: txt(document.querySelector('#ask-pager [aria-current="page"]')),
   keyless: txt(document.getElementById('ask-keyless')),
   absent: txt(document.getElementById('refine-absent')),
 });
@@ -241,7 +244,7 @@ def test_static_the_last_query_opens_by_default_and_says_what_it_found(ask_stati
     # Both answers are results, ranked — the old cut at 0,85 showed none.
     assert _probs(view["results"]) == [("4", "0,20"), ("2", "0,10")]
     assert view["empty"] is None and view["more"] is None
-    assert "Mostrando 2 de 2 leídos por Jev, de mayor a menor probabilidad." in view["head"]
+    assert "Mostrando 1–2 de 2 leídos por Jev, de mayor a menor probabilidad." in view["head"]
 
 
 @_requires_chrome
@@ -252,7 +255,7 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
     assert view["hash"] == f"#ask?q={shas['hooks']}"
     assert _probs(view["results"]) == _shown(ranked())
     assert [h["current"] for h in view["history"]] == [False, True, False]
-    assert "Mostrando 5 de 5 leídos por Jev, de mayor a menor probabilidad." in view["head"]
+    assert "Mostrando 1–5 de 5 leídos por Jev, de mayor a menor probabilidad." in view["head"]
     assert "0,85" not in view["head"]
     for result in view["results"]:
         assert re.fullmatch(r"Lo que vio Jev · 2 fuentes, \d+ caracteres", result["saw"])
@@ -992,7 +995,8 @@ const sQRefine = () => {
   const pill = document.getElementById('refine-topics-open');
   if (pill && pill.getAttribute('aria-expanded') !== 'true') pill.click();
   const val = id => document.getElementById(id).value;
-  return {title: txt(box.querySelector('h4')), top: val('refine-top'), min: val('refine-min'),
+  // `top`: the page size (the list view's «Por página»), what «Mostrar» was before the pager.
+  return {title: txt(box.querySelector('h4')), top: val('ask-view-size'), min: val('refine-min'),
     since: val('refine-since'), until: val('refine-until'), author: val('refine-author'),
     topics: [...box.querySelectorAll('input[type=checkbox]')].filter(seen).map(b => ({
       id: b.id, checked: b.checked, count: txt(b.parentNode.querySelector('.tcount'))}))};
@@ -1019,8 +1023,10 @@ _VICTOR_STATIC_PROBE = (
   const view = () => Object.assign(sQView(), {refine: sQRefine()});
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
   await step('first', async () => { if (!location.hash.startsWith('#ask')) location.hash = '#ask'; await sleep(80); return view(); });
-  await step('more', async () => { document.getElementById('ask-more').click(); await sleep(60); return view(); });
-  await step('more2', async () => { document.getElementById('ask-more').click(); await sleep(60); return view(); });
+  // The pager's «›» (PR 17: the pager replaced «Ver más»).
+  const next = () => document.querySelector('#ask-pager a.pa[aria-label="Página siguiente"]').click();
+  await step('more', async () => { next(); await sleep(60); return view(); });
+  await step('more2', async () => { next(); await sleep(60); return view(); });
   await step('away_back', async () => {
     location.hash = '#posts?f=all'; await sleep(60);
     document.querySelector('.tabs a[data-tab="ask"]').click(); await sleep(80);
@@ -1032,12 +1038,12 @@ _VICTOR_STATIC_PROBE = (
   });
   await step('cleared', async () => { document.getElementById('refine-clear').click(); await sleep(80); return view(); });
   await step('clear_race', async () => {
-    // A refine, «Quitar el refinado» and another change in the same moment: the last change
+    // A refine, «Restablecer» and another change in the same moment: the last change
     // builds on the cleared state, never on the refine the clear removed.
     sQSet({'refine-min': '0.5'});
     await sleep(80);
     document.getElementById('refine-clear').click();
-    sQSet({'refine-top': '30'});
+    sQSet({'ask-view-size': '50'});
     await sleep(80);
     return view();
   });
@@ -1122,9 +1128,9 @@ def test_static_victors_ask_opens_on_the_first_20_ranked_not_on_nothing(victor_s
     assert [p for _, p in order[:3]] == ["0,80", "0,79", "0,79"]
     assert first["head"].startswith("«En qué topics hablo de agentic engineering?»")
     assert "Filtros: desde 7 may 2026" in first["head"]
-    assert "Mostrando 20 de 808 leídos por Jev, de mayor a menor probabilidad." in first["head"]
+    assert "Mostrando 1–20 de 808 leídos por Jev, de mayor a menor probabilidad." in first["head"]
     assert "0,85" not in first["head"] and first["empty"] is None
-    assert first["more"] == "Ver 20 más (quedan 788)"
+    assert first["more"] is None and first["pager"] == "1–20 de 808 resultados"
     assert " · 20 de 808 leídos por Jev · " in first["history"][0]["text"]
     for result in first["results"]:
         assert result["bar"] is not None and result["bar"]["fill"] > 0
@@ -1133,17 +1139,17 @@ def test_static_victors_ask_opens_on_the_first_20_ranked_not_on_nothing(victor_s
 
 
 @_requires_chrome
-def test_static_see_more_adds_20_and_the_hash_keeps_it(victor_static):
+def test_static_the_next_page_shows_the_next_20_and_the_hash_keeps_it(victor_static):
     seen, data, cfg = victor_static
     order = _shown2(_refined(cfg).ranked)
 
-    assert _probs(seen["more"]["results"]) == order[:40]
-    assert seen["more"]["more"] == "Ver 20 más (quedan 768)"
-    assert "top=40" in seen["more"]["hash"] and seen["more"]["refine"]["top"] == "40"
-    assert "Mostrando 40 de 808" in seen["more"]["head"]
-    assert _probs(seen["more2"]["results"]) == order[:60]
-    # Leaving the tab and coming back by its link keeps the refine state.
-    assert _probs(seen["away_back"]["results"]) == order[:60]
+    assert _probs(seen["more"]["results"]) == order[20:40]
+    assert seen["more"]["pager"] == "21–40 de 808 resultados" and seen["more"]["page"] == "2"
+    assert "page=2" in seen["more"]["hash"] and seen["more"]["refine"]["top"] == "20"
+    assert "Mostrando 21–40 de 808" in seen["more"]["head"]
+    assert _probs(seen["more2"]["results"]) == order[40:60]
+    # Leaving the tab and coming back by its link keeps the refine state and the page.
+    assert _probs(seen["away_back"]["results"]) == order[40:60]
     assert seen["away_back"]["hash"] == seen["more2"]["hash"]
 
 
@@ -1153,13 +1159,15 @@ def test_static_refining_filters_the_saved_answers_like_python(victor_static):
     refined = seen["refined"]
     expected = _refined(cfg, minimum=0.5, topics=("agentic-engineering",))
 
-    assert _probs(refined["results"]) == _shown2(expected.ranked)[:60]
+    # A refine starts again at page 1.
+    assert _probs(refined["results"]) == _shown2(expected.ranked)[:20]
+    assert "page=" not in refined["hash"]
     assert "min=0.5" in refined["hash"] and "t=agentic-engineering" in refined["hash"]
     assert (
-        f"Mostrando {min(60, len(expected.ranked))} de {len(expected.ranked)} con relevancia "
+        f"Mostrando 1–{min(20, len(expected.ranked))} de {len(expected.ranked)} con relevancia "
         "≥ 0,50 que pasan el refinado · 808 leídos por Jev" in refined["head"]
     )
-    # Quitar el refinado: back to the query's defaults, the first 20 of every answer.
+    # Restablecer: back to the query's defaults, the first 20 of every answer.
     cleared = seen["cleared"]
     assert _probs(cleared["results"]) == _shown2(_refined(cfg).ranked)[:20]
     assert (
@@ -1174,8 +1182,8 @@ def test_static_clearing_the_refine_resets_it_before_the_next_change(victor_stat
     race = seen["clear_race"]
     sha = AskQuery.of("En qué topics hablo de agentic engineering?").sha
 
-    assert race["hash"] == f"#ask?q={sha}&top=30"
-    assert _probs(race["results"]) == _shown2(_refined(cfg).ranked)[:30]
+    assert race["hash"] == f"#ask?q={sha}&size=50"
+    assert _probs(race["results"]) == _shown2(_refined(cfg).ranked)[:50]
     assert race["refine"]["min"] == ""
 
 
@@ -1360,12 +1368,12 @@ def test_static_a_query_asked_with_a_minimum_opens_at_it_and_ask_top_shapes_the_
     assert len(order) == 156 and len(data["asks"]["history"][0]["answers"]["ids"]) == 808
     assert _probs(first["results"]) == order[:7]
     assert (
-        "Mostrando 7 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev, de mayor a menor "
+        "Mostrando 1–7 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev, de mayor a menor "
         "probabilidad." in first["head"]
     )
     assert first["refine"]["min"] == "0.5" and first["refine"]["top"] == "7"
-    assert first["more"] == "Ver 7 más (quedan 149)"
-    assert _probs(more["results"]) == order[:14]
+    assert first["more"] is None and first["pager"] == "1–7 de 156 resultados"
+    assert _probs(more["results"]) == order[7:14]
     assert " · 7 de 156 ≥ 0,50 · 808 leídos por Jev · " in first["history"][0]["text"]
 
 
@@ -1433,8 +1441,8 @@ const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 &&
   });
   await sStep('refine', async () => {
     const posts0 = sPosts, r0 = sRefreshed, e0 = sEstimates, c0 = sCounts;
-    sId('ask-more').click();
-    await sWait(() => sQResults().length === 40, 'veinte más');
+    [...document.querySelectorAll('#ask-pager a.pn')].find(a => a.textContent === '2').click();
+    await sWait(() => sQView().page === '2' && sQResults().length === 20, 'la página 2');
     const more = sQView();
     sQSet({'refine-min': '0.5'});
     await sWait(() => (sQView().head || '').includes('con relevancia ≥ 0,50'), 'el mínimo');
@@ -1585,12 +1593,13 @@ def test_served_refining_changes_the_list_with_no_request_and_no_client(victor_s
     step = _step(victor_served, "refine")
     cfg, _ = _victor_expected(tmp_path)
 
-    assert len(step["more"]["results"]) == 40
-    assert _probs(step["min"]["results"]) == _shown2(_refined(cfg, minimum=0.5).ranked)[:40]
-    assert "Mostrando 40 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev" in step["min"]["head"]
+    assert _probs(step["more"]["results"]) == _shown2(_refined(cfg).ranked)[20:40]
+    # A refine starts again at page 1.
+    assert _probs(step["min"]["results"]) == _shown2(_refined(cfg, minimum=0.5).ranked)[:20]
+    assert "Mostrando 1–20 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev" in step["min"]["head"]
     topic = step["topic"]
     expected = _shown2(_refined(cfg, minimum=0.3, topics=("startups",)).ranked)
-    assert _probs(topic["results"]) == expected[:40]
+    assert _probs(topic["results"]) == expected[:20]
     assert "min=0.3" in topic["hash"] and "t=startups" in topic["hash"]
     # Free: no POST, no estimate, no reload, and no client was ever built.
     assert (step["posts"], step["estimates"], step["reloads"], step["counts"]) == (0, 0, 0, 0)
