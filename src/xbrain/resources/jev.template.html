@@ -415,6 +415,9 @@ details.saw[open]>summary{color:var(--text)}
 @keyframes nuevo{0%,55%{opacity:1}100%{opacity:0}}
 /* The page holds the reader's place itself while answers land (`askKeepAnchor`). */
 .asklist{overflow-anchor:none}
+/* A gallery being formed has a screen to form in: the confirm can bring the query's title to
+   the top while it is still empty, and the page does not grow under the reader card by card. */
+.asklist[data-live]{min-height:100vh}
 /* A new answer's card comes in with a short fade (none with reduced motion: the global guard). */
 @keyframes cardin{from{opacity:0}}
 .asklist>.card.fresh{animation:cardin .15s ease-out}
@@ -4551,14 +4554,21 @@ async function confirmAsk() {
     if (job.kind === 'ask' && view.tab === 'ask' && job.query_sha && askLive) {
       askLive.back = location.hash;
       const href = askHref(job.query_sha);
-      if (location.hash !== href) location.hash = href;
-      else renderAsk();
       // The form has done its job: beside the history, the query's title goes to the top of
-      // the screen, so the gallery forming under it is what the reader sees.
-      if (!ONE_COLUMN.matches) requestAnimationFrame(() => {
+      // the screen, so the gallery forming under it is what the reader sees (at once: a smooth
+      // scroll is cut short by the first answers' redraw) — once the tab has
+      // been drawn for it (a new hash is drawn on its `hashchange`, after this task).
+      const lift = () => requestAnimationFrame(() => {
         const head = $('ask-head');
-        if (head && askShowsLive()) head.scrollIntoView({block: 'start', behavior: SCROLL});
+        if (head && askShowsLive() && !ONE_COLUMN.matches) head.scrollIntoView({block: 'start', behavior: 'instant'});
       });
+      if (location.hash !== href) {
+        addEventListener('hashchange', lift, {once: true});
+        location.hash = href;
+      } else {
+        renderAsk();
+        lift();
+      }
     }
   } catch (err) {
     if (asking !== mine || following) return;
