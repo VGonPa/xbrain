@@ -43,10 +43,12 @@ transcriber, ever.
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 import shutil
 import subprocess  # nosec B404 - the transcriber is an external subprocess by design (#44)
 import tempfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +62,21 @@ DEFAULT_TRANSCRIBE_COMMAND = "parakeet-mlx"
 # Apple Silicon, but a wedged process must not hang the run forever.
 _DEFAULT_TIMEOUT_SECONDS = 1800
 
+# Whisper does not fail on music or noise — it LOOPS ("Det är en del av det här." ×130)
+# and reports `has_speech`. The loop is caught by how well it compresses. Whisper's own
+# `compression_ratio > 2.4` is unusable here: over a WHOLE transcript every long talk
+# exceeds it (a 150k-char English talk compresses ~3x simply by being English). Over a
+# fixed window the populations separate — measured 2026-10-11 on the 187 speech transcripts
+# in the live store, first 1,000 chars: legitimate median 1.90, p90 2.06, max 2.28, except
+# one REAL chant (a meme clip that repeats "tokens") at 3.93; the loops start at 6.03. 5.0
+# sits in that gap. It misses two short loops ("I'm I'm …" at 3.70, "you you"): raising the
+# ceiling of what is called speech is the cheap error, deleting real speech the costly one.
+DEGENERATE_WINDOW_CHARS = 1000
+DEGENERATE_RATIO = 5.0
+
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+logger = logging.getLogger(__name__)
 
 
 class TranscribeError(RuntimeError):
@@ -219,6 +235,20 @@ def _derive_has_speech(data: dict[str, Any], text: str, segments: list[Segment])
     return bool(text.strip() or segments)
 
 
+def degenerate_reason(text: str) -> str | None:
+    """Why `text` is a loop rather than speech, or None when it reads as speech."""
+    body = text.strip()
+    if not body:
+        return None
+    if not any(char.isalnum() for char in body):
+        return "no letters or digits"
+    window = body[:DEGENERATE_WINDOW_CHARS].encode()
+    ratio = len(window) / len(zlib.compress(window))
+    if ratio >= DEGENERATE_RATIO:
+        return f"repetition loop (compression ratio {ratio:.1f} >= {DEGENERATE_RATIO})"
+    return None
+
+
 def _parse_output(raw: str, requested_language: str | None) -> Transcript:
     """Parse the transcriber's raw JSON into a `Transcript`.
 
@@ -239,6 +269,15 @@ def _parse_output(raw: str, requested_language: str | None) -> Transcript:
     has_speech = _derive_has_speech(data, text, segments)
     raw_title = data.get("title")
     title = str(raw_title) if raw_title else None
+    reason = degenerate_reason(text) if has_speech else None
+    if reason is not None:
+        # Recorded as no-speech, not raised: a loop is the backend's answer for audio with
+        # no words in it, so this is data about the video, not a failed run. And no-speech
+        # is the signal that makes `digest-video --frames` describe what the video SHOWS.
+        logger.warning("transcriber output discarded as no-speech: %s", reason)
+        return Transcript(
+            text="", segments=[], language=requested_language, has_speech=False, title=title
+        )
     return Transcript(
         text=text, segments=segments, language=language, has_speech=has_speech, title=title
     )
