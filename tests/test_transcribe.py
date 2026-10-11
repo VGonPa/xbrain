@@ -372,3 +372,91 @@ def test_transcribe_imports_no_ml_library():
         "coremltools",
     ):
         assert forbidden not in source
+
+
+# --- Degenerate ASR output: a loop is not speech ---------------------------------------
+#
+# Whisper does not fail on music or noise — it LOOPS. Measured 2026-10-11 on the live
+# store: 10 of 187 speech transcripts were a repetition loop stored as `has_speech=True`
+# ("Det är en del av det här." ×130, one Sinhala syllable ×35, "!!!!!!!!!!!!!!"), each
+# with a confidently wrong language tag (nn, km, sv, ko) — and each reached enrich and the
+# digest as "what the video says".
+
+
+def _ratio(text: str) -> float:
+    """zlib compression ratio of the first 1,000 chars — the fixture's own yardstick."""
+    import zlib
+
+    window = text[:1000].encode()
+    return len(window) / len(zlib.compress(window))
+
+
+# A chant whose repetition is REAL — a meme clip that really chants one word. The live
+# corpus holds one at ratio 3.93; this fixture sits in the same band.
+_REAL_CHANT = (
+    "Tokens tokens tokens tokens tokens tokens token token token token is predicting the next "
+    "token the tokens tokens credible tokens token tokens tokens tokens token tokenized token "
+    "tokens a whole bunch of tokens tokens tokens tokens tokens tokens tokens tokens token rate "
+    "tokens tokens tokens tokens tokens token tokens token token token tokens token token another "
+    "token token tokens tokens tokens token tokens tokens tokens tokens all the tokens tokens "
+    "tokens token per second tokens tokens"
+)
+
+_PROSE = (
+    "So today we are going to talk about architecture, which at least in my experience is the "
+    "part of the job that nobody teaches you. You learn it by shipping things that break and "
+    "then reading the post-mortems. The first idea is that boundaries matter more than layers: "
+    "a module that owns its data can change without a meeting. The second is that every queue "
+    "is a promise about latency that someone will eventually test in production."
+)
+
+
+@pytest.mark.parametrize(
+    "loop",
+    [
+        "Det är en del av det här. " * 130,
+        "වවවවන්න" + "න්න" * 35,
+        "!" * 14,
+    ],
+    ids=["sentence-loop", "syllable-loop", "no-letters"],
+)
+def test_a_degenerate_loop_is_recorded_as_no_speech(tmp_path: Path, loop: str):
+    """The backend SAID there was speech. A loop is not speech, and storing it as a
+    transcript hands the generator a fabricated quotation. Downgrade to no-speech: that
+    is the signal that makes `digest-video --frames` describe what the video SHOWS."""
+    payload = {
+        "text": loop,
+        "language": "sv",
+        "has_speech": True,
+        "segments": [{"start": 0.0, "end": 9.0, "text": loop}],
+    }
+    result = transcribe_media(tmp_path / "music.mp4", runner=_file_runner(payload))
+
+    assert result.has_speech is False
+    assert result.text == ""
+    assert result.segments == []
+    # The language whisper "detected" in a loop is as invented as the loop itself.
+    assert result.language is None
+
+
+def test_real_repetitive_speech_survives_the_loop_guard(tmp_path: Path):
+    """The threshold must sit ABOVE real repetition. Without this side pinned, a guard set
+    low enough to also delete every long talk (a long English transcript compresses ~3x
+    simply by being English) would pass the loop tests above."""
+    assert 3.5 < _ratio(_REAL_CHANT) < 5.0
+    result = transcribe_media(
+        tmp_path / "chant.mp4", runner=_file_runner({"text": _REAL_CHANT, "language": "en"})
+    )
+
+    assert result.has_speech is True
+    assert result.text == _REAL_CHANT
+
+
+def test_ordinary_speech_is_untouched_by_the_loop_guard(tmp_path: Path):
+    result = transcribe_media(
+        tmp_path / "talk.mp4", runner=_file_runner({"text": _PROSE, "language": "en"})
+    )
+
+    assert result.has_speech is True
+    assert result.text == _PROSE
+    assert result.language == "en"
