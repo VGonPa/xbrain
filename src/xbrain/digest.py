@@ -39,7 +39,12 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from xbrain.models import Content, ContentSource, ContentSourceSuccess, Item, VideoFrame
-from xbrain.transcribe import Transcript, TranscriberFailed, transcribe_media
+from xbrain.transcribe import (
+    Transcript,
+    TranscriberFailed,
+    TranscriberNotFound,
+    transcribe_media,
+)
 from xbrain.video_fetch import FetchReport, _select_entry, fetch_videos
 from xbrain.video_frames import (
     FrameExtractionFailed,
@@ -93,6 +98,7 @@ class VisualConfig:
     extract_fn: ExtractFn
     describe_fn: DescribeFn
     classify_fn: ClassifyFn = classify_visual
+    allow_visual_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +153,8 @@ class DigestReport:
     failed: int = 0
     skipped_no_video: int = 0
     skipped_unknown: int = 0
+    skipped_too_large: int = 0
+    skipped_size_unknown: int = 0
     videos_transcribed: int = 0
     # Visual layer (`--frames`, #44 PR4): distinct videos whose slides were
     # extracted + embedded, and distinct videos skipped as talking-head (both 0 on
@@ -185,6 +193,8 @@ class _GroupOutcome:
     no_speech: int = 0
     already: int = 0
     failed: int = 0
+    skipped_too_large: int = 0
+    skipped_size_unknown: int = 0
     did_transcribe: bool = False
     visual_slides: bool = False
     visual_skipped: bool = False
@@ -382,27 +392,70 @@ def _extract_described_slides(path: Path, visual: VisualConfig, *, item_id: str)
     return _VisualResult(slides=slides, classification="slides")
 
 
+def _visual_only_transcript(visual: _VisualResult) -> Transcript | None:
+    """Return a no-speech marker when frames carry the usable video content."""
+    if not visual.slides:
+        return None
+    return Transcript(text="", segments=[], language=None, has_speech=False, title="Visual digest")
+
+
+def _fallback_to_visual_only(
+    visual: _VisualResult,
+    *,
+    item_id: str,
+    reason: Exception,
+) -> Transcript | None:
+    """Use described frames as the digest when ASR is unavailable or failed."""
+    transcript = _visual_only_transcript(visual)
+    if transcript is None:
+        logger.warning(
+            "digest-video: transcription unavailable for item %s and no visual slides were kept: %s",
+            item_id,
+            reason,
+        )
+        return None
+    logger.warning(
+        "digest-video: transcription unavailable for item %s; keeping visual-only digest: %s",
+        item_id,
+        reason,
+    )
+    return transcript
+
+
 def _analyze_media(
     path: Path, transcribe_fn: TranscribeFn, visual: VisualConfig | None, *, item_id: str
 ) -> _MediaAnalysis | None:
-    """Transcribe (and optionally extract slides from) `path`, then discard the bytes.
+    """Transcribe and/or extract slides from `path`, then discard the bytes.
 
-    A per-video `TranscriberFailed` (malformed output for this one video) is logged
-    and returns None so the batch continues; a missing-binary `TranscriberNotFound`
-    is NOT caught — it aborts the whole run. The visual layer runs BEFORE the mp4 is
-    discarded (it needs the bytes). The mp4 is unlinked in every case, so at most
-    one video is on disk at a time; the extracted frame images live in a sibling
-    temp dir reclaimed by the enclosing ephemeral `TemporaryDirectory`.
+    A per-video `TranscriberFailed` is logged and, when the visual layer produced
+    slides, downgraded to a visual-only digest so screen recordings still become
+    searchable. A missing transcriber remains a global error unless
+    `VisualConfig.allow_visual_only` is enabled. The mp4 is unlinked in every
+    case, so at most one video is on disk at a time.
     """
     try:
-        try:
-            transcript = transcribe_fn(path)
-        except TranscriberFailed as exc:
-            logger.warning("digest-video: transcription failed for item %s: %s", item_id, exc)
-            return None
         result = _VisualResult()
         if visual is not None:
             result = _extract_described_slides(path, visual, item_id=item_id)
+        transcript: Transcript | None
+        try:
+            transcript = transcribe_fn(path)
+        except TranscriberFailed as exc:
+            if visual is not None:
+                transcript = _fallback_to_visual_only(result, item_id=item_id, reason=exc)
+                if transcript is None:
+                    return None
+            else:
+                logger.warning("digest-video: transcription failed for item %s: %s", item_id, exc)
+                return None
+        except TranscriberNotFound as exc:
+            if visual is None or not visual.allow_visual_only:
+                raise
+            transcript = _fallback_to_visual_only(result, item_id=item_id, reason=exc)
+            if transcript is None:
+                return None
+        if transcript is None:
+            return None
         return _MediaAnalysis(transcript=transcript, visual=result)
     finally:
         path.unlink(missing_ok=True)
@@ -508,7 +561,7 @@ def _process_group(
     fetch_report = fetch_fn(store, [representative], dest_dir)
     fetched = _fetched_path(fetch_report, representative)
     if fetched is None:
-        return _GroupOutcome(already=already, failed=len(needing))
+        return _fetch_miss_outcome(fetch_report, representative, needing, already)
     analysis = _analyze_media(fetched, transcribe_fn, visual, item_id=representative)
     if analysis is None:
         return _GroupOutcome(already=already, failed=len(needing))
@@ -524,12 +577,27 @@ def _process_group(
     return _group_outcome(analysis, needing, already)
 
 
+def _fetch_miss_outcome(
+    fetch_report: FetchReport, representative: str, needing: list[str], already: int
+) -> _GroupOutcome:
+    """Map a non-fetched representative into a digest outcome."""
+    result = next((r for r in fetch_report.results if r.id == representative), None)
+    if result is not None and result.outcome == "skipped":
+        if result.reason == "too_large":
+            return _GroupOutcome(already=already, skipped_too_large=len(needing))
+        if result.reason == "size_unknown":
+            return _GroupOutcome(already=already, skipped_size_unknown=len(needing))
+    return _GroupOutcome(already=already, failed=len(needing))
+
+
 def _tally(report: DigestReport, outcome: _GroupOutcome) -> None:
     """Sum one group's outcome into the run report (the single tally site)."""
     report.transcribed += outcome.transcribed
     report.no_speech += outcome.no_speech
     report.already += outcome.already
     report.failed += outcome.failed
+    report.skipped_too_large += outcome.skipped_too_large
+    report.skipped_size_unknown += outcome.skipped_size_unknown
     if outcome.did_transcribe:
         report.videos_transcribed += 1
     report.visual_slides += int(outcome.visual_slides)
@@ -616,9 +684,11 @@ def format_digest_summary(report: DigestReport) -> str:
     summary = (
         f"Vídeos: transcritos {report.transcribed}, sin voz {report.no_speech}, "
         f"ya digeridos {report.already}, fallidos {report.failed}, "
-        f"sin vídeo {report.skipped_no_video}, desconocidos {report.skipped_unknown}. "
+        f"sin vídeo {report.skipped_no_video}, desconocidos {report.skipped_unknown}, "
+        f"> --max-size {report.skipped_too_large}, "
+        f"sin tamaño {report.skipped_size_unknown}. "
         f"Dedup: {report.total_items} items ← {report.video_count} vídeos "
-        f"({report.videos_transcribed} transcritos este run)."
+        f"({report.videos_transcribed} procesados este run)."
     )
     if report.visual_slides or report.visual_skipped:
         summary += (

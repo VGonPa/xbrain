@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import cast, get_args
 
 from xbrain.executors.base import EnrichmentExecutor
-from xbrain.models import Enrichment, ExecutorName, Item, Topic
+from xbrain.models import Enrichment, ExecutorName, Item, Topic, TopicConfidence
 from xbrain.validate import validate_judgment
 
 
@@ -60,6 +60,48 @@ def items_pending_enrichment(
     return pending
 
 
+def _in_date_range(item: Item, since: datetime | None, until: datetime | None) -> bool:
+    if since and item.created_at < since:
+        return False
+    if until and item.created_at > until:
+        return False
+    return True
+
+
+def _has_taxonomy_risk(item: Item) -> bool:
+    """True when an existing enrichment deserves selective taxonomy review."""
+    enrichment = item.enriched
+    if enrichment is None:
+        return True
+    if _needs_reenrichment(item):
+        return True
+    return (
+        enrichment.topic_confidence in (None, "low")
+        or bool(enrichment.suggested_new_topics)
+        or enrichment.primary_topic == "misc"
+        or "misc" in enrichment.topics
+    )
+
+
+def items_for_taxonomy_reenrichment(
+    store: dict[str, Item],
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[Item]:
+    """Return items that should be re-enriched to repair/check taxonomy assignment.
+
+    This is deliberately broader than `items_pending_enrichment`: it includes
+    already-enriched items whose taxonomy signal is weak (`misc`, low/unknown
+    confidence, or suggested missing topics). It lets operators act on
+    `taxonomy-health` without re-enriching the whole corpus.
+    """
+    return [
+        item
+        for item in store.values()
+        if _in_date_range(item, since, until) and _has_taxonomy_risk(item)
+    ]
+
+
 def apply_enrichment(item: Item, enrichment: Enrichment) -> None:
     """Attach an enrichment result to an item."""
     item.enriched = enrichment
@@ -71,12 +113,20 @@ def _validate_and_attach(
     summary: str,
     primary_topic: str,
     topics: object,
+    topic_confidence: object,
+    suggested_new_topics: object,
     vocab_slugs: set[str],
     executor_name: str,
 ) -> list[str]:
     """Validate one judgment; attach it if valid. Return errors (empty = ok)."""
     errors = validate_judgment(
-        {"summary": summary, "primary_topic": primary_topic, "topics": topics},
+        {
+            "summary": summary,
+            "primary_topic": primary_topic,
+            "topics": topics,
+            "topic_confidence": topic_confidence,
+            "suggested_new_topics": suggested_new_topics,
+        },
         vocab_slugs,
     )
     if errors:
@@ -88,6 +138,8 @@ def _validate_and_attach(
     item = store.get(item_id)
     if item is None:
         return [f"unknown item id: {item_id}"]
+    if not isinstance(suggested_new_topics, list):
+        return ["suggested_new_topics must be a list"]
     apply_enrichment(
         item,
         Enrichment(
@@ -99,6 +151,8 @@ def _validate_and_attach(
             summary=summary,
             primary_topic=primary_topic,
             topics=list(topics),
+            topic_confidence=cast(TopicConfidence | None, topic_confidence),
+            suggested_new_topics=[str(slug) for slug in suggested_new_topics],
         ),
     )
     return []
@@ -116,12 +170,30 @@ def enrich_with_executor(
     Returns `(enriched_count, invalid)` where `invalid` is `(item_id, errors)`.
     """
     pending = items_pending_enrichment(store, since, until)
+    return enrich_selected_with_executor(store, executor, vocab, pending)
+
+
+def enrich_selected_with_executor(
+    store: dict[str, Item],
+    executor: EnrichmentExecutor,
+    vocab: list[Topic],
+    items: list[Item],
+) -> tuple[int, list[tuple[str, list[str]]]]:
+    """Enrich a caller-selected item list with an in-process executor."""
     vocab_slugs = {t.slug for t in vocab}
     enriched = 0
     invalid: list[tuple[str, list[str]]] = []
-    for j in executor.enrich_items(pending, vocab):
+    for j in executor.enrich_items(items, vocab):
         errors = _validate_and_attach(
-            store, j.item_id, j.summary, j.primary_topic, j.topics, vocab_slugs, "api"
+            store,
+            j.item_id,
+            j.summary,
+            j.primary_topic,
+            j.topics,
+            j.topic_confidence,
+            j.suggested_new_topics,
+            vocab_slugs,
+            "api",
         )
         if errors:
             invalid.append((j.item_id, errors))
@@ -150,6 +222,8 @@ def apply_worksheet_judgments(
             str(j.get("summary", "")),
             str(j.get("primary_topic", "")),
             j.get("topics"),
+            j.get("topic_confidence"),
+            j.get("suggested_new_topics", []),
             vocab_slugs,
             executor_name,
         )

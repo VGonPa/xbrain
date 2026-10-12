@@ -32,7 +32,7 @@ def test_resynth_workflow_prompts_for_new_evidence_blocks():
     """The agent prompt must name the new evidence so the LLM weighs it."""
     text = _WORKFLOW.read_text(encoding="utf-8")
     assert "Images across" in text
-    assert "Video transcripts across" in text
+    assert "Video summaries across" in text
 
 
 def test_skill_lists_new_topic_evidence_fields():

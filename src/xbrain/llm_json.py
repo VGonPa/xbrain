@@ -37,7 +37,7 @@ def extract_json(text: str) -> dict:
 
 
 def json_from_response(response, context: str = "") -> dict:
-    """Extract a JSON object from an Anthropic API response.
+    """Extract a JSON object from a provider-normalized LLM response.
 
     Joins every text block in the response and runs :func:`extract_json` on the
     result. Raises ValueError (with optional ``context``) when the response

@@ -193,6 +193,27 @@ def snapshot_prune(data_dir: Path, *, keep_last: int) -> int:
     return len(to_delete)
 
 
+def snapshot_prune_auto(data_dir: Path, *, keep_last: int) -> int:
+    """Delete older auto-snapshots while leaving manual snapshots untouched.
+
+    `keep_last` must be >= 0. A value of 0 disables automatic pruning. Corrupt
+    snapshots are left in place because they may need operator inspection.
+    """
+    if keep_last < 0:
+        raise ValueError(f"keep_last must be >= 0, got {keep_last}")
+    if keep_last == 0:
+        return 0
+    auto_rows = [
+        (snapshot_dir, manifest)
+        for snapshot_dir, manifest in snapshot_list(data_dir)
+        if manifest is not None and manifest.command != "manual"
+    ]
+    to_delete = auto_rows[keep_last:]
+    for snapshot_dir, _ in to_delete:
+        shutil.rmtree(snapshot_dir)
+    return len(to_delete)
+
+
 # --------------------------------------------------------------------- internals
 
 

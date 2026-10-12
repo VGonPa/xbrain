@@ -1,6 +1,6 @@
 """Topic-overview synthesis — the two executor tracks for the `topics` stage.
 
-Mirrors the enrich pattern: an `api` track (one Anthropic call per topic) and a
+Mirrors the enrich pattern: an `api` track (one LLM call per topic) and a
 worksheet track (export / import for the `manual` / `claude-code` executors).
 Both consume the same declarative `rubric-topic-page.md`.
 """
@@ -16,10 +16,12 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from xbrain.llm_json import json_from_response
+from xbrain.llm_client import LlmProvider, build_llm_client, recoverable_llm_errors
 from xbrain.rubrics import load_rubric
 from xbrain.validate import validate_overview
 
 _MAX_TOKENS = 2000
+_OVERVIEW_JUDGMENT_KEYS = ("overview", "notes")
 
 
 class OverviewJudgment(BaseModel):
@@ -46,10 +48,9 @@ class TopicInput:
     reflects visual evidence that the per-post enrichment may have
     only partially captured. Decorative photos are excluded at the
     seam (mirrors `xbrain.executors.api._content_image_descriptions`).
-    `video_transcripts` is the bounded per-video transcript excerpt for
-    every with-speech `x_video` source in the topic's posts (#44) — richer
-    evidence than the one-line summary alone, trimmed per video so a topic
-    full of long talks stays within the prompt's token budget.
+    `video_transcripts` is a legacy field name: it now carries bounded
+    per-video executive summaries from `x_video` sources. Raw transcripts are
+    retained only as vault reference artifacts and never enter this prompt.
     """
 
     slug: str
@@ -90,23 +91,41 @@ def _user_prompt(topic: TopicInput) -> str:
         ]
         lines += [f"- {description}" for description in topic.image_descriptions]
     if topic.video_transcripts:
-        # Transcript evidence supplements the summaries the same way images
-        # do: a talk's transcript carries detail a one-line summary drops.
-        # Each excerpt is already bounded by the caller (`build_topic_inputs`)
-        # so a topic full of long talks stays within the token budget (#44).
+        # Video executive summaries supplement the per-post summaries the same
+        # way image descriptions do. Each excerpt is already bounded by the
+        # caller (`build_topic_inputs`) so a topic full of videos stays within
+        # the token budget.
         lines += [
             "",
-            f"Video transcripts across the {len(topic.video_transcripts)} videos in this topic (truncated):",
+            f"Video summaries across the {len(topic.video_transcripts)} videos in this topic (truncated):",
         ]
-        lines += [f"- {transcript}" for transcript in topic.video_transcripts]
+        lines += [f"- {summary}" for summary in topic.video_transcripts]
     return "\n".join(lines)
+
+
+def _validated_overview_judgment(judgment: dict) -> dict:
+    """Return a clean overview judgment, tolerating harmless extra keys.
+
+    Some LLMs occasionally append an accidental prose-shaped key while still
+    providing valid `overview` and `notes`. The worksheet path stays strict via
+    `validate_overview`; the API path can safely project the allowed keys and
+    keep the batch moving.
+    """
+    errors = validate_overview(judgment)
+    if not errors:
+        return judgment
+
+    if any(error.startswith("unexpected keys") for error in errors):
+        candidate = {key: judgment.get(key) for key in _OVERVIEW_JUDGMENT_KEYS}
+        if not validate_overview(candidate):
+            return candidate
+
+    raise ValueError(f"overview rechazado: {'; '.join(errors)}")
 
 
 def _judgment_from_response(response, slug: str) -> OverviewJudgment:
     judgment = json_from_response(response, context=f"topic {slug}")
-    errors = validate_overview(judgment)
-    if errors:
-        raise ValueError(f"overview rechazado: {'; '.join(errors)}")
+    judgment = _validated_overview_judgment(judgment)
     return OverviewJudgment(
         slug=slug, overview=str(judgment["overview"]), notes=list(judgment["notes"])
     )
@@ -115,19 +134,9 @@ def _judgment_from_response(response, slug: str) -> OverviewJudgment:
 def _recoverable_errors() -> tuple[type[Exception], ...]:
     """Exception classes a per-topic failure should swallow + log + continue on.
 
-    Mirrors `xbrain.executors.api._recoverable_errors`. See that helper for
-    rationale. `anthropic.APIError` is lazy-imported because `anthropic` is
-    optional in the test environment (the client is faked).
+    Mirrors `xbrain.executors.api._recoverable_errors`. See that helper for rationale.
     """
-    try:
-        import json as _json
-        from anthropic import APIError
-
-        return (APIError, ValueError, _json.JSONDecodeError, KeyError)
-    except ImportError:
-        import json as _json
-
-        return (ValueError, _json.JSONDecodeError, KeyError)
+    return recoverable_llm_errors()
 
 
 def synthesize_overviews_api(
@@ -135,8 +144,10 @@ def synthesize_overviews_api(
     model: str,
     output_language: str,
     client=None,
+    provider: LlmProvider = "nanogpt",
+    base_url: str | None = None,
 ) -> list[OverviewJudgment]:
-    """Synthesize topic overviews via the Anthropic API — one call per topic.
+    """Synthesize topic overviews via the configured text LLM API.
 
     A `RuntimeError` is raised when EVERY input topic fails — exposed as a
     non-zero exit through the CLI's `_handle_cli_errors` wrapper. Partial
@@ -148,9 +159,7 @@ def synthesize_overviews_api(
     traceback and Ctrl-C still works.
     """
     if client is None:
-        from anthropic import Anthropic  # lazy: tests inject a fake
-
-        client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+        client = build_llm_client(provider, base_url=base_url)
     system = _system_prompt(output_language)
     recoverable = _recoverable_errors()
     results: list[OverviewJudgment] = []
@@ -196,8 +205,9 @@ def export_topic_worksheet(inputs: list[TopicInput], path: Path, output_language
             f"keys {{slug, overview, notes}}. `overview` is plain prose in "
             f"{output_language}; `notes` is a list of plain-prose strings in "
             f"{output_language}. A topic may also carry `image_descriptions` "
-            f"(content-bearing photos) and `video_transcripts` (bounded excerpts) "
-            f"— weigh them as visual/transcript evidence alongside the summaries. "
+            f"(content-bearing photos) and `video_transcripts` (legacy field name "
+            f"for bounded video executive summaries) — weigh them as evidence "
+            f"alongside the summaries. "
             f"No wikilinks, no filenames. Then run: "
             f"xbrain topics --apply <this file>."
         ),
@@ -213,10 +223,10 @@ def export_topic_worksheet(inputs: list[TopicInput], path: Path, output_language
                 # into `TopicInput.image_descriptions`; empty list when the topic has
                 # none. No truncation — the api path doesn't bound these either.
                 "image_descriptions": t.image_descriptions,
-                # Bounded video-transcript excerpts (#56 transcript-to-topics half):
-                # mirrors the `api` track's topic block ("Video transcripts across
-                # the N videos in this topic"). Already collected + per-video bounded
-                # (`TOPIC_TRANSCRIPT_CHAR_LIMIT`) by `build_topic_inputs` into
+                # Bounded video executive summaries: mirrors the `api` track's
+                # topic block ("Video summaries across the N videos in this topic").
+                # Already collected + per-video bounded (`TOPIC_TRANSCRIPT_CHAR_LIMIT`)
+                # by `build_topic_inputs` into the legacy field
                 # `TopicInput.video_transcripts`; empty list when the topic has none.
                 "video_transcripts": t.video_transcripts,
             }

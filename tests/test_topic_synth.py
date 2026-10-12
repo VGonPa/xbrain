@@ -1,11 +1,11 @@
 # tests/test_topic_synth.py
-from conftest import FakeAnthropic
+from conftest import FakeLLMClient
 
 from xbrain.topic_synth import OverviewJudgment, TopicInput, synthesize_overviews_api
 
 
 def test_synthesize_overviews_api_returns_one_judgment_per_topic():
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             {"overview": "Resumen de ai-coding.", "notes": ["Nota."]},
             {"overview": "Resumen de career.", "notes": []},
@@ -24,7 +24,7 @@ def test_synthesize_overviews_api_substitutes_language_in_system_prompt():
     """The topic-page rubric has two {language} placeholders. Both must be
     substituted before the prompt is sent to the LLM.
     """
-    client = FakeAnthropic([{"overview": "ok", "notes": []}])
+    client = FakeLLMClient([{"overview": "ok", "notes": []}])
     synthesize_overviews_api(
         [TopicInput(slug="x", description="d", summaries=["s"])],
         model="m",
@@ -40,7 +40,7 @@ def test_synthesize_overviews_api_substitutes_language_in_system_prompt():
 def test_synthesize_overviews_api_skips_an_invalid_judgment():
     # A judgment containing a wikilink fails validate_overview and is dropped;
     # the batch continues.
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             {"overview": "Mira [[items/x]].", "notes": []},
             {"overview": "Resumen válido.", "notes": ["n"]},
@@ -54,10 +54,25 @@ def test_synthesize_overviews_api_skips_an_invalid_judgment():
     assert [r.slug for r in results] == ["good"]
 
 
+def test_synthesize_overviews_api_ignores_harmless_extra_keys():
+    client = FakeLLMClient(
+        [
+            {
+                "overview": "Resumen válido.",
+                "notes": [],
+                "Extra prose accidentally used as a key.": "",
+            }
+        ]
+    )
+    inputs = [TopicInput(slug="productivity", description="d", summaries=["s"])]
+    results = synthesize_overviews_api(inputs, model="m", output_language="English", client=client)
+    assert results == [OverviewJudgment(slug="productivity", overview="Resumen válido.", notes=[])]
+
+
 def test_synthesize_overviews_api_isolates_an_api_error(capsys):
     from anthropic import APIError
 
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             APIError("API caída", request=None, body=None),
             {"overview": "ok", "notes": []},
@@ -79,7 +94,7 @@ def test_synthesize_overviews_api_raises_when_all_topics_fail():
     import pytest
     from anthropic import APIError
 
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             APIError("401 unauthorized", request=None, body=None),
             APIError("401 unauthorized", request=None, body=None),
@@ -288,7 +303,7 @@ def test_synthesize_overviews_api_emits_no_summary_on_total_failure(capsys):
     import pytest
     from anthropic import APIError
 
-    client = FakeAnthropic([APIError("503", request=None, body=None)])
+    client = FakeLLMClient([APIError("503", request=None, body=None)])
     with pytest.raises(RuntimeError):
         synthesize_overviews_api(
             [TopicInput(slug="x", description="d", summaries=["s"])],
@@ -301,7 +316,7 @@ def test_synthesize_overviews_api_emits_no_summary_on_total_failure(capsys):
 
 def test_synthesize_overviews_api_emits_no_summary_when_all_succeed(capsys):
     """No failures, no noise: a clean batch stays silent on stderr."""
-    client = FakeAnthropic([{"overview": "ok", "notes": []}])
+    client = FakeLLMClient([{"overview": "ok", "notes": []}])
     synthesize_overviews_api(
         [TopicInput(slug="x", description="d", summaries=["s"])],
         model="m",
@@ -336,8 +351,8 @@ def test_user_prompt_omits_image_section_when_empty():
     assert "Images across" not in prompt
 
 
-def test_user_prompt_includes_video_transcripts_when_provided():
-    """When `video_transcripts` is non-empty, the topic prompt carries a video block."""
+def test_user_prompt_includes_video_summaries_when_provided():
+    """When `video_transcripts` is non-empty, the topic prompt carries video summaries."""
     from xbrain.topic_synth import _user_prompt
 
     topic_input = TopicInput(
@@ -347,7 +362,7 @@ def test_user_prompt_includes_video_transcripts_when_provided():
         video_transcripts=["A talk on retrieval-augmented agents.", "A live coding demo."],
     )
     prompt = _user_prompt(topic_input)
-    assert "Video transcripts across the 2 videos" in prompt
+    assert "Video summaries across the 2 videos" in prompt
     assert "A talk on retrieval-augmented agents." in prompt
     assert "A live coding demo." in prompt
 
@@ -357,4 +372,4 @@ def test_user_prompt_omits_video_section_when_empty():
     from xbrain.topic_synth import _user_prompt
 
     prompt = _user_prompt(TopicInput(slug="x", description="d", summaries=["s"]))
-    assert "Video transcripts across" not in prompt
+    assert "Video summaries across" not in prompt

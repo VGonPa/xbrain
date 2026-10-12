@@ -1,8 +1,9 @@
 """Parse an X long-form Article's GraphQL payload into ordered `ArticleBlock`s.
 
 X serialises a long-form Article body as a Draft.js `ContentState`: an ordered
-list of `blocks` (paragraphs, headings, list items, plus `atomic` blocks that
-reference inline media) and an `entityMap` that resolves each media reference.
+list of `blocks` (paragraphs, headings, list items, code blocks, plus `atomic`
+blocks that reference inline media) and an `entityMap` that resolves each media
+reference.
 This module turns that payload into the ordered `list[ArticleBlock]` carried on
 `ContentSourceSuccess.blocks` (#39 PR3): text runs become `ArticleTextBlock`
 (with `## `/`- ` markdown prefixes baked in for headings/lists), inline images
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, TypeGuard
 
 from xbrain.models import (
@@ -51,6 +53,13 @@ logger = logging.getLogger(__name__)
 # LINK / TWEET / MENTION entity is explicitly NOT one, so an inline-link
 # paragraph keeps its text rather than being mistaken for an image.
 _IMAGE_ENTITY_TYPES = frozenset({"IMAGE", "MEDIA"})
+# Newer X Article payloads can wrap markdown/code body fragments in an atomic
+# Draft.js entity instead of using the block's own `text`. Those are text, not
+# media.
+_CODE_ENTITY_TYPES = frozenset({"MARKDOWN", "CODE", "CODE_BLOCK", "CODEBLOCK", "PRE"})
+_MARKDOWN_TEXT_KEYS = ("markdown", "text", "value", "content", "code")
+_CODE_LANGUAGE_KEYS = ("language", "lang", "syntax", "mode")
+_CODE_BLOCK_TYPES = frozenset({"code-block", "code"})
 # Ordered key names that may carry an image's CDN URL directly on the entity /
 # media-item `data` (the defensive/constructed shape; the live shape resolves
 # via `media_entities` instead). Anchoring on the key name keeps it drift-tolerant.
@@ -247,11 +256,28 @@ def _build_blocks(
     """
     blocks: list[ArticleBlock] = []
     have_text = False
+    code_lines: list[str] = []
+
+    def append_text(text: str) -> None:
+        nonlocal have_text
+        separator = ARTICLE_PARAGRAPH_SEP if have_text else ""
+        blocks.append(ArticleTextBlock(text=separator + text))
+        have_text = True
+
+    def flush_code_lines() -> None:
+        if not any(line.strip() for line in code_lines):
+            code_lines.clear()
+            return
+        append_text(_fenced_code_block("\n".join(code_lines).strip("\n")))
+        code_lines.clear()
+
     for raw in raw_blocks:
         if not isinstance(raw, dict):
+            flush_code_lines()
             continue
         entity = _first_entity(raw, entity_by_key)
         if _is_image_entity(entity):
+            flush_code_lines()
             images, unresolved = _resolve_image_blocks(entity, media_index)
             if images:
                 blocks.extend(images)
@@ -260,13 +286,21 @@ def _build_blocks(
             else:
                 _log_dropped_block(raw, entity_by_key)
             continue
+        code_entity = _code_entity_text(entity)
+        if code_entity:
+            flush_code_lines()
+            append_text(code_entity)
+            continue
         text = raw.get("text")
+        if isinstance(text, str) and _is_code_block_type(raw.get("type")):
+            code_lines.append(text)
+            continue
+        flush_code_lines()
         if isinstance(text, str) and text.strip():
-            separator = ARTICLE_PARAGRAPH_SEP if have_text else ""
-            blocks.append(ArticleTextBlock(text=separator + _block_prefix(raw.get("type")) + text))
-            have_text = True
+            append_text(_block_prefix(raw.get("type")) + text)
             continue
         _log_dropped_block(raw, entity_by_key)
+    flush_code_lines()
     return blocks
 
 
@@ -276,6 +310,87 @@ def _is_image_entity(entity: dict[str, Any] | None) -> TypeGuard[dict[str, Any]]
     A `TypeGuard` so callers narrow `entity` to a non-optional dict afterwards.
     """
     return isinstance(entity, dict) and str(entity.get("type", "")).upper() in _IMAGE_ENTITY_TYPES
+
+
+def _code_entity_text(entity: dict[str, Any] | None) -> str | None:
+    """Markdown/code text carried by an atomic code-ish entity, or None."""
+    if not isinstance(entity, dict):
+        return None
+    entity_type = str(entity.get("type", "")).upper()
+    if entity_type not in _CODE_ENTITY_TYPES:
+        return None
+    data = entity.get("data")
+    if not isinstance(data, dict):
+        return None
+    for key in _MARKDOWN_TEXT_KEYS:
+        text = data.get(key)
+        if isinstance(text, str) and text.strip():
+            return _fenced_code_block(
+                text.strip(), language=_entity_code_language(entity_type, data, text)
+            )
+    return None
+
+
+def _fenced_code_block(text: str, *, language: str | None = None) -> str:
+    """Render Article code/markdown text as a safe fenced code block."""
+    text, detected_language = _strip_wrapping_code_fence(text)
+    language = detected_language or language
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    language = language or _infer_code_language(text)
+    return f"{fence}{language}\n{text}\n{fence}"
+
+
+def _strip_wrapping_code_fence(text: str) -> tuple[str, str | None]:
+    """Unwrap a code block that X already serialized with Markdown fences."""
+    lines = text.strip("\n").splitlines()
+    if len(lines) < 2:
+        return text, None
+    match = re.fullmatch(r"(`{3,}|~{3,})([A-Za-z0-9_+#.-]{0,32})\s*", lines[0].strip())
+    if match is None:
+        return text, None
+    fence, raw_language = match.groups()
+    closing = lines[-1].strip()
+    if closing != fence:
+        return text, None
+    language = _safe_code_language(raw_language) if raw_language else None
+    return "\n".join(lines[1:-1]).strip("\n"), language
+
+
+def _entity_code_language(entity_type: str, data: dict[str, Any], text: str) -> str:
+    """Choose a fence language for code carried in an entity payload."""
+    for key in _CODE_LANGUAGE_KEYS:
+        language = data.get(key)
+        if isinstance(language, str):
+            cleaned = _safe_code_language(language)
+            if cleaned is not None:
+                return cleaned
+    if entity_type == "MARKDOWN":
+        return "markdown"
+    return _infer_code_language(text)
+
+
+def _infer_code_language(text: str) -> str:
+    """Infer only obvious Markdown; otherwise keep the block plain text."""
+    if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S", text):
+        return "markdown"
+    if re.search(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+\S", text):
+        return "markdown"
+    return "text"
+
+
+def _safe_code_language(language: str) -> str | None:
+    """Sanitise a language tag before placing it in a Markdown fence."""
+    candidate = language.strip().lower()
+    if re.fullmatch(r"[a-z0-9_+#.-]{1,32}", candidate):
+        return candidate
+    return None
+
+
+def _is_code_block_type(block_type: Any) -> bool:
+    if not isinstance(block_type, str):
+        return False
+    return block_type.lower().replace("_", "-") in _CODE_BLOCK_TYPES
 
 
 def _resolve_image_blocks(

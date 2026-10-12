@@ -62,6 +62,24 @@ _MAX_ERROR_LEN = 500
 LinkFetcher = Callable[[str], ContentSource]
 
 
+def _is_x_js_disabled_interstitial(text: str) -> bool:
+    """True when trafilatura extracted X's no-JavaScript interstitial.
+
+    That page is reachable HTML, so a generic extractor can return its boilerplate
+    as if it were article text. Treating it as a success pollutes the vault with a
+    fake article body; it is really a JS-rendering/auth/session failure.
+    """
+    normalized = " ".join(text.replace("’", "'").lower().split())
+    return (
+        "javascript is disabled" in normalized
+        and (
+            "please enable javascript" in normalized
+            or "switch to a supported browser" in normalized
+        )
+        and ("x.com" in normalized or "help center" in normalized or "x corp" in normalized)
+    )
+
+
 def _x_status_id(url: str) -> str | None:
     """The tweet id of an x.com `/status/<id>` URL, or None."""
     match = _STATUS_RE.search(urlparse(url).path)
@@ -70,6 +88,8 @@ def _x_status_id(url: str) -> str | None:
 
 def _classify_x_url(url: str) -> Literal["status", "article", "other"]:
     """Classify an x.com URL: a tweet/thread, an X article, or anything else."""
+    if not is_x_url(url):
+        return "other"
     path = urlparse(url).path
     # Check the article prefix before /status/ — an X article URL can itself
     # contain a `/status/<id>` segment and must not be misrouted as a tweet.
@@ -96,9 +116,8 @@ def _nav_error(message: str, exc: Exception) -> str:
     return text
 
 
-def assemble_linked_thread(responses: list, anchor_id: str) -> tuple[str | None, str]:
-    """From captured `TweetDetail` responses, concatenate the thread rooted at
-    the linked tweet. Pure — no browser. Returns `(author_handle, text)`."""
+def _linked_thread_items(responses: list, anchor_id: str) -> tuple[Item | None, list[Item]]:
+    """Return the linked anchor and its same-author thread from GraphQL payloads."""
     tweets: list[Item] = []
     seen: set[str] = set()
     for response in responses:
@@ -108,17 +127,31 @@ def assemble_linked_thread(responses: list, anchor_id: str) -> tuple[str | None,
                 tweets.append(tweet)
     anchor = next((t for t in tweets if t.id == anchor_id), None)
     if anchor is None:
+        return None, []
+    thread = sorted(
+        (tweet for tweet in tweets if tweet.author.handle == anchor.author.handle),
+        key=lambda tweet: tweet.created_at,
+    )
+    return anchor, thread
+
+
+def assemble_linked_thread(responses: list, anchor_id: str) -> tuple[str | None, str]:
+    """From captured `TweetDetail` responses, concatenate the thread rooted at
+    the linked tweet. Pure — no browser. Returns `(author_handle, text)`."""
+    anchor, thread = _linked_thread_items(responses, anchor_id)
+    if anchor is None:
         return None, ""
-    handle = anchor.author.handle
-    thread = sorted((t for t in tweets if t.author.handle == handle), key=lambda t: t.created_at)
-    return handle, "\n\n".join(t.text for t in thread)
+    return anchor.author.handle, "\n\n".join(tweet.text for tweet in thread)
 
 
-def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
+def _fetch_tweet_details(context: BrowserContext, url: str) -> tuple[ContentSource, list[str]]:
     """Fetch a linked tweet/thread via TweetDetail interception.
 
     The result is filed as `kind="x_article"` (not `thread`) so all x.com-link
     content shares one source kind for `_needs_x_fetch` / `_attach_x_sources`.
+    Also returns one-hop X Article links discovered on that thread so production
+    fetching can resolve the actual long-form body rather than stopping at a
+    `t.co` pointer.
     """
     captured: list[dict] = []
     page = context.new_page()
@@ -140,27 +173,48 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
             page.wait_for_timeout(_SETTLE_MS)
         except Exception as exc:  # noqa: BLE001 - navigation failure -> empty result
             logger.warning("tweet: navigation failed for %s", url, exc_info=True)
-            return ContentSourceFailure(
-                kind="x_article",
-                url=url,
-                failure_reason="timeout",
-                error=_nav_error("No se pudo cargar el tweet.", exc),
-                attempts=1,
+            return (
+                ContentSourceFailure(
+                    kind="x_article",
+                    url=url,
+                    failure_reason="timeout",
+                    error=_nav_error("No se pudo cargar el tweet.", exc),
+                    attempts=1,
+                ),
+                [],
             )
         if is_logged_out(page.url):
             raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
-        _handle, text = assemble_linked_thread(captured, _x_status_id(url) or "")
+        _anchor, thread = _linked_thread_items(captured, _x_status_id(url) or "")
     finally:
         page.close()
+    text = "\n\n".join(tweet.text for tweet in thread)
     if text:
-        return ContentSourceSuccess(kind="x_article", url=url, text=text, attempts=1)
-    return ContentSourceFailure(
-        kind="x_article",
-        url=url,
-        failure_reason="empty_content",
-        error="No se pudo recuperar el contenido del tweet.",
-        attempts=1,
+        article_urls = list(
+            dict.fromkeys(
+                link.url
+                for tweet in thread
+                for link in tweet.links
+                if _classify_x_url(link.url) == "article"
+            )
+        )
+        return ContentSourceSuccess(kind="x_article", url=url, text=text, attempts=1), article_urls
+    return (
+        ContentSourceFailure(
+            kind="x_article",
+            url=url,
+            failure_reason="empty_content",
+            error="No se pudo recuperar el contenido del tweet.",
+            attempts=1,
+        ),
+        [],
     )
+
+
+def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
+    """Compatibility wrapper returning only the direct tweet/thread source."""
+    source, _article_urls = _fetch_tweet_details(context, url)
+    return source
 
 
 def _is_article_graphql(response_url: str) -> bool:
@@ -336,6 +390,20 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
 
     text = trafilatura.extract(html)
     if text:
+        if _is_x_js_disabled_interstitial(text):
+            logger.warning(
+                "article: X returned the JavaScript-disabled interstitial for %s; "
+                "recording js_required instead of a fake article body",
+                url,
+            )
+            return ContentSourceFailure(
+                kind="x_article",
+                url=url,
+                failure_reason="js_required",
+                error="X devolvió la pantalla de JavaScript desactivado en vez del cuerpo del artículo.",
+                http_status=200,
+                attempts=1,
+            )
         return ContentSourceSuccess(
             kind="x_article", url=url, text=text, http_status=200, attempts=1
         )
@@ -348,11 +416,62 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
     )
 
 
-def _fetch_x_link(context: BrowserContext, url: str) -> ContentSource:
-    """Fetch one x.com link, routed by URL kind."""
-    if _classify_x_url(url) == "status":
-        return _fetch_tweet(context, url)
-    return _fetch_rendered(context, url)
+def _unexpected_x_failure(url: str, exc: Exception) -> ContentSourceFailure:
+    """Persist an unexpected per-link X failure without aborting sibling links."""
+    return ContentSourceFailure(
+        kind="x_article",
+        url=url,
+        failure_reason="unknown_error",
+        error=_nav_error("Error al descargar el contenido enlazado de X.", exc),
+        attempts=1,
+    )
+
+
+def _fetch_x_link_sources(context: BrowserContext, url: str) -> list[ContentSource]:
+    """Fetch one direct X link plus X Articles discovered one hop beneath it."""
+    if _classify_x_url(url) != "status":
+        return [_fetch_rendered(context, url)]
+    direct, article_urls = _fetch_tweet_details(context, url)
+    sources: list[ContentSource] = [direct]
+    for article_url in article_urls:
+        try:
+            sources.append(_fetch_rendered(context, article_url))
+        except Exception as exc:  # noqa: BLE001 - one nested link must stay isolated
+            logger.warning("article: nested X link failed for %s", article_url, exc_info=True)
+            sources.append(_unexpected_x_failure(article_url, exc))
+    return sources
+
+
+def _is_substantive_source(source: ContentSourceSuccess) -> bool:
+    """True when a cached source is richer than a bare URL-pointer tweet."""
+    return bool(source.title or source.blocks or len(source.text.split()) >= 20)
+
+
+def _cached_link_sources(store: dict[str, Item], url: str) -> list[ContentSource]:
+    """Reuse rich content already fetched for a linked status in the corpus."""
+    item_id = _x_status_id(url)
+    linked = store.get(item_id or "")
+    if linked is None or linked.content is None:
+        return []
+    return [
+        source.model_copy(deep=True, update={"kind": "x_article"})
+        for source in linked.content.sources
+        if isinstance(source, ContentSourceSuccess)
+        and source.kind in ("external_article", "x_article")
+        and _is_substantive_source(source)
+    ]
+
+
+def _dedupe_sources(sources: list[ContentSource]) -> list[ContentSource]:
+    """Deduplicate expansions that converge on the same source URL and state."""
+    out: list[ContentSource] = []
+    seen: set[tuple[str, str, str]] = set()
+    for source in sources:
+        key = (source.kind, source.url, source.outcome)
+        if key not in seen:
+            seen.add(key)
+            out.append(source)
+    return out
 
 
 def _needs_x_fetch(
@@ -404,6 +523,7 @@ def fetch_x_articles(
     *,
     headless: bool = False,
     link_fetcher: LinkFetcher | None = None,
+    linked_store: dict[str, Item] | None = None,
 ) -> int:
     """Fetch x.com link content for every item that has one and needs it.
 
@@ -415,18 +535,30 @@ def fetch_x_articles(
     if not pending:
         return 0
 
-    def _process(fetcher: LinkFetcher) -> None:
+    corpus = linked_store if linked_store is not None else store
+
+    def _process(fetcher: Callable[[str], list[ContentSource]]) -> None:
         for item in pending:
             # Dedup x.com URLs so a repeated link yields a single source.
             urls = dict.fromkeys(link.url for link in item.links if is_x_url(link.url))
-            sources = [fetcher(url) for url in urls]
-            _attach_x_sources(item, sources)
+            sources: list[ContentSource] = []
+            for url in urls:
+                cached = _cached_link_sources(corpus, url)
+                if cached:
+                    sources.extend(cached)
+                    continue
+                try:
+                    sources.extend(fetcher(url))
+                except Exception as exc:  # noqa: BLE001 - isolate one direct X link
+                    logger.warning("x link: unexpected failure for %s", url, exc_info=True)
+                    sources.append(_unexpected_x_failure(url, exc))
+            _attach_x_sources(item, _dedupe_sources(sources))
 
     if link_fetcher is not None:
-        _process(link_fetcher)
+        _process(lambda url: [link_fetcher(url)])
     else:
         if storage_state_path is None:
             raise ValueError("storage_state_path is required without an injected link_fetcher")
         with x_context(storage_state_path, headless=headless) as context:
-            _process(lambda url: _fetch_x_link(context, url))
+            _process(lambda url: _fetch_x_link_sources(context, url))
     return len(pending)

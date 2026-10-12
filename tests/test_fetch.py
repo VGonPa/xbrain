@@ -3,6 +3,8 @@ import socket
 import urllib.error
 from datetime import datetime, timezone
 
+import pytest
+
 from xbrain.enrich import items_pending_enrichment
 from xbrain.fetch import (
     FetchFailure,
@@ -11,11 +13,13 @@ from xbrain.fetch import (
     _categorize_url_error,
     _probe_status,
     _reason_for_status,
+    _validate_public_http_url,
     _should_refetch,
     _sources_materially_equal,
     fetch_item,
     fetch_pending,
     trafilatura_extract,
+    UnsafeArticleUrl,
 )
 from xbrain.models import (
     Author,
@@ -58,6 +62,24 @@ def test_categorize_url_error_detects_timeout_and_dns():
     assert _categorize_url_error(urllib.error.URLError(socket.timeout())) == "timeout"
     assert _categorize_url_error(urllib.error.URLError(socket.gaierror())) == "dns_error"
     assert _categorize_url_error(urllib.error.URLError("other")) is None
+
+
+def test_article_url_validation_rejects_private_and_credentialed_targets():
+    def private_resolver(*_args):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 80))]
+
+    with pytest.raises(UnsafeArticleUrl):
+        _validate_public_http_url("http://internal.example/report", resolver=private_resolver)
+    credentialed_url = "https://" + "account" + ":" + "credential" + "@example.com/report"
+    with pytest.raises(UnsafeArticleUrl):
+        _validate_public_http_url(credentialed_url, resolver=private_resolver)
+
+
+def test_article_url_validation_accepts_public_https_target():
+    def public_resolver(*_args):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    _validate_public_http_url("https://example.com/report", resolver=public_resolver)
 
 
 def test_probe_status_categorizes_http_error():
@@ -138,6 +160,25 @@ def test_fetch_item_isolates_extractor_exception():
     source = content.sources[0]
     assert isinstance(source, ContentSourceFailure)
     assert "boom" in (source.error or "")
+
+
+def test_fetch_item_keeps_readable_sibling_when_one_link_raises():
+    item = _item("1", ["https://broken.example/p", "https://readable.example/p"])
+
+    def extractor(url):
+        if "broken" in url:
+            raise RuntimeError("unreachable")
+        return FetchSuccess(title="Readable", text="useful article body")
+
+    content = fetch_item(item, extractor)
+
+    assert len(content.sources) == 2
+    broken, readable = content.sources
+    assert isinstance(broken, ContentSourceFailure)
+    assert broken.failure_reason == "unknown_error"
+    assert isinstance(readable, ContentSourceSuccess)
+    assert readable.title == "Readable"
+    assert readable.text == "useful article body"
 
 
 def test_fetch_item_preserves_non_external_sources_on_refetch():
@@ -447,8 +488,8 @@ def test_should_refetch_terminal_with_force():
     assert _should_refetch(c, force=True) is True
 
 
-def test_should_skip_mixed_transient_and_terminal():
-    """Any terminal failure poisons the retry — the link is dead, retry is waste."""
+def test_should_refetch_mixed_transient_and_terminal():
+    """A terminal sibling does not suppress retrying a different transient URL."""
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
@@ -456,11 +497,11 @@ def test_should_skip_mixed_transient_and_terminal():
             ContentSourceFailure(kind="external_article", url="b", failure_reason="not_found"),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _should_refetch(c, force=False) is True
 
 
-def test_should_skip_mixed_transient_and_success():
-    """One source succeeded — there is good content here, do not re-hit."""
+def test_should_refetch_mixed_transient_and_success():
+    """A successful sibling is preserved while a different transient URL retries."""
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
@@ -468,7 +509,7 @@ def test_should_skip_mixed_transient_and_success():
             ContentSourceSuccess(kind="external_article", url="b", text="got it"),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _should_refetch(c, force=False) is True
 
 
 def test_should_skip_only_x_sources():
@@ -504,6 +545,32 @@ def test_fetch_pending_retries_timeout_without_force():
     src = store["1"].content.sources[0]
     assert isinstance(src, ContentSourceSuccess)
     assert src.text
+
+
+def test_fetch_pending_retries_only_failed_url_and_preserves_success():
+    good_url = "https://good.example/p"
+    flaky_url = "https://flaky.example/p"
+    item = _item("1", [good_url, flaky_url])
+    good = ContentSourceSuccess(kind="external_article", url=good_url, text="kept body")
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            good,
+            ContentSourceFailure(kind="external_article", url=flaky_url, failure_reason="timeout"),
+        ],
+    )
+    called: list[str] = []
+
+    def extractor(url):
+        called.append(url)
+        return FetchSuccess(title="Recovered", text="new readable body")
+
+    assert fetch_pending({"1": item}, extractor=extractor) == 1
+    assert called == [flaky_url]
+    assert item.content.sources[0] is good
+    recovered = item.content.sources[1]
+    assert isinstance(recovered, ContentSourceSuccess)
+    assert recovered.text == "new readable body"
 
 
 def test_fetch_pending_skips_not_found_without_force():

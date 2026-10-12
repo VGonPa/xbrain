@@ -1,8 +1,8 @@
 """The `vocab` stage — induce the topic taxonomy from the corpus.
 
 Map-reduce: each chunk of posts proposes candidate topics (map); one
-consolidation call merges all candidates into exactly `target_count` topics
-(reduce). The Anthropic client is injected so tests run offline.
+consolidation call merges all candidates into exactly `target_count` topics.
+The LLM client is injected so tests run offline.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.llm_json import json_from_response
+from xbrain.llm_client import LlmProvider, build_llm_client
 from xbrain.models import Item, Topic
 from xbrain.rubrics import load_rubric
 
@@ -39,13 +40,13 @@ def induce_vocab(
     model: str,
     output_language: str,
     client=None,
+    provider: LlmProvider = "nanogpt",
+    base_url: str | None = None,
     chunk_size: int = 80,
 ) -> list[Topic]:
     """Induce `target_count` topics from the items in `store`."""
     if client is None:
-        from anthropic import Anthropic  # lazy: tests inject a fake
-
-        client = Anthropic()
+        client = build_llm_client(provider, base_url=base_url)
 
     system = load_rubric("vocab", language=output_language)
     items = list(store.values())

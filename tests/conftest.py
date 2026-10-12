@@ -1,11 +1,11 @@
 # tests/conftest.py
-"""Shared test doubles for the Anthropic client.
+"""Shared provider-neutral test doubles for LLM clients.
 
 The real code (`xbrain.llm_json.json_from_response`) filters response blocks
 with ``getattr(b, "type", None) == "text"`` and joins their ``.text``, so the
 fake's blocks must carry BOTH a ``type`` and a ``text`` attribute.
 
-`FakeAnthropic` takes a list of JSON-serialisable payload dicts and returns
+`FakeLLMClient` takes a list of JSON-serialisable payload dicts and returns
 them in order from ``.messages.create(...)``, recording every call. A payload
 that is an ``Exception`` instance is raised instead of returned, so a single
 fake can simulate a transient API failure mid-batch.
@@ -17,7 +17,7 @@ import json
 
 
 class FakeBlock:
-    """One Anthropic content block — a text block holding a JSON payload."""
+    """One provider-normalized content block holding a JSON payload."""
 
     type = "text"
 
@@ -26,7 +26,7 @@ class FakeBlock:
 
 
 class FakeResponse:
-    """An Anthropic API response — a `.content` list of blocks."""
+    """A provider-normalized API response: a `.content` list of blocks."""
 
     def __init__(self, payload: dict):
         self.content = [FakeBlock(payload)]
@@ -47,8 +47,8 @@ class FakeMessages:
         return FakeResponse(payload)
 
 
-class FakeAnthropic:
-    """Drop-in fake for `anthropic.Anthropic`.
+class FakeLLMClient:
+    """Drop-in fake for clients exposing `.messages.create(...)`.
 
     Pass a list of JSON-serialisable payload dicts (or `Exception` instances);
     each `.messages.create(...)` call returns/raises the next one in order.

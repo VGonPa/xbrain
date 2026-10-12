@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from xbrain.vision import VisionFailed, VisionNotFound, describe_image
+from xbrain.vision import VisionFailed, VisionNotFound, describe_image, describe_image_with_llm
 
 
 def _completed(
@@ -59,6 +59,28 @@ def test_argv_carries_model_and_image_path(tmp_path: Path):
     assert argv[0] == "vlm-describe"
     assert "--model" in argv and "qwen2-vl" in argv
     assert argv[-1] == str(image)
+
+
+def test_runner_receives_llm_environment(tmp_path: Path):
+    seen = {}
+
+    def runner(_argv, **kwargs):
+        seen.update(kwargs)
+        return _completed("desc")
+
+    env = {
+        "XBRAIN_LLM_PROVIDER": "nanogpt",
+        "XBRAIN_LLM_MODEL": "zai-org/glm-5.2",
+        "XBRAIN_LLM_VISION_MODEL": "xiaomi/mimo-v2.5",
+    }
+    describe_image(
+        tmp_path / "f.png",
+        command="vlm-describe",
+        model="zai-org/glm-5.2",
+        env=env,
+        runner=runner,
+    )
+    assert seen["env"] == env
 
 
 def test_multi_token_command_is_split(tmp_path: Path):
@@ -125,6 +147,76 @@ def test_non_utf8_stdout_raises_vision_failed(tmp_path: Path):
     with pytest.raises(VisionFailed) as excinfo:
         describe_image(tmp_path / "f.png", command="vlm-describe", runner=_run)
     assert "non-UTF-8" in str(excinfo.value)
+
+
+class _TextBlock:
+    type = "text"
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _Response:
+    def __init__(self, text: str):
+        self.content = [_TextBlock(text)]
+
+
+class _Messages:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _Response("A slide about agent handoffs.")
+
+
+class _Client:
+    def __init__(self):
+        self.messages = _Messages()
+
+
+def test_cloud_vision_posts_frame_to_configured_llm(tmp_path: Path):
+    image = tmp_path / "frame.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    client = _Client()
+
+    result = describe_image_with_llm(
+        image,
+        provider="nanogpt",
+        model="xiaomi/mimo-v2.5",
+        output_language="English",
+        base_url="https://nano-gpt.com/api/v1",
+        client=client,
+    )
+
+    assert result == "A slide about agent handoffs."
+    call = client.messages.calls[0]
+    assert call["model"] == "xiaomi/mimo-v2.5"
+    assert "English" in call["system"]
+    content = call["messages"][0]["content"]
+    assert content[0]["source"]["media_type"] == "image/png"
+    assert content[1]["type"] == "text"
+
+
+def test_cloud_vision_empty_response_is_failure(tmp_path: Path):
+    image = tmp_path / "frame.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    class _EmptyMessages:
+        def create(self, **_kwargs):
+            return _Response("   ")
+
+    class _EmptyClient:
+        messages = _EmptyMessages()
+
+    with pytest.raises(VisionFailed):
+        describe_image_with_llm(
+            image,
+            provider="nanogpt",
+            model="xiaomi/mimo-v2.5",
+            output_language="English",
+            client=_EmptyClient(),
+        )
 
 
 def test_vision_imports_no_ml_or_vision_library():

@@ -749,6 +749,64 @@ def test_missing_ffmpeg_aborts_the_run(tmp_path: Path):
         )
 
 
+def test_missing_transcriber_with_slides_keeps_visual_only_digest(tmp_path: Path):
+    """On a VPS with no ASR, `--frames` can still turn slide videos into content."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="slides", n_frames=1)
+
+    def _boom(_path):
+        raise TranscriberNotFound("parakeet-mlx not found")
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_boom,
+        temp_root=tmp_path,
+        visual=VisualConfig(
+            media_root=tmp_path / "media",
+            extract_fn=visual.extract,
+            describe_fn=visual.describe,
+            classify_fn=visual.classify,
+            allow_visual_only=True,
+        ),
+    )
+
+    src = store["a1"].content.sources[0]
+    assert report.no_speech == 1
+    assert report.failed == 0
+    assert src.has_speech is False
+    assert src.title == "Visual digest"
+    assert len(src.frames) == 1
+
+
+def test_missing_transcriber_without_kept_slides_is_failed_not_attached(tmp_path: Path):
+    """Visual-only fallback is useful only when the visual layer kept slides."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+
+    def _boom(_path):
+        raise TranscriberNotFound("parakeet-mlx not found")
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_boom,
+        temp_root=tmp_path,
+        visual=VisualConfig(
+            media_root=tmp_path / "media",
+            extract_fn=visual.extract,
+            describe_fn=visual.describe,
+            classify_fn=visual.classify,
+            allow_visual_only=True,
+        ),
+    )
+
+    assert report.failed == 1
+    assert store["a1"].content is None
+
+
 def test_missing_vision_binary_aborts_the_run(tmp_path: Path):
     """A missing/unconfigured vision binary (`VisionNotFound`) aborts the run — a
     global config error, not a per-video skip."""

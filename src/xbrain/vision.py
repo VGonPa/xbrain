@@ -31,16 +31,39 @@ offline against a fake — no real vision model, ever.
 
 from __future__ import annotations
 
+import base64
 import shlex
 import subprocess  # nosec B404 - the vision model is an external subprocess by design (#44)
 from collections.abc import Callable
 from pathlib import Path
+from typing import Mapping, Protocol
+
+from xbrain.llm_client import LlmProvider, build_llm_client, recoverable_llm_errors
 
 # A generous wall-clock cap: describing a single downscaled frame is quick, but a
 # wedged VLM process must not hang the run forever.
 _DEFAULT_TIMEOUT_SECONDS = 300
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+_MEDIA_TYPES: dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+_CLOUD_MAX_TOKENS = 500
+
+
+class MessagesClient(Protocol):
+    def create(self, **kwargs: object) -> object:
+        """Send one provider API call; return the raw response."""
+        ...
+
+
+class VisionClient(Protocol):
+    messages: MessagesClient
 
 
 class VisionError(RuntimeError):
@@ -64,10 +87,15 @@ def _build_argv(command: str, model: str | None, path: Path) -> list[str]:
     return argv
 
 
-def _run_vision(argv: list[str], runner: Runner, timeout_seconds: int) -> str:
+def _run_vision(
+    argv: list[str],
+    runner: Runner,
+    timeout_seconds: int,
+    env: Mapping[str, str] | None,
+) -> str:
     """Run the vision command; return its stdout, or raise a clear operator error."""
     try:
-        completed = runner(argv, capture_output=True, text=True, timeout=timeout_seconds)
+        completed = runner(argv, capture_output=True, text=True, timeout=timeout_seconds, env=env)
     except FileNotFoundError as exc:
         raise VisionNotFound(
             f"vision command {argv[0]!r} not found — install it or set a valid "
@@ -97,6 +125,7 @@ def describe_image(
     *,
     command: str,
     model: str | None = None,
+    env: Mapping[str, str] | None = None,
     runner: Runner | None = None,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
@@ -117,7 +146,7 @@ def describe_image(
         )
     active_runner: Runner = runner if runner is not None else subprocess.run
     argv = _build_argv(command, model, Path(path))
-    stdout = _run_vision(argv, active_runner, timeout_seconds)
+    stdout = _run_vision(argv, active_runner, timeout_seconds, env)
     description = stdout.strip()
     if not description:
         raise VisionFailed(
@@ -125,3 +154,88 @@ def describe_image(
             "a slide's content would be lost"
         )
     return description
+
+
+def _media_type(path: Path) -> str:
+    return _MEDIA_TYPES.get(path.suffix.lower(), "image/jpeg")
+
+
+def _image_block(path: Path) -> dict[str, object]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VisionFailed(f"could not read frame image {path}: {exc}") from exc
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": _media_type(path),
+            "data": base64.b64encode(data).decode("ascii"),
+        },
+    }
+
+
+def _cloud_system_prompt(language: str) -> str:
+    return (
+        "You describe key frames extracted from saved X videos for a personal "
+        f"knowledge base. Respond in {language}. Focus on visible text, slide "
+        "titles, diagrams, UI states, code, named tools, claims and process steps. "
+        "Ignore decorative styling. Be concise but specific; 2-4 sentences."
+    )
+
+
+def _response_text(response: object) -> str:
+    blocks = [
+        block
+        for block in getattr(response, "content", [])
+        if getattr(block, "type", None) == "text"
+    ]
+    text = "".join(str(block.text) for block in blocks).strip()
+    if not text:
+        raise VisionFailed("cloud vision response produced no description")
+    return text
+
+
+def describe_image_with_llm(
+    path: Path | str,
+    *,
+    provider: LlmProvider,
+    model: str,
+    output_language: str,
+    base_url: str | None = None,
+    client: VisionClient | None = None,
+    max_tokens: int = _CLOUD_MAX_TOKENS,
+) -> str:
+    """Describe one video frame through the configured LLM API.
+
+    This is the cloud/API counterpart to `describe_image`. It keeps
+    `digest-video --frames` usable on a VPS where a local VLM wrapper is not
+    configured: the selected `[llm].provider` handles the image directly, with
+    `[llm].vision_model` or `--vision-model`.
+    """
+    active_client = client or build_llm_client(provider, base_url=base_url)
+    frame = Path(path)
+    try:
+        response = active_client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=_cloud_system_prompt(output_language),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        _image_block(frame),
+                        {
+                            "type": "text",
+                            "text": (
+                                "Describe this video key frame as knowledge-base evidence. "
+                                "Extract any visible text or structured steps."
+                            ),
+                        },
+                    ],
+                }
+            ],
+        )
+    except recoverable_llm_errors() as exc:
+        raise VisionFailed(f"cloud vision failed for {frame}: {exc}") from exc
+    return _response_text(response)

@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 # data model, the config loader and the enrichment phase.
 ExecutorName = Literal["manual", "api", "claude-code"]
 
+# Confidence signal emitted by enrichment. It is diagnostic only: topic routing
+# still depends on the controlled vocabulary.
+TopicConfidence = Literal["high", "medium", "low"]
+
 # The set of item source names — one source of truth shared by the data model
 # and the GraphQL parser.
 SourceName = Literal["bookmark", "own_tweet"]
@@ -81,6 +85,9 @@ MediaFailureReason = Literal[
     "format_error",  # permanent: bytes downloaded but Pillow rejected them
     "unknown_error",  # bare-except bucket; transient by default (mirrors fetch.py)
 ]
+
+ExtractedTextConfidence = Literal["high", "medium", "low"]
+TranscriptFormat = Literal["vtt", "srt", "text", "json", "unknown"]
 
 
 class _MediaPhotoBase(BaseModel):
@@ -265,6 +272,9 @@ class MediaPhotoDescribed(_MediaPhotoBase):
     description_lang: SupportedLanguage
     description_version: str
     described_at: datetime
+    extracted_text: str | None = None
+    extracted_text_language: str | None = None
+    extracted_text_confidence: ExtractedTextConfidence | None = None
 
     @field_validator("local_path")
     @classmethod
@@ -284,8 +294,16 @@ class MediaPhotoDescribed(_MediaPhotoBase):
         _ = cls
         return _require_utc_aware("described_at", value)
 
+    @field_validator("extracted_text", "extracted_text_language", mode="before")
+    @classmethod
+    def _blank_extracted_text_fields_to_none(cls, value: object) -> object:
+        _ = cls
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
-    def _decorative_implies_empty_description(self) -> "MediaPhotoDescribed":
+    def _validate_description_and_extracted_text(self) -> "MediaPhotoDescribed":
         """A decorative photo MUST have an empty description (rubric contract).
 
         Enforced at the type boundary so downstream callers can rely on
@@ -298,6 +316,16 @@ class MediaPhotoDescribed(_MediaPhotoBase):
             raise ValueError(
                 f"is_decorative=True requires an empty description, got {self.description!r}"
             )
+        if self.is_decorative and self.extracted_text:
+            raise ValueError("is_decorative=True requires no extracted_text")
+        if not self.extracted_text:
+            self.extracted_text_language = None
+            self.extracted_text_confidence = None
+        else:
+            if self.extracted_text_language is None:
+                self.extracted_text_language = "text"
+            if self.extracted_text_confidence is None:
+                self.extracted_text_confidence = "medium"
         return self
 
 
@@ -328,6 +356,13 @@ class MediaVideoPending(BaseModel):
     thumbnail_url: str | None = None
     bitrate: int | None = None
     duration_millis: int | None = None
+    # Optional text-track/caption sidecar exposed by X or an upstream video
+    # provider. XBrain may fetch this small text file to build a video summary,
+    # but it must never fetch/store the mp4 bytes as part of the normal library
+    # pipeline.
+    transcript_url: str | None = None
+    transcript_language: str | None = None
+    transcript_format: TranscriptFormat | None = None
 
 
 class MediaVideoDownloaded(BaseModel):
@@ -368,6 +403,9 @@ class MediaVideoDownloaded(BaseModel):
     thumbnail_url: str | None = None
     bitrate: int | None = None
     duration_millis: int | None = None
+    transcript_url: str | None = None
+    transcript_language: str | None = None
+    transcript_format: TranscriptFormat | None = None
     local_path: str
     bytes_size: int = Field(gt=0)
     downloaded_at: datetime
@@ -406,6 +444,9 @@ class MediaVideoFailed(BaseModel):
     thumbnail_url: str | None = None
     bitrate: int | None = None
     duration_millis: int | None = None
+    transcript_url: str | None = None
+    transcript_language: str | None = None
+    transcript_format: TranscriptFormat | None = None
     failure_reason: MediaFailureReason
     error: str | None = None
     attempts: int = Field(ge=1)
@@ -521,9 +562,9 @@ class VideoFrame(BaseModel):
     The visual layer of a slide-heavy talk: a scene-change key frame's
     `timestamp` (seconds into the video, `ge=0`), the relative `local_path` of
     its downscaled image under `data/media/` (`<item-id>/frames/<n>.<ext>`), and
-    the `description` produced by the EXTERNAL vision step. `generate` mirrors the
-    image into the vault's `_media/` tree and embeds it exactly like a downloaded
-    photo, with the description as a caption. It is carried on the `x_video`
+    the `description` produced by the configured vision step. `generate` mirrors
+    the image into the vault's `_media/` tree and embeds it exactly like a
+    downloaded photo, with the description as a caption. It is carried on the `x_video`
     `ContentSourceSuccess.frames` list (additive — see there).
 
     `local_path` reuses the shared `_reject_local_path_traversal` validator (no
@@ -639,6 +680,14 @@ class ContentSourceSuccess(BaseModel):
     # never a failure), and `language` is the detected transcript language.
     has_speech: bool | None = None
     language: str | None = None
+    # For `kind="x_video"`, `text` is the executive summary that downstream
+    # enrich/topics/dashboard/Ask consume. The original transcript is retained
+    # separately for audit/reading and rendered into generated `videos/...`
+    # transcript files, but no analysis path reads it.
+    raw_transcript: str | None = None
+    raw_transcript_url: str | None = None
+    raw_transcript_format: TranscriptFormat | None = None
+    executive_summary_version: str | None = None
     # Key-frame slides for `kind="x_video"` sources when `digest-video --frames`
     # ran (#44 PR4). Optional + additive (defaults to `[]`), so every EXISTING
     # record LOADS unchanged — a pre-PR4 `x_video` source (and every article
@@ -822,6 +871,8 @@ class Enrichment(BaseModel):
     summary: str | None = None
     primary_topic: str | None = None
     topics: list[str] = Field(default_factory=list)
+    topic_confidence: TopicConfidence | None = None
+    suggested_new_topics: list[str] = Field(default_factory=list)
     user_notes: str | None = None
 
 

@@ -1,0 +1,38 @@
+[Unit]
+Description=XBrain dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xbrain
+Group=xbrain
+WorkingDirectory=/opt/xbrain
+# config.toml and relative data/auth paths live under this private state directory.
+Environment=XBRAIN_REPO_ROOT=/var/lib/xbrain
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/xbrain/dashboard.env
+ExecStart=/usr/local/bin/uv run --project /opt/xbrain --locked xbrain serve-dashboard --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+StateDirectory=xbrain
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/xbrain /srv/xbrain-vault
+
+[Install]
+WantedBy=multi-user.target

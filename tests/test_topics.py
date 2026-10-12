@@ -226,6 +226,7 @@ def _described_photo_in_topic(*, description: str, decorative: bool = False):
 
 def test_build_topic_inputs_collects_content_image_descriptions():
     """Content-bearing photos contribute their descriptions; decoratives are filtered."""
+    from xbrain.models import ArticleImageBlock, ArticleTextBlock, Content, ContentSourceSuccess
     from xbrain.topics import build_topic_inputs
 
     primary_item = _enriched("1", "ai-coding", ["ai-coding"])
@@ -237,6 +238,22 @@ def test_build_topic_inputs_collects_content_image_descriptions():
     also_item.media = [
         _described_photo_in_topic(description="A screenshot of a CI dashboard."),
     ]
+    also_item.content = Content(
+        fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_article",
+                url="https://x.com/i/article/2",
+                text="Article body.",
+                blocks=[
+                    ArticleTextBlock(text="Article body."),
+                    ArticleImageBlock(
+                        media=_described_photo_in_topic(description="An inline architecture map.")
+                    ),
+                ],
+            )
+        ],
+    )
     posts = {"ai-coding": TopicPosts()}
     posts["ai-coding"].primary.append(primary_item)
     posts["ai-coding"].also.append(also_item)
@@ -244,6 +261,7 @@ def test_build_topic_inputs_collects_content_image_descriptions():
     assert sorted(inputs[0].image_descriptions) == [
         "A chart of model accuracy.",
         "A screenshot of a CI dashboard.",
+        "An inline architecture map.",
     ]
 
 
@@ -273,9 +291,9 @@ def _video_item_in_topic(item_id: str, primary: str, *, text: str, has_speech: b
     return item
 
 
-def test_build_topic_inputs_collects_bounded_video_transcripts():
-    """With-speech video transcripts are collected per member and truncated to the
-    topic-synth cap; no-speech videos contribute nothing."""
+def test_build_topic_inputs_collects_bounded_video_summaries():
+    """Video executive summaries are collected per member and truncated to the
+    topic-synth cap; empty video summaries contribute nothing."""
     from xbrain.rubrics import TOPIC_TRANSCRIPT_CHAR_LIMIT
     from xbrain.topics import build_topic_inputs
 
@@ -285,7 +303,7 @@ def test_build_topic_inputs_collects_bounded_video_transcripts():
     posts["ai-coding"].primary.extend([talker, silent])
     inputs = build_topic_inputs(["ai-coding"], _VOCAB, posts)
     assert len(inputs[0].video_transcripts) == 1  # only the with-speech one
-    assert "transcript truncated" in inputs[0].video_transcripts[0]
+    assert "video content truncated" in inputs[0].video_transcripts[0]
 
 
 def test_build_topic_inputs_empty_video_list_without_transcripts():

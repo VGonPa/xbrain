@@ -16,6 +16,13 @@ def test_valid_judgment_has_no_errors():
     assert validate_judgment(_ok(), VOCAB) == []
 
 
+def test_valid_judgment_accepts_taxonomy_diagnostics():
+    good = _ok()
+    good["topic_confidence"] = "low"
+    good["suggested_new_topics"] = ["modern-statistics"]
+    assert validate_judgment(good, VOCAB) == []
+
+
 def test_topic_outside_vocab_is_rejected():
     bad = _ok()
     bad["topics"] = ["ai-coding", "not-a-real-topic"]
@@ -44,6 +51,20 @@ def test_non_judgment_keys_are_rejected():
     bad = _ok()
     bad["filename"] = "ai-coding.md"
     assert any("filename" in e for e in validate_judgment(bad, VOCAB))
+
+
+def test_invalid_topic_confidence_is_rejected():
+    bad = _ok()
+    bad["topic_confidence"] = "certain"
+    assert any("topic_confidence" in e for e in validate_judgment(bad, VOCAB))
+
+
+def test_invalid_suggested_new_topics_are_rejected():
+    bad = _ok()
+    bad["suggested_new_topics"] = ["Not Valid", "misc"]
+    errors = validate_judgment(bad, VOCAB)
+    assert any("kebab-case" in e for e in errors)
+    assert any("already exists" in e for e in errors)
 
 
 def test_duplicate_topics_are_rejected():

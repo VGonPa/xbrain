@@ -18,8 +18,8 @@ from xbrain.rubrics import (
     ARTICLE_CHAR_LIMIT,
     TRANSCRIPT_CHAR_LIMIT,
     load_rubric,
-    truncate_transcript,
 )
+from xbrain.video_content import video_content_text
 
 
 def _article_text(item: Item) -> str | None:
@@ -28,9 +28,9 @@ def _article_text(item: Item) -> str | None:
     Only the success variant of `ContentSource` carries `text`. The
     isinstance narrowing satisfies mypy and silently skips broken-link
     sources, matching the pre-#20 ``src.ok and src.text`` behaviour.
-    `x_video` sources are skipped — the transcript rides in its own
-    `video_transcript` field so the enrich track sees it as a transcript,
-    not an article (#44).
+    `x_video` sources are skipped — the executive video summary rides in its
+    own legacy-named `video_transcript` field so the enrich track sees it as
+    video-derived evidence, not an article.
     """
     if not item.content:
         return None
@@ -41,22 +41,18 @@ def _article_text(item: Item) -> str | None:
 
 
 def _video_transcript(item: Item) -> str | None:
-    """First with-speech `x_video` transcript body, truncated, or None (#44).
+    """First usable `x_video` executive-summary signal, truncated, or None.
 
-    A no-speech source (`has_speech=False`, empty text) yields None — no
-    transcript to enrich from. Truncated to `TRANSCRIPT_CHAR_LIMIT`, matching
-    the `api` executor prompt so both tracks see identical input.
+    The raw transcript is intentionally ignored; it is rendered only as a vault
+    reference artifact outside dashboard/topics/Ask analysis paths.
     """
     if not item.content:
         return None
     for src in item.content.sources:
-        if (
-            isinstance(src, ContentSourceSuccess)
-            and src.kind == "x_video"
-            and src.has_speech
-            and src.text
-        ):
-            return truncate_transcript(src.text, TRANSCRIPT_CHAR_LIMIT)
+        if isinstance(src, ContentSourceSuccess):
+            text = video_content_text(src, TRANSCRIPT_CHAR_LIMIT)
+            if text:
+                return text
     return None
 
 
@@ -77,10 +73,14 @@ def export_worksheet(
         "executor": executor,
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with "
-            "keys {item_id, summary, primary_topic, topics}. Use only slugs from "
-            "`vocab`. An item may also carry `links`, `article`, `video_transcript` "
-            "and `image_descriptions` (content-bearing photos) — weigh them all as "
-            "topic signal, not just `text`. Then run: xbrain enrich --apply <this file>."
+            "keys {item_id, summary, primary_topic, topics, topic_confidence, "
+            "suggested_new_topics}. Use only slugs from `vocab` in primary_topic "
+            "and topics. Put missing-but-useful new taxonomy slugs only in "
+            "`suggested_new_topics`. An item may also carry `links`, `article`, "
+            "`video_transcript` (legacy field name; contains video executive summary) "
+            "and `image_descriptions` (content-bearing photos) — weigh them all "
+            "as topic signal, not just `text`. Then run: "
+            "xbrain enrich --apply <this file>."
         ),
         "rubrics": {
             "summary": load_rubric("summary", language=output_language),

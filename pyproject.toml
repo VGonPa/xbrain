@@ -12,6 +12,10 @@ dependencies = [
     "pyyaml>=6.0",
     "pillow>=12.2.0",
     "requests>=2.34.2",
+    "markdown-it-py>=4.2",
+    "google-api-python-client>=2.198.0",
+    "google-auth>=2.48.0",
+    "google-auth-oauthlib>=1.4.0",
 ]
 
 [project.scripts]

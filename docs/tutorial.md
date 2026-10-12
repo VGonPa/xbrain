@@ -61,15 +61,14 @@ each stage exports a worksheet you fill in a Claude Code session, then
 Now your vault has three layers: `items/` (posts), `topics/` (thematic pages),
 and `_index.md` (the map). Open `_index.md` in Obsidian and click into a topic.
 
-## 4. Download the media
+## 4. Download photo media
 
 ```bash
-uv run xbrain media                 # download bookmarked photos
-uv run xbrain download-videos --yes # download videos (prints a size gate first)
+uv run xbrain media                 # download bookmarked photos + inline Article images
 ```
 
-Photos embed under each post note. To make photos **searchable**, add vision
-descriptions:
+Photos embed under each post note; inline X Article images render inside the
+article body. To make those images **searchable**, add vision descriptions:
 
 ```bash
 uv run xbrain describe --executor claude-code   # export a worksheet
@@ -78,37 +77,52 @@ uv run xbrain describe --apply data/describe-worksheet.json
 uv run xbrain generate
 ```
 
-Each photo now renders with a one-line caption under it — plain note text, so
-Obsidian's search finds "that chart about pricing".
+Each content-bearing image now renders with a caption or feeds the enrichment
+pipeline as plain note text, so Obsidian's search finds "that chart about
+pricing".
 
 ## 5. Digest a bookmarked video
 
-This turns a saved talk into a readable, topic-linked note. It needs the local
-tooling from [Local models for `digest-video`](../README.md#local-models-for-digest-video-apple-silicon)
-(ffmpeg + parakeet-mlx, plus mlx-vlm for `--frames`). See the worked example in
-[digest-video.md](digest-video.md).
+This turns a saved video into a readable, topic-linked note without storing MP4,
+audio or frame files. It prefers X captions; when captions are absent it can
+stream the MP4 only inside a temporary directory, transcribe it, and delete the
+media bytes. See the worked example in [digest-video.md](digest-video.md).
 
 ```bash
-# Transcript only (fast): every bookmarked video → an x_video transcript source
+# Every pending bookmarked video -> an x_video executive summary when transcript is available
 uv run xbrain digest-video --all-pending
-
-# With the visual layer: also describe the slides of slide-heavy talks
-uv run xbrain digest-video --all-pending --frames
 uv run xbrain generate
-# → the video's note now has a "## Video digest" section: transcript + slides
+# -> the video's note now has a "## Video digest" section and videos/<video>/ artifacts
 ```
 
 ## 6. See the whole corpus at a glance
 
-`generate` also writes `dashboard.html` — a self-contained interactive dashboard
-(counts, topics, authors, growth over time, photo thumbnails), with drill-down and
-deep links back to each post + note. Open it from the **📊 Dashboard** link at the
-top of `_index.md`, or directly in your browser:
+`generate` also writes `dashboard.html` — a self-contained interactive workspace
+with forest light/dark themes and navigation for `Library`, `Atlas`,
+`Analytics`, `Operations`, plus a global `Ask` drawer. Library provides search,
+combined filters, sorting, quick views and document drawers. The same selection
+drives the Atlas `Map`, `Timeline` and keyboard-friendly `Documents` view and
+every Analytics chart/table. Open it from the
+**Dashboard** link at the top of `_index.md`, or directly in your browser:
 
 ```bash
 # <vault>/<output_subdir>/dashboard.html — from your config.toml [paths]:
 open ~/Documents/Vault/vault/learnings/x-knowledge/dashboard.html
 ```
+
+When the dashboard is served with `xbrain serve-dashboard`, search also scans the
+full generated note text and note links open a themed web viewer
+(`/notes?path=...`) so they work from Safari/mobile. The served dashboard can run
+the daily refresh, retry failed article sources from Operations, answer a
+question against the current filtered selection, and run topic review actions
+from Atlas document drawers.
+When the HTML is opened as a local file, those same links fall back to Obsidian
+deep links.
+
+`generate` also emits `maps/xbrain-map.generated.canvas`, a derived Obsidian
+Canvas map of topics, topic relations and representative notes. Duplicate it as
+`maps/xbrain-map.canvas` before making manual Canvas edits; XBrain never
+overwrites that editable copy.
 
 ## Keeping it fresh
 

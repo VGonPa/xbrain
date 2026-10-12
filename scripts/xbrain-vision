@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""xbrain `[vision].command` — multi-backend vision model selector for `digest-video --frames`.
+"""xbrain `[vision].command` — vision model selector for `digest-video --frames`.
 
 Fulfils the xbrain vision contract (`xbrain.vision`): invoked as
 `xbrain-vision [--model NAME] <image-path>`, prints ONE description on stdout,
 exit 0 (an exit-0 run with empty output is a failure, per the contract). Routes
-by model NAME so a single `[vision].command` can serve local AND cloud models —
-pick per run with `digest-video --vision-model NAME` or set `[vision].model`:
+by model NAME so a single `[vision].command` can serve local AND the globally
+configured cloud LLM provider. Pick per run with `digest-video --vision-model
+NAME`, set `[vision].model`, or rely on `[llm].vision_model`:
 
     local (mlx-vlm, Apple Silicon, free/offline):
-        qwen-3b   -> mlx-community/Qwen2.5-VL-3B-Instruct-4bit   (default)
+        qwen-3b   -> mlx-community/Qwen2.5-VL-3B-Instruct-4bit
         qwen-7b   -> mlx-community/Qwen2.5-VL-7B-Instruct-4bit
         qwen-32b  -> mlx-community/Qwen2.5-VL-32B-Instruct-4bit
-        <hf/repo> -> any Hugging Face repo id (contains '/')
-    cloud (Claude vision, needs ANTHROPIC_API_KEY; frames leave the machine):
-        opus      -> claude-opus-4-8
-        sonnet    -> claude-sonnet-4-6
-        haiku     -> claude-haiku-4-5-20251001
-        claude-*  -> that exact model id
+        local:<hf/repo> -> any Hugging Face repo id
+    cloud (provider from XBRAIN_LLM_PROVIDER, default nanogpt):
+        nanogpt   -> any NanoGPT vision model id such as xiaomi/mimo-v2.5
+        anthropic -> opus | sonnet | haiku | claude-*
 
-Cloud uses the Anthropic REST API via stdlib urllib (no SDK dependency). Local
-shells out to the mlx-vlm tool's python (env `XBRAIN_VISION_MLX_PYTHON`, else the
-uv-tool default `~/.local/share/uv/tools/mlx-vlm/bin/python`).
+Cloud uses the selected provider's REST API via stdlib urllib (no SDK
+dependency). Local shells out to the mlx-vlm tool's python (env
+`XBRAIN_VISION_MLX_PYTHON`, else the uv-tool default
+`~/.local/share/uv/tools/mlx-vlm/bin/python`).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,24 +59,53 @@ _LOCAL_MARKER = "<<<XBRAIN_VISION>>>"
 # Inner mlx subprocess bound, kept under xbrain.vision's 300s runner cap so a
 # wedged model is reaped here (not left orphaned when the outer runner SIGKILLs us).
 _LOCAL_TIMEOUT = 240
-DEFAULT_MODEL = "qwen-3b"
-_MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+DEFAULT_NANOGPT_VISION_MODEL = "xiaomi/mimo-v2.5"
+DEFAULT_ANTHROPIC_VISION_MODEL = "claude-sonnet-4-6"
+_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
-def _resolve(name: str) -> tuple[str, str]:
-    """Return (backend, real_id) for a model NAME. backend is 'local' or 'cloud'."""
+def _provider() -> str:
+    provider = os.environ.get("XBRAIN_LLM_PROVIDER", "nanogpt").strip().lower()
+    if provider in ("nanogpt", "nano-gpt", "nano_gpt"):
+        return "nanogpt"
+    if provider == "anthropic":
+        return "anthropic"
+    raise SystemExit(f"xbrain-vision: unknown XBRAIN_LLM_PROVIDER {provider!r}")
+
+
+def _resolve(name: str, provider: str | None = None) -> tuple[str, str]:
+    """Return (backend, real_id) for a model NAME."""
+    provider = provider or _provider()
     if name in LOCAL_ALIASES:
         return "local", LOCAL_ALIASES[name]
-    if name in CLOUD_ALIASES:
+    if name.startswith("local:"):
+        return "local", name.removeprefix("local:")
+    if provider == "anthropic" and name in CLOUD_ALIASES:
         return "cloud", CLOUD_ALIASES[name]
-    if name.startswith("claude-"):
+    if provider == "anthropic" and name.startswith("claude-"):
         return "cloud", name
-    if "/" in name:  # a raw Hugging Face repo id
-        return "local", name
+    if provider == "anthropic" and "/" in name:
+        raise SystemExit(
+            f"xbrain-vision: provider-qualified model id {name!r} is not an Anthropic "
+            "model id. Use a claude-* model, set XBRAIN_LLM_PROVIDER=nanogpt, or "
+            "prefix Hugging Face local models with local:."
+        )
+    if provider == "nanogpt" and (name in CLOUD_ALIASES or name.startswith("claude-")):
+        raise SystemExit(
+            f"xbrain-vision: model {name!r} is Anthropic-only; "
+            "set XBRAIN_LLM_PROVIDER=anthropic or use a NanoGPT model id"
+        )
+    if provider == "nanogpt":
+        return "cloud", name
     raise SystemExit(f"xbrain-vision: unknown model {name!r} (see --help for the registry)")
 
 
-def _describe_cloud(model: str, image: Path) -> str:
+def _describe_anthropic(model: str, image: Path) -> str:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise SystemExit("xbrain-vision: cloud model needs ANTHROPIC_API_KEY in the environment")
@@ -92,7 +122,10 @@ def _describe_cloud(model: str, image: Path) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": data},
+                        },
                         {"type": "text", "text": PROMPT},
                     ],
                 }
@@ -112,11 +145,73 @@ def _describe_cloud(model: str, image: Path) -> str:
         with urllib.request.urlopen(req, timeout=120) as resp:
             payload = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:  # surface the API error message, not a bare stack
-        raise SystemExit(f"xbrain-vision: Anthropic API error {exc.code}: {exc.read().decode()[:300]}")
+        raise SystemExit(
+            f"xbrain-vision: Anthropic API error {exc.code}: {exc.read().decode()[:300]}"
+        )
     except urllib.error.URLError as exc:  # DNS / connection / TLS / timeout — also clean, no stack
         raise SystemExit(f"xbrain-vision: network error reaching Anthropic API: {exc.reason}")
     blocks = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
     return "".join(blocks).strip()
+
+
+def _describe_nanogpt(model: str, image: Path) -> str:
+    key = os.environ.get("NANOGPT_API_KEY")
+    if not key:
+        raise SystemExit(
+            "xbrain-vision: NanoGPT cloud model needs NANOGPT_API_KEY in the environment"
+        )
+    media_type = _MEDIA_TYPES.get(image.suffix.lower(), "image/jpeg")
+    try:
+        data = base64.b64encode(image.read_bytes()).decode()
+    except OSError as exc:
+        raise SystemExit(f"xbrain-vision: cannot read image {image}: {exc}")
+    base_url = (
+        os.environ.get("XBRAIN_LLM_BASE_URL")
+        or os.environ.get("NANOGPT_BASE_URL")
+        or "https://nano-gpt.com/api/v1"
+    ).rstrip("/")
+    body = json.dumps(
+        {
+            "model": model,
+            "max_tokens": 512,
+            "stream": False,
+            "reasoning": {"exclude": True},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{media_type};base64,{data}"},
+                        },
+                        {"type": "text", "text": PROMPT},
+                    ],
+                }
+            ],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(
+            f"xbrain-vision: NanoGPT API error {exc.code}: {exc.read().decode()[:300]}"
+        )
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"xbrain-vision: network error reaching NanoGPT API: {exc.reason}")
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise SystemExit(f"xbrain-vision: NanoGPT response missing message content: {exc}")
+    return content.strip() if isinstance(content, str) else ""
 
 
 def _describe_local(model: str, image: Path) -> str:
@@ -160,15 +255,40 @@ def _describe_local(model: str, image: Path) -> str:
     return out.stdout.rsplit(_LOCAL_MARKER, 1)[-1].strip() if _LOCAL_MARKER in out.stdout else ""
 
 
+def _default_model(provider: str) -> str:
+    if provider == "anthropic":
+        return (
+            os.environ.get("XBRAIN_LLM_VISION_MODEL")
+            or os.environ.get("ANTHROPIC_VISION_MODEL")
+            or DEFAULT_ANTHROPIC_VISION_MODEL
+        )
+    return (
+        os.environ.get("XBRAIN_LLM_VISION_MODEL")
+        or os.environ.get("NANOGPT_VISION_MODEL")
+        or DEFAULT_NANOGPT_VISION_MODEL
+    )
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Multi-backend vision describe for xbrain digest-video.")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help="model NAME (alias, claude-* id, or hf/repo)")
+    ap = argparse.ArgumentParser(
+        description="Multi-backend vision describe for xbrain digest-video."
+    )
+    ap.add_argument(
+        "--model", default=None, help="model NAME (local alias or selected-provider model id)"
+    )
     ap.add_argument("image", help="path to the image to describe")
     args = ap.parse_args()
 
-    backend, real_id = _resolve(args.model)
+    provider = _provider()
+    model = args.model or _default_model(provider)
+    backend, real_id = _resolve(model, provider)
     image = Path(args.image)
-    text = _describe_cloud(real_id, image) if backend == "cloud" else _describe_local(real_id, image)
+    if backend == "local":
+        text = _describe_local(real_id, image)
+    elif provider == "anthropic":
+        text = _describe_anthropic(real_id, image)
+    else:
+        text = _describe_nanogpt(real_id, image)
     if not text:
         print("xbrain-vision: empty description", file=sys.stderr)
         return 1

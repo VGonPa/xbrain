@@ -198,40 +198,41 @@ def _video_item_for_digest(item_id: str = "42") -> Item:
         MediaVideoPending(
             url="https://video.twimg.com/amplify_video/900/vid/720/a.mp4?tag=16",
             thumbnail_url="https://pbs.twimg.com/poster.jpg",
+            transcript_url="https://video.twimg.com/amplify_video/900/captions/en.vtt",
+            transcript_language="en",
+            transcript_format="vtt",
         )
     ]
     return item
 
 
-def _wire_digest_mocks(monkeypatch, *, has_speech: bool = True) -> None:
-    """Fake the fetch (network) + transcribe (subprocess) so digest-video runs
-    offline: bytes for the download, a canned transcript for the transcriber."""
+def _wire_digest_mocks(monkeypatch) -> None:
+    """Fake caption fetch + LLM summary so digest-video runs offline."""
+    from xbrain.video_transcript import VideoExecutiveSummary, VideoTranscript
 
-    class _Session:
-        payload = b"\x00\x00\x00\x18ftypmp42" + (b"\x00" * 512)
+    def _fetch(_item, entry, **_kwargs):
+        return VideoTranscript(
+            text="raw caption transcript",
+            language=entry.transcript_language,
+            source_url=entry.transcript_url,
+            format=entry.transcript_format or "vtt",
+        )
 
-        def __init__(self):
-            self.headers: dict[str, str] = {}
+    def _summary_fn(**_kwargs):
+        def _summarize(_item, _transcript):
+            return VideoExecutiveSummary(
+                title="Executive video",
+                markdown="### Executive Summary\n\nVideo summary.",
+            )
 
-        def get(self, _url, *, timeout):
-            class _Resp:
-                status_code = 200
-                content = _Session.payload
+        return _summarize
 
-            return _Resp()
-
-    from xbrain.transcribe import Transcript
-
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _Session)
-    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        "xbrain.cli.transcribe_media",
-        lambda _p, **_k: Transcript(text="t" if has_speech else "", has_speech=has_speech),
-    )
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _fetch)
+    monkeypatch.setattr("xbrain.cli.configured_summary_fn", _summary_fn)
 
 
 def test_digest_video_creates_pre_snapshot(tmp_path: Path, monkeypatch):
-    """`xbrain digest-video` rewrites items.json (attaches the transcript) → it
+    """`xbrain digest-video` rewrites items.json (attaches the video summary) → it
     snapshots `data/` first (label `pre-digest-video`)."""
     _setup_repo(tmp_path, monkeypatch)
     save_store({"42": _video_item_for_digest("42")}, tmp_path / "data" / "items.json")
@@ -245,17 +246,19 @@ def test_digest_video_creates_pre_snapshot(tmp_path: Path, monkeypatch):
 
 
 def test_digest_video_no_change_creates_no_snapshot(tmp_path: Path, monkeypatch):
-    """A run that attaches nothing (no fetchable video → nothing written) takes no
+    """A run that attaches nothing (transcript unavailable) takes no
     snapshot — digest-video only snapshots when it is about to rewrite the store."""
     _setup_repo(tmp_path, monkeypatch)
-    # A poster-era item has no fetchable mp4 → skipped_no_video, nothing attached.
     item = _video_item_for_digest("42")
-    from xbrain.models import MediaVideoPending
-
-    poster = "https://pbs.twimg.com/poster.jpg"
-    item.media = [MediaVideoPending(url=poster, thumbnail_url=poster)]
+    item.media[0].transcript_url = None
     save_store({"42": item}, tmp_path / "data" / "items.json")
+    from xbrain.video_transcript import VideoTranscriptUnavailable
+
+    def _unavailable(_item, _entry, **_kwargs):
+        raise VideoTranscriptUnavailable("no captions and no ASR transcript")
+
     _wire_digest_mocks(monkeypatch)
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _unavailable)
 
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
 
@@ -264,31 +267,21 @@ def test_digest_video_no_change_creates_no_snapshot(tmp_path: Path, monkeypatch)
 
 
 def test_digest_video_all_failure_no_snapshot(tmp_path: Path, monkeypatch):
-    """A run where every video's fetch fails attaches nothing (changed==0) → no
+    """A run where every transcript fetch fails attaches nothing (changed==0) → no
     snapshot and items.json byte-identical (parity with the no-change path)."""
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store({"42": _video_item_for_digest("42")}, items_path)
     before = items_path.read_bytes()
 
-    class _FailSession:
-        def __init__(self):
-            self.headers: dict[str, str] = {}
+    from xbrain.video_transcript import VideoTranscriptFetchFailed
 
-        def get(self, _url, *, timeout):
-            class _Resp:
-                status_code = 500
-                content = b"err"
-
-            return _Resp()
-
-    from xbrain.transcribe import Transcript
-
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FailSession)
-    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
-    # Transcriber would succeed, but the fetch fails first so it is never reached.
+    _wire_digest_mocks(monkeypatch)
     monkeypatch.setattr(
-        "xbrain.cli.transcribe_media", lambda _p, **_k: Transcript(text="t", has_speech=True)
+        "xbrain.cli.fetch_or_transcribe_video_transcript",
+        lambda _item, _entry, **_kwargs: (_ for _ in ()).throw(
+            VideoTranscriptFetchFailed("caption HTTP 500")
+        ),
     )
 
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
@@ -301,7 +294,7 @@ def test_digest_video_all_failure_no_snapshot(tmp_path: Path, monkeypatch):
 
 def test_digest_video_snapshot_failure_aborts_before_write(tmp_path: Path, monkeypatch):
     """A failed snapshot aborts digest-video BEFORE the store is rewritten: exit
-    non-zero and items.json unchanged (the transcript is never persisted)."""
+    non-zero and items.json unchanged (the summary is never persisted)."""
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store({"42": _video_item_for_digest("42")}, items_path)
@@ -320,7 +313,7 @@ def test_digest_video_snapshot_failure_aborts_before_write(tmp_path: Path, monke
     assert snapshot_list(tmp_path / "data") == []
 
 
-def test_fetch_without_force_creates_no_snapshot(tmp_path: Path, monkeypatch):
+def test_fetch_without_force_snapshots_before_policy_prune(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     item = _linked_item("1")
     item.links = []
@@ -329,7 +322,9 @@ def test_fetch_without_force_creates_no_snapshot(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["fetch"])
 
     assert result.exit_code == 0, result.stdout
-    assert snapshot_list(tmp_path / "data") == []
+    snapshots = snapshot_list(tmp_path / "data")
+    assert len(snapshots) == 1
+    assert snapshots[0][1].command == "prune-content-policy"
 
 
 def test_snapshot_create_cli_writes_manifest(tmp_path: Path, monkeypatch):

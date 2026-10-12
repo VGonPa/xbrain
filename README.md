@@ -4,14 +4,14 @@
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> Your X bookmarks and posts, turned into a second brain.
+> Your saved X articles and videos, turned into a second brain.
 
 You bookmark a sharp thread, a research paper, a tool someone shipped over the
 weekend — and a small part of your brain checks a box: *handled, I have that
 now.* Then you never see it again. A bookmark folder is not a library; it is a
 graveyard with good intentions.
 
-XBrain digs it up. It extracts your X bookmarks and your own posts, stores them
+XBrain digs it up. It extracts your X bookmarks that contain articles or videos, stores them
 as structured JSON, and generates a layered, cross-linked Obsidian wiki you can
 actually navigate, search and think with — in the same vault, the same graph,
 as the notes you already keep.
@@ -25,6 +25,7 @@ it through a worksheet hand-off (see [Execution modes](#execution-modes)).
 
 - [Why XBrain](#why-xbrain)
 - [What you get](#what-you-get)
+- [Screenshots](#screenshots)
 - [Quick start](#quick-start)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
@@ -66,8 +67,9 @@ own, you already have the raw material.
 
 ## What you get
 
-A **three-layer wiki** inside your Obsidian vault. Each layer is denser than the
-one below it — read top-down for the map, or bottom-up for a single post.
+A **three-layer wiki** inside your Obsidian vault, plus an interactive knowledge
+workspace. Start in Library to search and filter what you saved, move to Atlas
+to follow relationships, or use Analytics to understand composition and quality.
 
 All three layers are markdown notes inside a single Obsidian vault, under
 `learnings/x-knowledge/`. Each layer is denser than the one below it: many
@@ -163,8 +165,8 @@ posts → fewer topics → one index.
 
 ### Layer 1 — Items
 
-One note per bookmark or own-tweet: the original text, the link, the **linked
-article fetched and stored inline**, an LLM summary and its topics. A saved link
+One note per retained bookmark: the original text, the link, the **linked
+article or video fetched and stored inline**, an LLM summary and its topics. A saved link
 stops being a URL that will quietly rot and becomes a saved *article*. This now
 includes an X long-form **Article you bookmarked directly** (not just one linked
 inside a tweet): `extract` detects the Article and threads it into the same fetch
@@ -178,20 +180,12 @@ a blogpost** — the body prose with its inline images embedded in the author's
 order (the text-only fallback still renders the article text).
 
 A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
-and its transcript is attached to the item, so the video flows through the *same*
-`enrich → topics → generate` pipeline as an article. The note gains a real
-`primary_topic` (video items used to show `—`, because enrich only ever saw the
-2-line tweet), appears on its topic page(s), and renders a **`## Video digest`**
-section with the talk's title and transcript — a 72-minute talk you never watched
-becomes a readable, searchable, topic-linked note. A silent/no-speech clip
-degrades gracefully to a one-line "silent video" note instead of an empty digest.
-
-For **slide/screen/demo-heavy** talks, add the opt-in `--frames` flag: xbrain
-extracts the key slides, describes each with an **external** vision model, and
-embeds them into the digest section next to the transcript — so the visual
-content is captured too, not just the audio. It is content-aware: an interview /
-talking-head video is detected and its (camera-cut) frames are skipped, so you
-never waste vision calls where the slides are noise.
+and XBrain stores the raw transcript as a separate reference artifact and
+attaches only an executive summary to the item. It prefers captions/text tracks
+from X; when they are absent it can stream the MP4 only inside a private temp
+directory, transcribe it, and delete the media bytes. That summary flows through
+the *same* `enrich -> topics -> generate` pipeline as an article. XBrain never
+stores MP4, audio, frames or video-derived image files.
 
 *Example:*
 
@@ -300,6 +294,38 @@ of truth is `data/items.json`.
 
 ---
 
+## Screenshots
+
+The screenshots below use synthetic demo data, not a real XBrain corpus.
+
+![XBrain dashboard overview](docs/assets/screenshots/dashboard-overview.png)
+
+![Atlas Knowledge Graph map](docs/assets/screenshots/atlas-knowledge-graph.png)
+
+![Dashboard Ops and triage panels](docs/assets/screenshots/dashboard-ops.png)
+
+The dashboard is organized around four low-friction workspaces:
+
+- **Library** combines metadata search, served full-note search, topic/content/
+  confidence/author/domain/date filters, useful quick views, sorting, and a
+  document drawer.
+- **Atlas** puts the mind map first and adds a publication/acquisition timeline
+  plus a keyboard-friendly Documents view. Relation width can represent either
+  affinity or shared-document volume.
+- **Analytics** recalculates every KPI, chart, and table from the same selection.
+  Clicking a chart segment applies a filter that is immediately visible in
+  Library and Atlas.
+- **Operations** owns refresh/retry controls, failure evidence, and storage.
+  **Ask** is a global drawer that can use either the whole library or the current
+  filtered selection.
+
+Filter state is stored locally and reflected in the URL, so analytical views can
+be bookmarked or shared between your own devices. Open the generated file
+directly for metadata search; use `xbrain serve-dashboard` for full-note search,
+Ask, note viewing, and operational actions.
+
+---
+
 ## Quick start
 
 ```bash
@@ -339,12 +365,12 @@ uv run xbrain status     # see the counts
 | Chromium | — | Installed via `uv run playwright install chromium`. |
 | An Obsidian vault | — | Or any folder — XBrain just writes markdown. |
 | An X account | — | Yours. XBrain reads *your* bookmarks and tweets. |
-| `ANTHROPIC_API_KEY` | — | **Optional.** Only for the `api` execution mode. |
+| `NANOGPT_API_KEY` | — | **Optional.** Needed when `[llm].provider = "nanogpt"` and an API-backed LLM command runs. |
+| `ANTHROPIC_API_KEY` | — | **Optional.** Needed only when `[llm].provider = "anthropic"`. |
 | `FIRECRAWL_API_KEY` | — | **Optional.** Fallback fetcher for JavaScript-heavy pages. |
-| ffmpeg, `parakeet-mlx`, `mlx-vlm` | — | **Optional — only for `digest-video`** (video → transcript/slide digests). External, not pulled by `uv pip install`. See [Local models for `digest-video`](#local-models-for-digest-video-apple-silicon). |
 
-Neither API key is required: the default execution mode uses a Claude Code
-session and costs nothing.
+No API key is required for the default worksheet flow: the default execution
+mode uses a Claude Code session or manual worksheet and costs nothing.
 
 ---
 
@@ -398,12 +424,31 @@ vault = "/absolute/path/to/your/obsidian/vault"
 output_subdir = "learnings/x-knowledge"   # wiki folder, relative to the vault
 data_dir = "data"                         # JSON store, relative to the repo
 
+[drive]
+enabled = false                           # false = local, true = Google Drive
+cache_dir = ".xbrain-cache/google-drive"  # local working copy when enabled
+credentials_path = "auth/google_drive_credentials.json"
+token_path = "auth/google_drive_token.json"
+
+[email]
+enabled = false                           # notify after Drive-backed updates
+recipient = "you@example.com"
+sender = ""                               # or XBRAIN_EMAIL_FROM
+
+[snapshots]
+auto_prune_keep_last = 25                 # keep newest automatic snapshots; 0 disables
+
 [x]
 handle = "your_handle"                    # without the @
 
+[llm]
+provider = "nanogpt"                      # nanogpt | anthropic
+base_url = "https://nano-gpt.com/api/v1"  # NanoGPT-only API base URL
+model = "zai-org/glm-5.2"                 # text model for enrich/vocab/topics
+vision_model = "xiaomi/mimo-v2.5"         # image model for describe
+
 [enrich]
 executor = "claude-code"                  # claude-code | api | manual
-model = "claude-haiku-4-5-20251001"        # used only by the `api` executor
 
 [vocab]
 target_count = 45                         # how many topics to induce
@@ -414,14 +459,6 @@ resynth_threshold = 25                    # re-synthesise an overview after N ne
 [output]
 language = "English"                      # English | Spanish
 topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: line)
-
-[transcribe]
-command = "parakeet-mlx"                  # external transcriber for `digest-video`
-# model = "parakeet-tdt-0.6b-v2"          # optional; omit for the tool default
-
-[vision]
-# command = "vlm-describe"                # external vision model for `digest-video --frames`
-# model = "qwen2-vl-7b"                   # optional; omit for the tool default
 ```
 
 | Section | Key | Default | Purpose |
@@ -429,19 +466,26 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[paths]` | `vault` | — | Absolute path to your Obsidian vault. |
 | `[paths]` | `output_subdir` | — | Wiki folder inside the vault. |
 | `[paths]` | `data_dir` | — | JSON store, relative to the repo. |
+| `[drive]` | `enabled` | `false` | When `true`, XBrain reads/writes a local cache and syncs it with Google Drive. When `false`, everything stays local. |
+| `[drive]` | `root_folder_id` | — | Google Drive folder selected by `xbrain drive select-root <folder-id>`. Required only when Drive is enabled. |
+| `[drive]` | `cache_dir` | `.xbrain-cache/google-drive` | Local working copy used by Drive mode. |
+| `[drive]` | `credentials_path` | `auth/google_drive_credentials.json` | OAuth desktop-client JSON from Google Cloud Console. |
+| `[drive]` | `token_path` | `auth/google_drive_token.json` | Local user token created by `xbrain drive login`. |
+| `[email]` | `enabled` | `false` | Send an email after `refresh-all` / `sync`, only when Drive mode is also enabled. |
+| `[email]` | `recipient` | `""` | Notification recipient. Required when email notifications are enabled. |
+| `[email]` | `sender` | SMTP username | Notification sender address. Secrets stay in `.env` / environment. |
+| `[snapshots]` | `auto_prune_keep_last` | `25` | Keep the newest N automatic snapshots after destructive runs. Manual snapshots are preserved. `0` disables automatic pruning. |
 | `[x]` | `handle` | — | Your X handle, no `@`. |
+| `[llm]` | `provider` | `nanogpt` | API LLM provider for all API-backed LLM calls: `nanogpt` or `anthropic`. |
+| `[llm]` | `model` | `zai-org/glm-5.2` | Text model used by `enrich`, `vocab` and `topics`. |
+| `[llm]` | `vision_model` | `xiaomi/mimo-v2.5` | Vision-capable model used by `describe`. |
+| `[llm]` | `base_url` | `https://nano-gpt.com/api/v1` | NanoGPT API base URL. Ignored when `provider = "anthropic"`. |
 | `[enrich]` | `executor` | `claude-code` | Default [execution mode](#execution-modes) for the LLM stages. |
-| `[enrich]` | `model` | `claude-haiku-4-5` | Model for the `api` executor. |
 | `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
 | `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
-| `[describe]` | `model` | `claude-sonnet-4-6` | Vision model for `xbrain describe`. Override per run with `--model`. |
-| `[describe]` | `version` | `v1` | Tag persisted on every described photo. Bumping invalidates existing descriptions so the next `xbrain describe` re-describes stale entries. |
-| `[transcribe]` | `command` | `parakeet-mlx` | External transcriber `xbrain digest-video` shells out to (the ASR lives outside xbrain core). May be a multi-token wrapper; whisper / faster-whisper is the portable fallback. |
-| `[transcribe]` | `model` | — | Optional model id passed to the transcriber (`--model`). Omit for the tool default. |
-| `[vision]` | `command` | — (unset) | External vision model `xbrain digest-video --frames` shells out to (describes key-frame slides; lives outside xbrain core). No bundled default — `--frames` errors until it is set. May be a multi-token wrapper. |
-| `[vision]` | `model` | — | Optional model id passed to the vision command (`--model`). Omit for the tool default. |
+| `[describe]` | `version` | `v1` | Tag persisted on every described image. Bumping invalidates existing descriptions so the next `xbrain describe` re-describes stale entries. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
@@ -451,70 +495,107 @@ every enrichment; the next `xbrain enrich` re-enriches in the new language) and
 [Snapshots & safety](#snapshots--safety)). Otherwise new items get the new
 language while old summaries stay as they were.
 
-Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
-only** — never in `config.toml`, never in the repo.
+Secrets (`NANOGPT_API_KEY`, `ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`,
+`XBRAIN_SMTP_PASSWORD`) and Google OAuth files (`auth/google_drive_credentials.json`,
+`auth/google_drive_token.json`) live in the **environment** or local ignored
+files only — never in `config.toml`, never in the repo. For NanoGPT, copy
+`.env.example` to `.env` and set `NANOGPT_API_KEY`.
 
-### Local models for `digest-video` (Apple Silicon)
+### Google Drive library
 
-`digest-video` shells out to external tools — xbrain core carries no ML or ffmpeg
-dependency. None of this is needed unless you run `digest-video`. On an
-Apple-Silicon Mac:
+Google Drive mode is optional. In local mode (`[drive].enabled = false`),
+XBrain behaves as before: `data/` and the generated Obsidian vault are local.
+In Drive mode, XBrain uses a local cache for the current run and synchronizes
+that cache with the selected Drive folder before and after write commands.
+Uploads now happen only after a command succeeds. XBrain also fingerprints the
+remote tree before and after the command, refuses to upload over concurrent
+Drive changes, and will not mirror an empty or structurally invalid cache.
 
-```bash
-# 1. ffmpeg — frame extraction (--frames) + the transcribe wrapper's audio probe.
-brew install ffmpeg                    # gives ffmpeg + ffprobe on your PATH
+There is no extra LLM cost. Drive API calls use Google Drive API quota, and the
+uploaded files count against your Google Drive storage. If your Google account
+runs out of Drive storage, you may need more Google storage; XBrain itself does
+not add paid API processing beyond the existing LLM stages.
 
-# 2. ASR (always needed for digest-video) — Parakeet TDT via mlx, isolated tool:
-uv tool install parakeet-mlx           # gives `parakeet-mlx` on your PATH
-
-# 3. Vision (only for --frames) — mlx-vlm powers the local backend of the selector:
-uv tool install mlx-vlm
-
-# 4. Point config.toml at the wrappers (absolute paths survive any PATH):
-#    [transcribe]
-#    command = "/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
-#    [vision]
-#    command = "/path/to/xbrain/scripts/xbrain-vision"
-#    model   = "qwen-7b"
-```
-
-Models download on first use and cache under `~/.cache/huggingface`: the ASR
-model (`parakeet-tdt-0.6b`, ~600 MB) and, for `--frames`, the vision model you
-select (`qwen-7b` ≈ 5 GB; `qwen-3b` ≈ 2 GB; `qwen-32b` ≈ 18 GB — needs ~20 GB
-RAM). Pre-pull a large vision model once before a `--frames` run so the first
-frame doesn't hit the per-frame timeout. Cloud vision (`--vision-model opus`)
-needs only `ANTHROPIC_API_KEY`, no local install.
-
-**Transcriber wrapper — `scripts/xbrain-transcribe`.** Points `[transcribe]` at a
-thin parakeet-mlx wrapper: parakeet writes no file for a video with **no audio
-track** (silent clips, GIFs, muted screencasts), which xbrain would otherwise
-count as a failure. The wrapper checks with `ffprobe` and emits the empty-speech
-JSON so such videos attach as `has_speech=false` ("silent video"), while a real
-parakeet failure on an audio-bearing file still surfaces. You can point
-`[transcribe].command` straight at `parakeet-mlx` if you don't need this.
-
-**Vision model selector — `scripts/xbrain-vision`.** One `[vision].command`
-serves both local and cloud models; the `--model` name is routed by a registry:
-
-| Name | Backend | Runs on | Cost / privacy |
-|------|---------|---------|----------------|
-| `qwen-3b` (default), `qwen-7b`, `qwen-32b`, or any `hf/repo` | local (mlx-vlm) | your Mac's Neural Engine/GPU | free, fully offline |
-| `opus`, `sonnet`, `haiku`, or any `claude-<id>` | cloud (Anthropic REST, stdlib — no SDK) | Anthropic API | needs `ANTHROPIC_API_KEY`; frames leave the machine |
-
-Pick per run without editing config:
+Drive setup:
 
 ```bash
-xbrain digest-video --all-pending --frames                       # default (qwen-3b, local)
-xbrain digest-video --ids <slide-heavy-id> --frames --vision-model opus   # cloud, top quality
-xbrain digest-video --topic ai-coding --frames --vision-model qwen-7b     # better local
+uv run xbrain drive login --port 8766
+uv run xbrain drive roots
+uv run xbrain drive roots --create xbrain-root
+uv run xbrain drive select-root <folder-id>
+uv run xbrain drive bootstrap-local
 ```
 
-`--vision-model` overrides `[vision].model` for that run only (and requires
-`--frames`). Local mlx models download once and cache; the **local** backend
-reads `XBRAIN_VISION_MLX_PYTHON` only if mlx-vlm is not at the uv-tool default
-(`~/.local/share/uv/tools/mlx-vlm`). Pre-pull a **large** local model once before
-a `--frames` run — a cold `qwen-32b` (~18 GB) download can exceed the 300 s
-per-frame vision timeout and fail the first run (a re-run uses the cache).
+On a VPS, forward the OAuth callback port from your phone's SSH client before
+running `drive login`:
+
+```bash
+ssh -L 8766:127.0.0.1:8766 user@your-vps
+uv run xbrain drive login --port 8766
+```
+
+Then enable Drive:
+
+```toml
+[drive]
+enabled = true
+```
+
+When enabled, commands such as `xbrain sync` and `xbrain refresh-all` place new
+bookmarks, `data/`, downloaded media and generated vault files in the selected
+Google Drive folder through the cache sync. `auth/storage_state.json`, `.env`,
+Google OAuth credentials and tokens remain local.
+
+Optional email notification:
+
+```toml
+[email]
+enabled = true
+recipient = "you@example.com"
+sender = "your-smtp-sender@example.com"
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_starttls = true
+smtp_ssl = false
+```
+
+Set the SMTP credentials in `.env` or the process environment:
+
+```bash
+XBRAIN_SMTP_USERNAME=your-smtp-user
+XBRAIN_SMTP_PASSWORD=your-smtp-password
+```
+
+XBrain sends the email only after a successful `refresh-all` or `sync`, and only
+when both `[drive].enabled = true` and `[email].enabled = true`.
+
+### Video digest policy
+
+`digest-video` never stores MP4/audio, never extracts frames, and never writes
+video-derived image files. It uses caption/text-track URLs captured from X when
+available. If captions are absent, it may stream the MP4 into a private
+temporary directory, optionally extract mono 16k audio there for ASR, keep only
+the transcript text, and delete the temporary media bytes. The raw transcript is
+a vault reference artifact; only the executive summary flows through `enrich`,
+`topics`, the dashboard and Ask XBrain.
+
+Local ASR is used only through the temporary fallback. The normal CLI path still
+disables manual MP4 persistence (`download-videos`, `fetch-video`) and visual
+video artifacts (`digest-video --frames`, `--vision-model`).
+
+On a Linux VPS, use the bundled faster-whisper wrapper from a separate ASR venv:
+
+```toml
+[transcribe]
+command = "env XBRAIN_WHISPER_CACHE=/opt/xbrain-asr/models XBRAIN_WHISPER_CPU_THREADS=6 XBRAIN_WHISPER_BEAM_SIZE=1 XBRAIN_WHISPER_DELETE_SOURCE_AFTER_AUDIO=1 /opt/xbrain-asr/bin/python /workspace/projects/xbrain/scripts/xbrain-transcribe-faster-whisper"
+model = "small"
+timeout_seconds = 7200
+```
+
+`digest-video --max-size` is still recommended for long videos. The cap is
+enforced from `Content-Length` when present and while streaming bytes to disk.
+The `list-videos` size column remains an estimate from X's
+`bitrate × duration_millis`, so it can be conservative.
 
 ---
 
@@ -577,7 +658,8 @@ plain markdown notes.
 - **`data/items.json`** is the hub. Three stages mutate it (`extract`,
   `fetch`, `enrich`); every later stage reads it.
 - **`data/vocab.yaml`** is the closed taxonomy. Read by `enrich` (to assign
-  topics from it), `topics` (to know which pages to synthesise) and
+  topics from it), `taxonomy-health` (to spot drift and missing topics), `topics`
+  (to know which pages to synthesise) and
   `generate` (for the tags).
 - **`data/topics.json`** is the synthesised topic overviews. Read by
   `generate`.
@@ -592,13 +674,26 @@ bit-for-bit from `data/`.
 | ① | `extract` | mechanical | `items.json` + `state.json` | Pulls new bookmarks + own tweets from X (incremental — stops at known ids). |
 | ② | `fetch` | mechanical | `items.json` | Downloads linked article bodies, expands threads, fetches linked X content. Records structured evidence for broken links. |
 | ③ | `vocab` | **LLM** | `vocab.yaml` | Induces the controlled topic taxonomy from the whole corpus. |
-| ④ | `enrich` | **LLM** | `items.json` | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy. |
+| ④ | `enrich` | **LLM** | `items.json` | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy, plus diagnostic confidence/suggested missing topics. |
 | ⑤ | `topics` | **LLM** | `topics.json` | Synthesises each topic page's overview; builds the mechanical post lists. |
 | ⑥ | `generate` | mechanical | the Obsidian vault | Renders the three-layer wiki: `items/*.md`, `topics/*.md`, `_index.md`. |
 
 Every stage is **idempotent and incremental** — re-running it only processes
 what is new. `vocab --regenerate` is the deliberate exception: it re-induces the
 taxonomy and marks every item for re-enrichment.
+
+Use `taxonomy-health` after normal ingestion to decide whether the taxonomy is
+drifting. If it reports repeated `misc`, low/unknown confidence or suggested
+missing topics, first try the cheaper repair path:
+
+```bash
+uv run xbrain enrich --taxonomy-risk
+uv run xbrain topics --resynth
+uv run xbrain generate
+```
+
+Only run `vocab --regenerate` when the health report shows a real pattern that
+requires changing the vocabulary itself.
 
 A typical full run:
 
@@ -621,22 +716,26 @@ uv run xbrain <command> [options]
 
 | Command | Description |
 |---------|-------------|
-| `extract` | Extract bookmarks and/or own tweets from X. `--source bookmarks\|tweets\|all`. |
-| `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
-| `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
-| `media` | Download X-post photos referenced in `Item.media` **and the inline images of a bookmarked X Article** (stored under `data/media/<id>/article/<n>`, separate from the item's own photos), reusing the one photo-download engine for both. `--limit` is a combined budget; the SUMMARY reports article images separately. Item photos and the downloaded Article images both render inline in the wiki — `generate` embeds each Article image in the author's order (see the blogpost render). `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
-| `describe` | Describe downloaded photos with a vision LLM (Claude Sonnet 4.6 by default) and feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described photos unless `[describe].version` is bumped in `config.toml`. |
-| `refresh-media` | Re-capture X and backfill the **playable video URL + bitrate + duration** onto items whose video is still poster-era (incremental `extract` + non-overwriting merge never refresh existing videos). Video-only — photos and enrichment/description state are preserved, and a good video is never degraded back to its poster if X drifts. Scrolls the full history (slow); destructive → auto-snapshot; prints a download-size estimate. Does **not** download video (that is `download-videos`). Re-seeing 0 known items on a non-empty store (likely expired session / GraphQL drift) aborts without saving unless `--force`. `--source bookmarks\|tweets\|all`, `--force`. |
-| `download-videos` | Download the actual **mp4 bytes** for backfilled videos and embed them inline in the wiki — the video counterpart to `media`. mp4 only: HLS (`.m3u8`) needs ffmpeg and is a deferred follow-up (skipped + counted); poster-era entries (run `refresh-media` first) are skipped too. Prints a `~X.X GB` size estimate and asks for confirmation **unless `--yes`**. `--max-size 500MB\|2GB` skips videos whose estimated size exceeds the cap. Validates the response is really a video (rejects HTML/JSON interstitials served as 200). Destructive → auto-snapshot; idempotent (re-runs skip downloaded videos unless `--force`). `--source bookmarks\|tweets\|all`, `--limit N`, `--items <a,b,c>`, `--max-size <size>`, `--force`, `--yes`. See [Local media storage](#local-media-storage). |
-| `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
-| `fetch-video` | **Ephemeral** download of the real mp4 for selected videos to `--to <dir>/<id>.mp4`, for agent-side processing (transcription/analysis is external — see below). Select with `--ids a,b` and/or `--topic <t>` (+ `--max-size`, `--limit`, `--source`). Reuses `download-videos`' content-validation, failure classification, atomic write and mp4/HLS/poster discriminator; HLS and poster-era are skipped + counted. **Deliberately non-persisting:** never mutates `items.json`, never snapshots, never touches `data/media/` — it writes only under `--to`. `--json` for machine output. |
-| `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). **`--frames`** (opt-in visual layer, needs `[vision].command`): for slide-heavy videos it extracts key slides (ffmpeg scene detection + interval sampling so the whole video is covered), describes each via the **external** vision model, records the descriptions on the `x_video` source, and embeds the slide images into the note like downloaded photos; talking-head videos are detected and skipped (logged). The transcript then flows through the normal `enrich → topics → generate` pipeline. |
+| `extract` | Extract retained X bookmarks: articles and videos. Own tweets and plain post-only bookmarks are ignored. `--source tweets` remains as an empty compatibility scope. |
+| `import-archive <zip>` | Legacy helper for historical own-tweet imports; not part of the normal retained-library workflow. |
+| `fetch` | Download linked article content, expand linked X Article content, then prune non-library items from `items.json`. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
+| `retry-failed` | Force-retry only retained bookmarks whose linked article/X-article sources failed, then regenerate the vault. This is the same action exposed by the dashboard's retry button for failed bookmarks. |
+| `media` | Download X-post photos referenced in `Item.media` **and the inline images of a bookmarked X Article**. Local mode stores bytes under `data/media`; Google Drive mode stores them directly under the generated vault's `_media` directory to avoid duplicate Drive storage. `--limit` is a combined budget; the SUMMARY reports article images separately. Item photos and downloaded Article images render inline in the wiki. `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Media storage](#media-storage). |
+| `describe` | Describe downloaded X-post photos and inline X Article images with `[llm].provider` + `[llm].vision_model`, then feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described images unless `[describe].version` is bumped in `config.toml`. If a multi-image response is malformed, the batch is retried one image at a time. |
+| `refresh-media` | Re-capture X and backfill playable video URL + metadata onto poster-era records. It still does not download video bytes. Re-seeing 0 known items on a non-empty store aborts unless `--force`. `--source bookmarks\|tweets\|all`, `--force`. |
+| `download-videos` | Disabled by storage policy. XBrain does not persist MP4. |
+| `list-videos` | Read-only catalog of every video referenced in `items.json`, showing both media `STATE` and analysis `DIGEST`. Useful for inspecting what XBrain knows about video bookmarks. Writes nothing. |
+| `fetch-video` | Disabled by storage policy. XBrain does not expose a manual MP4 write path. |
+| `digest-video` | Video processing without persistent media: use a captured caption/text-track URL when available, otherwise stream MP4 only to a private temp dir, transcribe with `[transcribe].command` (the faster-whisper wrapper extracts temp audio first), delete temp media, store the raw transcript as a reference artifact, create an executive summary with the configured text LLM, and attach that summary as `x_video`. `--frames` and `--vision-model` are disabled; `--max-size` caps only the temporary MP4 fallback; `[transcribe].timeout_seconds` caps the external ASR process. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
-| `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
+| `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`, `--taxonomy-risk` to re-enrich only items flagged by taxonomy diagnostics (`misc`, low/unknown confidence, suggested missing topics, or stale content). |
+| `taxonomy-health` | Read-only diagnostics for taxonomy drift: `misc` usage, confidence counts, single-topic assignments, unused topics and repeated `suggested_new_topics`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
-| `generate` | Render the wiki into the vault. |
+| `generate` | Render the wiki into the vault, including `dashboard.html` and the derived Obsidian Canvas map at `maps/xbrain-map.generated.canvas`. |
+| `serve-dashboard` | Serve Library full-text search, Atlas, cross-filtered Analytics, the note viewer, Operations and contextual Ask. Defaults to `127.0.0.1:8765`; mutation/Ask requests require same-origin action headers and expensive endpoints are rate-limited. Keep it behind local access or an authenticated reverse proxy. See [Dashboard production runbook](docs/dashboard-production-runbook.md). |
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
+| `drive` | Manage Google Drive login, root-folder selection, sync and status. |
 | `snapshot` | Manage `data/` snapshots: `create`, `list`, `show`, `restore`, `prune`. See [Snapshots & safety](#snapshots--safety). |
 | `diff` | Compare two snapshots (or one snapshot vs. the live `data/`). Surfaces reassigned items, topic growth, overview drift, vocab changes. `--format text\|json`. |
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
@@ -649,14 +748,14 @@ Run `uv run xbrain <command> --help` for the full option list.
 
 ---
 
-## Local media storage
+## Media storage
 
 `xbrain media` downloads X-post photos **and the inline images of a
 bookmarked X Article** and persists the bytes locally. Item photos are then
 shown inline in the generated wiki; the downloaded Article images are embedded
 in the note by `generate`, in the author's order, as a blogpost.
 
-**Layout**
+**Local mode layout**
 
 ```
 data/
@@ -668,7 +767,7 @@ data/
     │   └── article/       # inline images of an X Article (#39), namespaced
     │       ├── 0.jpg      #   so they never collide with the item's photos
     │       └── 1.png
-    └── ...
+	    └── ...
 ```
 
 Item photos are stored under `data/media/<item-id>/<index>.<ext>` and Article
@@ -677,12 +776,31 @@ same download engine); the extension matches the format the X CDN sent us
 (`.jpg`, `.png`, or `.webp`). `data/` is gitignored — the bytes never enter
 the repo.
 
+**Google Drive mode layout**
+
+When `[drive].enabled = true`, media is stored only once, directly in the
+generated vault:
+
+```
+xbrain-root/
+└── vault/
+    └── <output_subdir>/
+        └── _media/
+            └── <item-id>/
+                ├── <index>.<ext>
+                └── article/
+                    └── <n>.<ext>
+```
+
+This keeps Obsidian/wiki embeds self-contained while avoiding the previous
+`data/media` + `vault/_media` duplication in Google Drive.
+
 **Vault rendering**
 
-`xbrain generate` mirrors each downloaded photo from `data/media/` into
-`<vault>/<output_subdir>/_media/<item-id>/<index>.<ext>` at render time
-and emits Obsidian wikilink embeds (`![[_media/<id>/<n>.<ext>]]`) so the
-vault is fully self-contained. No symlinks, no Obsidian config needed.
+`xbrain generate` emits Obsidian wikilink embeds
+(`![[_media/<id>/<n>.<ext>]]`) so the vault is fully self-contained. In local
+mode it mirrors media into `_media`; in Drive mode `_media` is already the
+canonical media directory, so no duplicate copy is made.
 
 **Disk budget (approximate)**
 
@@ -713,22 +831,27 @@ describe`, into `described`).
 **Vision descriptions**
 
 Once `xbrain media` has the bytes on disk, `xbrain describe` runs every
-photo through Claude vision and stores a short prose description on
-the entry (transitioning `MediaPhotoDownloaded` → `MediaPhotoDescribed`).
+downloaded X-post photo and inline X Article image through the configured
+vision model and stores a short prose description on the entry (transitioning
+`MediaPhotoDownloaded` → `MediaPhotoDescribed`).
 Descriptions are 1-3 sentences, faithful, in the configured
-`output_language`. Decorative photos (avatars, reaction memes,
-abstract backgrounds) are classified as such and persisted with an
-empty description so they introduce no topic noise downstream.
+`output_language`. When the image is a screenshot, slide, code sample,
+Markdown snippet, or UI with meaningful visible text, `describe` can also store
+that extracted text separately for later processing, but the generated note only
+shows the short image description so the article stays readable. Real code or
+Markdown blocks that are part of an X Article body render as fenced code blocks
+in the article flow. Decorative photos (avatars, reaction memes, abstract
+backgrounds) are classified as such and persisted with an empty description so
+they introduce no topic noise downstream.
 
-`xbrain enrich` and `xbrain topics` consume the descriptions
-automatically, on **both** the API and the worksheet (`claude-code` /
-`manual`) tracks: an item with content-bearing photos gets an
-`Images in this post:` block in the API enrichment prompt and an
-`image_descriptions` field in the worksheet; topic-page synthesis sees
-the flat list of content image descriptions across the topic's posts on
-either track. This is how a tweet that is mostly a screenshot of a
-paper becomes searchable by what the screenshot was actually about —
-even when the pipeline runs entirely on the Claude Code subscription.
+`xbrain enrich` and `xbrain topics` consume the descriptions automatically, on
+**both** the API and the worksheet (`claude-code` / `manual`) tracks: post photos
+appear as `Images in this post:`, inline Article images appear next to the
+linked-article body, and worksheets carry the combined `image_descriptions`
+field. Topic-page synthesis sees the flat list of content image descriptions
+across the topic's posts on either track. This is how a tweet that is mostly a
+screenshot or an Article figure becomes searchable by what the image was
+actually about.
 
 These descriptions flow whenever `enrich` / `topics` next run for an
 item. To back-fill items that were already enriched *before* the
@@ -736,38 +859,24 @@ describe pass (a one-time LLM cost), force the re-run: `xbrain vocab
 --regenerate` (clears enrichments) then `xbrain enrich`, and `xbrain
 topics --resynth`.
 
-Describing the full corpus costs about $3-5 with the default model
-(Sonnet 4.6, 5 images per call). Bump `[describe].version` in
+Describe cost depends on the configured provider/model and corpus size; the
+default NanoGPT vision model is `[llm].vision_model = "xiaomi/mimo-v2.5"`.
+Bump `[describe].version` in
 `config.toml` to invalidate stored descriptions when you change the
 rubric — the next `xbrain describe` run re-describes stale entries
 automatically without `--force`.
 
 **Video media**
 
-A video entry carries the playable stream URL, the poster `thumbnail_url`, and
-the chosen `bitrate` + `duration_millis` (so a download can estimate size
-without fetching a byte). Getting a video's bytes onto disk is two steps:
-`refresh-media` backfills the playable URL onto poster-era records, then
-`download-videos` fetches the mp4 bytes.
+A video entry carries the external stream URL, poster `thumbnail_url`, optional
+bitrate/duration metadata, and, when X exposes it, caption/text-track metadata.
+The normal XBrain library policy is: **never store MP4, audio, frames or
+video-derived image files**. Temporary MP4/audio bytes are allowed only inside
+`digest-video`'s ASR fallback and are removed before the store/vault is written.
 
-Because `extract` is incremental and the store merge never overwrites,
-videos captured before the playable-stream capability landed are
-**poster-era**: their stored URL is the poster image and the bitrate /
-duration are blank. They are never refreshed by a normal `xbrain extract`.
-`xbrain refresh-media` is the backfill: it re-captures the full X history,
-swaps each poster-era video entry for the freshly-parsed one (playable URL
-+ bitrate + duration) **in place**, and leaves photos and enrichment
-untouched. It only upgrades — if X has drifted and serves no usable stream
-(a poster fallback), the existing record is kept, so a re-run never degrades
-a good video back to its poster. It auto-snapshots `data/` first
-(destructive) and prints a download-size estimate (`~X.X GB across N videos;
-M with unknown size`) so you can size the video download.
-
-If a run re-sees **0** known items against a non-empty store — the symptom of
-an expired X session or a GraphQL parser drift, where the capture comes back
-empty without raising — `refresh-media` treats that as a failed run: it warns
-and aborts **without saving** (nothing was matched, so `data/` is untouched
-and the pre-snapshot already exists). Pass `--force` to save anyway.
+Videos captured before caption metadata landed may need `refresh-media` so XBrain
+can re-read the X payload and discover newer video/caption fields. It does not
+download video bytes.
 
 ```bash
 xbrain refresh-media                      # backfill bookmarks + own tweets
@@ -775,129 +884,22 @@ xbrain refresh-media --source bookmarks   # bookmarks only
 xbrain refresh-media --force              # save even if 0 known items re-seen
 ```
 
-**Downloading video**
-
-Once `refresh-media` has populated the playable URLs, `xbrain download-videos`
-fetches the actual bytes — the video counterpart to `xbrain media` for photos.
-It downloads **mp4 only** this stage: a real progressive mp4 stream advances
-`video_pending → video_downloaded` (bytes under `data/media/<id>/<n>.mp4`,
-embedded as `![[_media/<id>/<n>.mp4]]` in the note, which Obsidian renders as an
-inline player) or `video_failed` (categorised, with the same transient-retry
-contract as `media`). HLS (`.m3u8`) manifests need ffmpeg to mux into a playable
-file — they are **skipped and counted**, deferred to a follow-up. Poster-era
-entries (not yet backfilled) are skipped too; run `refresh-media` first.
-
-Video files are large, so `download-videos` prints a **size gate** before
-fetching — e.g. `About to download ~1.2 GB across 8 videos (3 HLS skipped, 1
-already downloaded).` — and asks for confirmation. Pass `--yes` to skip the
-prompt (non-interactive runs). For a per-video cap, `--max-size` skips any video
-whose **estimated** size exceeds it (accepts `500MB` / `2GB`; a bare number is
-MB). With a cap set, videos of unknown size (no bitrate/duration) can't be
-verified under it and are skipped too — without the cap they download normally.
-The size estimate and the "N videos / ~X GB" line always reflect only the
-under-cap set you're about to fetch.
-
-Because a 200 status isn't trust — a CDN/captcha/auth-wall page can come back as
-200 with an HTML or JSON body — the downloaded bytes are validated (a `video/*`
-content-type or an mp4 `ftyp` signature; a body that starts with HTML/JSON markup
-is rejected even under a `video/*` header) before being written. A non-video
-response is recorded as a **transient** failure (no corrupt `.mp4` is written) so
-the next run retries automatically once the rate-limit or session clears. A
-mid-download connection drop or an out-of-memory body is likewise recorded and
-the batch continues — one bad video never aborts the whole run.
-
-The run is idempotent (already-downloaded videos are skipped unless `--force`),
-auto-snapshots `data/` first (destructive), and a Ctrl-C between videos leaves
-`items.json` coherent.
+**`digest-video` - the built-in video transcript path.** It fetches captured
+caption/text-track URLs when available. If not, it streams MP4 into a temp dir,
+transcribes it with the external ASR command, deletes the media bytes, stores the
+raw transcript as a reference artifact, and attaches an executive summary as
+`x_video`:
 
 ```bash
-xbrain download-videos                     # size gate + confirm, then download
-xbrain download-videos --yes               # non-interactive (CI / scripts)
-xbrain download-videos --max-size 500MB    # skip videos estimated over 500 MB
-xbrain download-videos --source bookmarks  # bookmarks only
-xbrain download-videos --limit 5 --items 123,456   # scope the run
-xbrain download-videos --force             # re-download + retry permanent failures
-```
-
-**Selecting and fetching video for agent-side processing**
-
-`download-videos` keeps the mp4 in the store (`data/media/`) to embed inline. But
-the whole corpus is far too large to keep on disk to *process* — the diagnostic
-from the video-capture work was **225 mp4s ≈ 140 GB**. When the goal is to turn a
-saved talk into a readable digest, the video is a means, not an end: you want the
-*transcript*, not 140 GB of bytes. `list-videos` + `fetch-video` are the
-**ephemeral, agent-driven** surface for exactly that — one video at a time, bytes
-discarded after the text is extracted.
-
-xbrain stays **mechanical**: it *lists* and *fetches*. The heavy ML — ASR
-(transcription) and any vision — is **external / agent-side tooling**, not baked
-into the CLI (no bundled MLX/CoreML/ML *library* in xbrain core — ffmpeg and the
-vision model are shelled out as external subprocesses, used only by `--frames`).
-The agent loop is
-**list → fetch → analyze → discard**:
-
-```bash
-# 1. List — machine-readable catalog the agent picks from (read-only).
-xbrain list-videos --topic ai --status pending --json
-# → [{"id":"2068…","url":"https://x.com/…","state":"pending",
-#     "topic":"ai","size_bytes":81600000,"mp4_url":"https://video.twimg.com/…",
-#     "text":"a great talk on …"}, …]
-
-# 2. Fetch — the chosen videos land as ephemeral files under --to (nothing else).
-xbrain fetch-video --ids 2068…,2069… --to /tmp/xbrain-videos
-# → /tmp/xbrain-videos/2068….mp4  (items.json untouched, no snapshot)
-
-# 3. Analyze — the agent runs its own local transcriber (e.g. parakeet-mlx /
-#    whisper) over each mp4. Transcription is EXTERNAL to xbrain by design.
-# 4. Discard — delete /tmp/xbrain-videos when done; the store never grew.
-```
-
-`list-videos` writes nothing and takes no snapshot. `fetch-video` is deliberately
-**non-persisting**: it never mutates `items.json`, never snapshots, and never
-writes to `data/media/` — it only writes `<--to>/<id>.mp4`. That is *why*
-`fetch-video` is intentionally **not** in the destructive auto-snapshot set: it
-has nothing destructive to protect against.
-
-**`digest-video` — the built-in transcript path.** `list-videos` + `fetch-video`
-give an agent the raw surface; `digest-video` is the batteries-included command
-that does the whole loop for you and *attaches* the result:
-
-```bash
-# One video, N bookmarks, one transcript — dedup handles the fan-out for you.
-xbrain digest-video --ids 2068…,2069…      # both reference the same talk → fetched + transcribed once
+xbrain digest-video --ids 2068,2069        # dedup handles repeated videos
 xbrain digest-video --topic ai             # every ai-topic video
-xbrain digest-video --all-pending          # every fetchable pending video
+xbrain digest-video --all-pending          # every pending video
+xbrain digest-video --all-pending --max-size 500MB  # cap ASR fallback downloads
 ```
 
-It fetches each video ephemerally, shells out to the **external** transcriber you
-configure in `[transcribe]` (default `parakeet-mlx`; the ASR is *not* bundled —
-xbrain core carries no MLX/CoreML dependency), attaches the transcript to the item
-as an `x_video` content source, and discards the bytes — never more than one video
-on disk. It **dedups by video identity** (the stable id in the mp4 path, not the
-rotating signed URL), so N bookmarks of the same video are fetched + transcribed
-**once** and all of them get the transcript. Silent / no-audio videos attach with
-empty text + a `has_speech=false` marker (recorded, never a crash). It is
-idempotent (skip items already carrying an `x_video` source unless `--force`)
-and destructive (it rewrites `items.json`), so it **auto-snapshots** first. From
-there the transcript flows through the normal `enrich → topics → generate`
-pipeline, turning the once-unwatchable bookmark into a topic-linked note — see the
-[digest module](https://github.com/VGonPa/xbrain/issues/44).
-
-```bash
-# Opt-in visual layer for slide-heavy talks (needs [vision].command configured):
-xbrain digest-video --topic ai --frames    # describe + embed key slides where they carry content
-```
-
-**When `--frames` pays off.** For a slide/screen/demo talk the visual carries as
-much as the audio, so `--frames` extracts the key slides (ffmpeg scene detection,
-with interval sampling so a long static tail is still covered), describes each via
-the **external** vision model you configure in `[vision].command` (like the
-transcriber, *not* bundled — no vision/ML dependency in core), records the
-descriptions on the `x_video` source, and embeds the slide images into the note
-exactly like downloaded photos. It is **content-aware**: a talking-head / interview
-video is detected and its visual layer is skipped (logged, never silently), so you
-don't spend vision calls on camera-cut noise. `--frames` is fully opt-in — a normal
-`digest-video` run never touches ffmpeg or the vision model.
+`download-videos`, `fetch-video`, `digest-video --frames` and `--vision-model`
+are disabled. `--max-size` applies only to the temporary ASR fallback; caption
+tracks do not download video bytes.
 
 ---
 
@@ -917,6 +919,11 @@ xbrain snapshot create --name pre-rubric-v2 # mark a known-good state
 xbrain snapshot restore <name>              # roll back data/ (run `generate` next)
 xbrain snapshot prune --keep-last 10        # cap disk use
 ```
+
+By default, XBrain keeps the newest 25 **automatic** snapshots after each
+destructive run and leaves manual snapshots untouched. Change
+`[snapshots].auto_prune_keep_last`, or set it to `0` to disable automatic
+pruning.
 
 The Obsidian vault is **not** snapshotted — it is fully derived from `data/`
 via `xbrain generate`. `restore` rolls back `data/`; you run `xbrain generate`
@@ -941,12 +948,14 @@ xbrain diff <snap-a> --format json | jq '.summary.reassigned_pct'
 
 `vocab`, `enrich` and `topics` need an LLM. XBrain never embeds a Claude
 subscription token — instead the LLM work is **pluggable**, with three modes,
-selected by `--executor` or `config.toml`'s `[enrich].executor`.
+selected by `--executor` or `config.toml`'s `[enrich].executor`. API-backed
+text calls use `[llm].provider` / `[llm].model`; image calls use the same
+provider with `[llm].vision_model`.
 
 | Mode | Cost | When you reach for it |
 |------|------|----------------------|
 | **`claude-code`** *(default)* | None | You have Claude Code open. Day-to-day enrichment. |
-| **`api`** | Pay per token (cheap on Haiku) | Unattended runs (cron, CI, future `/schedule`). No human in the loop. |
+| **`api`** | Pay per token through `[llm].provider` | Unattended runs (cron, CI, future `/schedule`). No human in the loop. |
 | **`manual`** | None | Spot fixes, hand-curating a few items, fallback when the others fail. |
 
 All three modes end the same way — `xbrain` validates the judgments against the
@@ -961,9 +970,8 @@ You open a Claude Code session, the `enriching-x-knowledge` skill (in
 `xbrain enrich --apply` to validate and persist.
 
 **Why this mode exists.** Most XBrain users already have a Claude Code
-subscription. Spending another budget on the Anthropic API to do the same
-work is wasteful — this mode lets the existing subscription do the LLM work
-at zero extra cost.
+subscription. Spending another API budget to do the same work is wasteful —
+this mode lets the existing subscription do the LLM work at zero extra cost.
 
 **When to use it.** Default for interactive runs. You are at your machine,
 Claude Code is open, you want to enrich a batch.
@@ -1009,9 +1017,9 @@ sequenceDiagram
 
 ### Mode 2 — `api`
 
-**What it does.** The CLI loops over every pending item, calls the Anthropic
-API once per item with the rubric, item content and vocab. Each judgment is
-validated, then a single store write at the end persists everything.
+**What it does.** The CLI loops over every pending item, calls the configured
+API provider once per item with the rubric, item content and vocab. Each
+judgment is validated, then a single store write at the end persists everything.
 
 **Why this mode exists.** The `claude-code` mode needs a human present. A
 scheduled job, a cron, or a CI run cannot pop open a Claude Code session.
@@ -1048,7 +1056,7 @@ sequenceDiagram
     autonumber
     actor U as You
     participant CLI as xbrain CLI
-    participant API as Anthropic API
+    participant API as Configured LLM API
     participant Data as data/
 
     U->>CLI: xbrain enrich --executor api
@@ -1152,13 +1160,11 @@ xbrain/
 │   ├── models.py         # pydantic data models (Item, Enrichment, Topic, ...)
 │   ├── store.py          # JSON load/save for items + topic pages
 │   ├── refresh.py        # refresh-media backfill: video media swap + size estimate
-│   ├── video_media.py    # download-videos: mp4 byte download (reuses media.py)
+│   ├── video_digest.py   # digest-video: captions/temporary ASR -> executive summary
+│   ├── video_transcript.py # captions parser + temporary ASR fallback + LLM prompt
 │   ├── video_select.py   # list-videos: read-only video catalog (VideoRow)
-│   ├── video_fetch.py    # fetch-video: ephemeral mp4 fetch, non-persisting
-│   ├── transcribe.py     # digest-video: external transcriber subprocess (no ML in core)
-│   ├── video_frames.py   # digest-video --frames: ffmpeg key-frame extraction + classify (no ML)
-│   ├── vision.py         # digest-video --frames: external vision subprocess (no ML in core)
-│   ├── digest.py         # digest-video: fetch → transcribe (+ optional frames) → attach x_video
+│   ├── video_media.py    # legacy mp4 downloader internals; manual CLI path disabled
+│   ├── video_fetch.py    # ephemeral mp4 fetch internals for ASR fallback
 │   ├── extract/          # X extraction (Playwright + GraphQL interception)
 │   │   ├── browser.py    #   session / browser context
 │   │   ├── graphql.py    #   parse X's internal GraphQL responses
@@ -1173,12 +1179,15 @@ xbrain/
 │   ├── worksheet.py      # the enrich worksheet hand-off
 │   ├── topic_synth.py    # topic-overview synthesis (api + worksheet)
 │   ├── topics.py         # topic-page computation + rendering
+│   ├── dashboard.py      # dashboard metrics, Library rows and Atlas payload
+│   ├── dashboard_http.py # origin/header and in-process rate-limit primitives
 │   ├── validate.py       # the mechanical validator (guardrails)
 │   ├── rubrics.py        # load the declarative rubrics + guardrails
 │   ├── rubrics/          # rubric-*.md + guardrails.yaml (the processing rules)
 │   ├── generate.py       # render item notes + index + log
 │   └── notes_io.py       # shared markdown helpers
 ├── scripts/              # import_chrome_session.py / import_safari_session.py
+├── deploy/               # hardened systemd + Nginx production examples
 ├── tests/                # pytest suite (test-first; one test file per module)
 ├── config.toml.example   # configuration template
 └── pyproject.toml        # deps, tooling, `poe` tasks
@@ -1216,7 +1225,10 @@ client. Respect X's Terms of Service.
 | Document | Description |
 |----------|-------------|
 | [docs/tutorial.md](docs/tutorial.md) | **Start here** — end-to-end walkthrough from install to a searchable wiki. |
-| [docs/digest-video.md](docs/digest-video.md) | Worked example: turn a bookmarked talk into transcript + slide notes. |
+| [docs/atlas-knowledge-graph.md](docs/atlas-knowledge-graph.md) | Atlas data contract, Map/Timeline/Documents controls, shared selection, stable layout persistence, served actions, and Canvas export. |
+| [docs/dashboard-style-guide.md](docs/dashboard-style-guide.md) | Design tokens and UX rules for Library, Atlas, Analytics, Operations, Ask, accessibility, and the note viewer. |
+| [docs/dashboard-production-runbook.md](docs/dashboard-production-runbook.md) | Hardened production serving, security/rate-limit smoke checks, systemd/Nginx examples, and rollback. |
+| [docs/digest-video.md](docs/digest-video.md) | Worked example: turn a bookmarked video caption into transcript + executive summary artifacts. |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common failures & fixes (auth, PATH, digest-video, iCloud). |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How XBrain is shaped: pipeline stages, artifacts, rubrics, executors, invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — including PRs written with AI agents. |
@@ -1227,4 +1239,4 @@ code. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-*Last updated: 2026-05-19*
+*Last updated: 2026-09-01*

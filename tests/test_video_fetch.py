@@ -1,8 +1,8 @@
 """Tests for `xbrain.video_fetch` — the ephemeral mp4 fetch for `fetch-video`.
 
-`fetch_videos` downloads a selected item's real mp4 to `<dest>/<id>.mp4`,
+`fetch_videos` streams a selected item's real mp4 to `<dest>/<id>.mp4`,
 REUSING `video_media`/`media` primitives (content-validation, retry
-classification, atomic write, `.part` sweep, the mp4/HLS/poster discriminator).
+classification, the mp4/HLS/poster discriminator).
 It is deliberately store-non-mutating: it reads the resolved stream URL off the
 item's video entry and never writes `items.json` nor `data/media/`. HTTP is
 mocked with a hand-rolled `FakeSession` (no real network).
@@ -41,6 +41,11 @@ class FakeResponse:
     status_code: int
     content: bytes = b""
     headers: dict[str, str] = field(default_factory=dict)
+    chunks: list[bytes] | None = None
+
+    def iter_content(self, *, chunk_size: int):
+        _ = chunk_size
+        yield from (self.chunks if self.chunks is not None else [self.content])
 
 
 @dataclass
@@ -52,7 +57,8 @@ class FakeSession:
     calls: list[str] = field(default_factory=list)
     headers: dict[str, str] = field(default_factory=dict)
 
-    def get(self, url: str, *, timeout: int) -> FakeResponse:
+    def get(self, url: str, *, timeout: int, stream: bool = False) -> FakeResponse:
+        _ = stream
         self.calls.append(url)
         for key, exc in list(self.raise_for.items()):
             if key in url:
@@ -112,6 +118,29 @@ def test_fetches_mp4_to_dest_dir(tmp_path: Path):
     assert result.outcome == "fetched"
     assert result.path == str(out)
     assert result.size_bytes == len(_mp4_bytes())
+
+
+def test_fetch_streams_chunks_without_buffering_response_content(tmp_path: Path):
+    store = {"42": _item("42", media=[_pending()])}
+    payload = _mp4_bytes(4096)
+    session = FakeSession(
+        responses={
+            ".mp4": [
+                FakeResponse(
+                    200,
+                    content=b"do-not-use",
+                    chunks=[payload[:8], payload[8:1000], payload[1000:]],
+                )
+            ]
+        }
+    )
+
+    report = fetch_videos(
+        store, ["42"], tmp_path, session=session, sleep=_no_throttle, throttle_seconds=0
+    )
+
+    assert report.fetched == 1
+    assert (tmp_path / "42.mp4").read_bytes() == payload
 
 
 def test_fetch_does_not_mutate_store_bytes(tmp_path: Path):
@@ -184,7 +213,7 @@ def test_item_without_video_is_skipped(tmp_path: Path):
     assert report.results[0].reason == "no_video"
 
 
-def test_max_size_skips_too_large(tmp_path: Path):
+def test_overestimated_size_still_fetches_when_stream_fits_cap(tmp_path: Path):
     store = {"42": _item("42", media=[_pending()])}  # est ~8 MB
     report = fetch_videos(
         store,
@@ -195,12 +224,12 @@ def test_max_size_skips_too_large(tmp_path: Path):
         sleep=_no_throttle,
         throttle_seconds=0,
     )
-    assert report.skipped == 1
-    assert report.results[0].reason == "too_large"
-    assert not (tmp_path / "42.mp4").exists()
+    assert report.fetched == 1
+    assert report.results[0].size_bytes == len(_mp4_bytes())
+    assert (tmp_path / "42.mp4").exists()
 
 
-def test_max_size_skips_unknown_size(tmp_path: Path):
+def test_unknown_estimated_size_still_fetches_when_stream_fits_cap(tmp_path: Path):
     entry = MediaVideoPending(url=_MP4_URL, thumbnail_url=_POSTER)  # no bitrate/duration
     store = {"42": _item("42", media=[entry])}
     report = fetch_videos(
@@ -212,7 +241,68 @@ def test_max_size_skips_unknown_size(tmp_path: Path):
         sleep=_no_throttle,
         throttle_seconds=0,
     )
-    assert report.results[0].reason == "size_unknown"
+    assert report.fetched == 1
+    assert report.results[0].size_bytes == len(_mp4_bytes())
+
+
+def test_content_length_over_cap_skips_before_writing(tmp_path: Path):
+    # Estimated size is under the cap, but the actual response header is larger.
+    entry = MediaVideoPending(
+        url=_MP4_URL,
+        thumbnail_url=_POSTER,
+        bitrate=1,
+        duration_millis=1,
+    )
+    store = {"42": _item("42", media=[entry])}
+    session = FakeSession(
+        responses={".mp4": [FakeResponse(200, _mp4_bytes(), headers={"Content-Length": "2000"})]}
+    )
+
+    report = fetch_videos(
+        store,
+        ["42"],
+        tmp_path,
+        max_size_bytes=1000,
+        session=session,
+        sleep=_no_throttle,
+        throttle_seconds=0,
+    )
+
+    assert report.results[0].outcome == "skipped"
+    assert report.results[0].reason == "too_large"
+    assert not (tmp_path / "42.mp4").exists()
+    assert not (tmp_path / "42.mp4.part").exists()
+
+
+def test_streaming_cap_aborts_and_removes_part_file(tmp_path: Path):
+    entry = MediaVideoPending(
+        url=_MP4_URL,
+        thumbnail_url=_POSTER,
+        bitrate=1,
+        duration_millis=1,
+    )
+    store = {"42": _item("42", media=[entry])}
+    payload = _mp4_bytes(3000)
+    session = FakeSession(
+        responses={
+            ".mp4": [FakeResponse(200, chunks=[payload[:32], payload[32:1600], payload[1600:]])]
+        }
+    )
+
+    report = fetch_videos(
+        store,
+        ["42"],
+        tmp_path,
+        max_size_bytes=1000,
+        session=session,
+        sleep=_no_throttle,
+        throttle_seconds=0,
+    )
+
+    assert report.results[0].outcome == "skipped"
+    assert report.results[0].reason == "too_large"
+    assert not (tmp_path / "42.mp4").exists()
+    assert not (tmp_path / "42.mp4.part").exists()
 
 
 def test_limit_caps_fetch_attempts(tmp_path: Path):

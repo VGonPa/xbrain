@@ -7,11 +7,20 @@ that the judgment is structurally sound — it never trusts the LLM for that.
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 
 from xbrain.rubrics import load_guardrails
 
 # The only keys an enrichment judgment may contain.
-_ALLOWED_KEYS = {"summary", "primary_topic", "topics"}
+_ALLOWED_KEYS = {
+    "summary",
+    "primary_topic",
+    "topics",
+    "topic_confidence",
+    "suggested_new_topics",
+}
+_CONFIDENCE_VALUES = {"high", "medium", "low"}
+_SUGGESTED_TOPIC_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _validate_judgment_keys(judgment: dict) -> list[str]:
@@ -67,6 +76,31 @@ def _validate_primary_topic(
     return errors
 
 
+def _validate_taxonomy_signals(judgment: dict, vocab: set[str]) -> list[str]:
+    """Validate optional taxonomy-health fields emitted by the LLM."""
+    errors: list[str] = []
+    confidence = judgment.get("topic_confidence")
+    if confidence is not None and confidence not in _CONFIDENCE_VALUES:
+        errors.append("topic_confidence must be one of: high, medium, low")
+
+    suggested = judgment.get("suggested_new_topics", [])
+    if suggested is None:
+        return errors
+    if not isinstance(suggested, list):
+        return [*errors, "suggested_new_topics must be a list"]
+    if len(suggested) > 5:
+        errors.append("suggested_new_topics has more than 5 entries")
+    if len(set(suggested)) != len(suggested):
+        errors.append("suggested_new_topics has duplicate entries")
+    for slug in suggested:
+        if not isinstance(slug, str) or not _SUGGESTED_TOPIC_RE.fullmatch(slug):
+            errors.append(f"suggested_new_topic {slug!r} is not kebab-case")
+            continue
+        if slug in vocab:
+            errors.append(f"suggested_new_topic '{slug}' already exists in vocabulary")
+    return errors
+
+
 def validate_judgment(judgment: dict, vocab_slugs: Iterable[str]) -> list[str]:
     """Return a list of human-readable errors; an empty list means valid."""
     rules = load_guardrails().get("enrichment", {})
@@ -83,6 +117,7 @@ def validate_judgment(judgment: dict, vocab_slugs: Iterable[str]) -> list[str]:
 
     errors += _validate_topics_list(judgment, rules, vocab)
     errors += _validate_primary_topic(judgment, topics, rules, vocab)
+    errors += _validate_taxonomy_signals(judgment, vocab)
     return errors
 
 

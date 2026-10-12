@@ -1,12 +1,34 @@
 # tests/test_cli.py
+import http.client
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
-from xbrain.cli import app
-from xbrain.models import Author, Item, Link
-from xbrain.store import save_store
+from xbrain import snapshot
+from xbrain.cli import (
+    _copy_bootstrap_tree,
+    _drive_cache_vault_output_dir,
+    _render_note_page,
+    _resolve_served_media,
+    _resolve_served_note,
+    _run_delete_bookmark,
+    _run_reprocess_note,
+    _run_topic_action,
+    app,
+)
+from xbrain.config import load_config
+from xbrain.models import Author, Enrichment, Item, Link, Topic
+from xbrain.notes_io import GEN_END, GEN_START
+from xbrain.rubrics import load_vocab, save_vocab
+from xbrain.store import load_store, save_store
 
 runner = CliRunner()
 
@@ -48,6 +70,194 @@ def test_status_runs_on_empty_store(tmp_path: Path, monkeypatch):
     assert "Items: 0" in result.stdout
 
 
+def test_serve_dashboard_supports_head_smoke_checks(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    dashboard = tmp_path / "vault" / "x-knowledge" / "dashboard.html"
+    dashboard.parent.mkdir(parents=True)
+    dashboard.write_text("<!doctype html><title>XBrain</title>", encoding="utf-8")
+    notes = dashboard.parent / "items"
+    notes.mkdir()
+    (notes / "2026-01-01-search-1.md").write_text(
+        "# Searchable note\n\nA distinctive library retrieval phrase.", encoding="utf-8"
+    )
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    env = os.environ.copy()
+    env["XBRAIN_REPO_ROOT"] = str(tmp_path)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "xbrain.cli",
+            "serve-dashboard",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+                conn.request("GET", "/api/status")
+                response = conn.getresponse()
+                response.read()
+                conn.close()
+                if response.status == 200:
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(f"serve-dashboard did not start: {stderr}")
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("HEAD", "/dashboard.html")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert response.getheader("content-type") == "text/html; charset=utf-8"
+        assert int(response.getheader("content-length") or "0") == len(dashboard.read_bytes())
+        assert response.getheader("cache-control") == "no-store"
+        assert response.getheader("x-content-type-options") == "nosniff"
+        assert response.getheader("x-frame-options") == "DENY"
+        assert "frame-ancestors 'none'" in (response.getheader("content-security-policy") or "")
+        assert response.read() == b""
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("HEAD", "/api/status")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert response.getheader("content-type") == "application/json"
+        assert response.read() == b""
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("GET", "/api/search?q=distinctive+retrieval")
+        response = conn.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["results"][0]["title"] == "Searchable note"
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("POST", "/api/refresh-all")
+        response = conn.getresponse()
+        assert response.status == 403
+        response.read()
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/chat",
+            body=json.dumps({"question": "What is saved?", "item_ids": []}),
+            headers={
+                "Content-Type": "application/json",
+                "X-XBrain-Action": "1",
+                "Origin": f"http://127.0.0.1:{port}",
+            },
+        )
+        response = conn.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["sources"] == []
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/chat",
+            body=json.dumps({"question": "What is saved?"}),
+            headers={"Content-Type": "application/json"},
+        )
+        response = conn.getresponse()
+        assert response.status == 403
+        response.read()
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/retry-failed",
+            headers={"X-XBrain-Action": "1", "Origin": "https://evil.example"},
+        )
+        response = conn.getresponse()
+        assert response.status == 403
+        response.read()
+        conn.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_drive_select_root_writes_local_selection(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["drive", "select-root", "folder-123"])
+
+    assert result.exit_code == 0
+    selection = tmp_path / "auth" / "google_drive_selection.json"
+    assert "folder-123" in selection.read_text(encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.drive_root_folder_id == "folder-123"
+
+
+def test_drive_status_reports_media_dir(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["drive", "status"])
+
+    assert result.exit_code == 0
+    assert "media_dir:" in result.stdout
+
+
+def test_copy_bootstrap_tree_copies_files(tmp_path: Path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "file.txt").write_text("body", encoding="utf-8")
+
+    copied = _copy_bootstrap_tree(source, destination, force=False)
+
+    assert copied == 1
+    assert (destination / "nested" / "file.txt").read_text(encoding="utf-8") == "body"
+
+
+def test_drive_cache_vault_output_dir_preserves_nested_output_subdir(tmp_path: Path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        f'vault = "{vault}"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+
+    cfg = load_config(tmp_path)
+
+    assert _drive_cache_vault_output_dir(cfg) == (
+        tmp_path / ".xbrain-cache" / "google-drive" / "vault" / "learnings" / "x-knowledge"
+    )
+
+
 def test_generate_creates_output_dir(tmp_path: Path, monkeypatch):
     vault = _setup_repo(tmp_path, monkeypatch)
     result = runner.invoke(app, ["generate"])
@@ -71,6 +281,686 @@ def test_generate_writes_item_note_for_linked_item(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     notes = list((vault / "x-knowledge" / "items").glob("*.md"))
     assert notes
+
+
+def test_served_note_resolver_allows_only_generated_markdown(tmp_path: Path):
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    notes_dir.mkdir(parents=True)
+    note = notes_dir / "source.md"
+    note.write_text("# Source\n\nBody", encoding="utf-8")
+
+    assert _resolve_served_note(output_dir, str(note)) == note.resolve()
+    assert _resolve_served_note(output_dir, "items/source.md") == note.resolve()
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    with pytest.raises(PermissionError):
+        _resolve_served_note(output_dir, str(outside))
+
+    text_file = notes_dir / "source.txt"
+    text_file.write_text("not markdown", encoding="utf-8")
+    with pytest.raises(ValueError):
+        _resolve_served_note(output_dir, str(text_file))
+
+
+def test_served_note_resolver_redirects_stale_slug_by_item_id(tmp_path: Path):
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    notes_dir.mkdir(parents=True)
+    current = notes_dir / "2026-01-01-new-title-123.md"
+    stale = notes_dir / "2026-01-01-old-title-123.md"
+    current.write_text(f"{GEN_START}\n---\nid: 123\n---\n# New\n{GEN_END}", encoding="utf-8")
+
+    assert _resolve_served_note(output_dir, str(stale)) == current.resolve()
+
+
+def test_served_media_resolver_allows_only_generated_images(tmp_path: Path):
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    media_dir = output_dir / "_media" / "1" / "article"
+    media_dir.mkdir(parents=True)
+    image = media_dir / "0.jpg"
+    image.write_bytes(b"jpg")
+
+    assert _resolve_served_media(output_dir, "_media/1/article/0.jpg") == image.resolve()
+    assert _resolve_served_media(output_dir, "1/article/0.jpg") == image.resolve()
+
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+    with pytest.raises(PermissionError):
+        _resolve_served_media(output_dir, str(outside))
+
+    text_file = media_dir / "note.txt"
+    text_file.write_text("not an image", encoding="utf-8")
+    with pytest.raises(ValueError):
+        _resolve_served_media(output_dir, "_media/1/article/note.txt")
+
+
+def test_render_note_page_escapes_markdown_for_mobile_view(tmp_path: Path):
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    notes_dir.mkdir(parents=True)
+    note = notes_dir / "source.md"
+    note.write_text(
+        f"{GEN_START}\n"
+        "---\nid: 1\n---\n"
+        "# Mobile Source\n\n- **Insight**\n\n<script>alert(1)</script>\n"
+        f"{GEN_END}\n\nPersonal tail",
+        encoding="utf-8",
+    )
+
+    html = _render_note_page(note, output_dir).decode()
+
+    assert "<h1>Mobile Source</h1>" in html
+    assert "<li><strong>Insight</strong></li>" in html
+    assert "# Mobile Source" not in html
+    assert "xbrain:generated" not in html
+    assert "id: 1" not in html
+    assert "Personal tail" in html
+    assert "items/source.md" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "obsidian://open?path=" in html
+    assert '<html lang="en" data-theme="dark">' in html
+    assert "xbrain.theme" in html
+    assert 'id="note-theme"' in html
+    assert "note-glow" in html
+    assert "--color-bg" in html
+    assert "Forest" not in html  # note titles stay source-driven, not dashboard-branded
+    assert "Sugerencias" not in html
+    assert "selecciona" not in html
+    assert 'id="topics-note"' in html
+    assert 'id="topic-modal"' in html
+    assert 'id="topic-suggestions"' in html
+    assert 'id="topic-prioritize"' in html
+    assert 'id="topic-promote"' in html
+    assert 'aria-describedby="topic-intro"' in html
+    assert "Review topics" in html
+    assert "Confirm current topics" in html
+    assert "Move to Misc" in html
+    assert "Reclassify automatically" in html
+    assert "Try selected suggestions" in html
+    assert "Add to vocabulary &amp; reclassify" in html
+    assert "Close without changes" in html
+    assert 'id="topic-action-status"' in html
+    assert 'id="topic-promote-confirm"' in html
+    assert ">Accept</button>" not in html
+    assert ">Reject</button>" not in html
+    assert "selectedSuggestions" in html
+    assert "/api/topic-state" in html
+    assert "/api/topic-action" in html
+    assert 'id="reprocess-note"' in html
+    assert 'class="note-icon"' in html
+    assert ">↻</button>" in html
+    assert 'id="delete-note"' in html
+    assert ">×</button>" in html
+    assert 'id="delete-modal"' in html
+    assert "/api/reprocess-note" in html
+    assert "'reprocess-note:' + itemId" in html
+    assert "/api/delete-bookmark" in html
+    assert "connect-src 'self'" in html
+
+
+def test_render_note_page_topic_review_modal_is_explanatory_and_keyboard_safe(tmp_path: Path):
+    from playwright.sync_api import sync_playwright
+
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    notes_dir.mkdir(parents=True)
+    note = notes_dir / "source.md"
+    note.write_text(
+        f"{GEN_START}\n---\nid: 42\n---\n# Topic review\n\nBody\n{GEN_END}",
+        encoding="utf-8",
+    )
+    html = _render_note_page(note, output_dir).decode()
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1000, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_content(html)
+        page.evaluate(
+            """
+            () => {
+              window.fetch = async url => {
+                if (String(url).startsWith('/api/topic-state')) {
+                  return {
+                    ok: true,
+                    json: async () => ({
+                      enriched: true,
+                      primary_topic: 'ai-coding',
+                      topics: ['ai-coding', 'developer-tools'],
+                      topic_confidence: 'medium',
+                      suggested_new_topics: ['agentic-workflows', 'coding-agents']
+                    })
+                  };
+                }
+                throw new Error('Unexpected request: ' + url);
+              };
+            }
+            """
+        )
+
+        page.click("#topics-note")
+        page.locator("#topic-state .topic-facts").wait_for()
+
+        assert page.locator("#topic-modal").is_visible()
+        assert page.locator(".topic-modal-card").bounding_box()["width"] > 650
+        assert page.evaluate("document.activeElement.id") == "topic-close"
+        assert page.locator("#topic-accept").is_enabled()
+        assert page.locator("#topic-prioritize").is_enabled()
+        assert page.locator("#topic-promote").is_enabled()
+        assert page.locator(".topic-action-help").count() == 5
+
+        page.locator("#topic-suggestion-list input").evaluate_all(
+            """inputs => inputs.forEach(input => {
+              input.checked = false;
+              input.dispatchEvent(new Event('change', {bubbles: true}));
+            })"""
+        )
+        assert page.locator("#topic-prioritize").is_disabled()
+        assert page.locator("#topic-promote").is_disabled()
+
+        page.locator("#topic-suggestion-list input").first.check()
+        page.click("#topic-promote")
+        assert page.locator("#topic-promote-confirm").is_visible()
+        assert page.evaluate("document.activeElement.id") == "topic-promote-confirm-button"
+        page.click("#topic-promote-cancel")
+        assert page.locator("#topic-promote-confirm").is_hidden()
+        assert page.evaluate("document.activeElement.id") == "topic-promote"
+
+        page.keyboard.press("Escape")
+        assert page.locator("#topic-modal").is_hidden()
+        assert page.evaluate("document.activeElement.id") == "topics-note"
+        assert errors == []
+        browser.close()
+
+
+def test_render_note_page_opens_video_artifacts_in_modal_and_copies_transcript(
+    tmp_path: Path,
+):
+    from playwright.sync_api import sync_playwright
+
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    video_dir = output_dir / "videos" / "video-42"
+    notes_dir.mkdir(parents=True)
+    video_dir.mkdir(parents=True)
+    note = notes_dir / "source.md"
+    note.write_text(
+        f"{GEN_START}\n---\nid: 42\n---\n# Video source\n\n"
+        "[Resumen ejecutivo](../videos/video-42/summary.md) · "
+        "[Transcripción original](../videos/video-42/transcript.md)\n\n"
+        "### Executive Summary\n\nInline summary.\n"
+        f"{GEN_END}",
+        encoding="utf-8",
+    )
+    (video_dir / "summary.md").write_text(
+        f"{GEN_START}\n---\nkind: video_summary\n---\n# Summary\n\n"
+        "[Transcripción original](transcript.md)\n\n"
+        "### Executive Summary\n\nUseful **summary**.\n\n### Main Ideas\n\n- One\n"
+        f"{GEN_END}",
+        encoding="utf-8",
+    )
+    (video_dir / "transcript.md").write_text(
+        f"{GEN_START}\n---\nkind: video_transcript\n---\n# Original Transcript\n\n"
+        "[Video digest](summary.md)\n\n## Transcript\n\n"
+        "First original line.\n\nSecond original line.\n"
+        f"{GEN_END}",
+        encoding="utf-8",
+    )
+
+    rendered = _render_note_page(note, output_dir).decode()
+
+    assert 'id="video-artifact-modal"' in rendered
+    assert 'data-video-artifact="summary"' in rendered
+    assert 'data-video-artifact="transcript"' in rendered
+    assert 'id="video-copy-transcript"' in rendered
+    assert "../videos/video-42/summary.md" not in rendered
+    assert "../videos/video-42/transcript.md" not in rendered
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1000, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_content(rendered)
+        page.evaluate(
+            """
+            Object.defineProperty(navigator, 'clipboard', {
+              configurable: true,
+              value: {writeText: async text => { window.__copiedTranscript = text; }}
+            })
+            """
+        )
+
+        summary_link = page.locator(
+            '.note-body .video-artifact-link[data-video-artifact="summary"]'
+        ).first
+        summary_link.click()
+        assert page.locator("#video-artifact-modal").is_visible()
+        assert page.locator("#video-artifact-title").text_content() == "Executive summary"
+        assert (
+            page.locator("#video-artifact-panel-summary")
+            .get_by_text("Useful summary.")
+            .is_visible()
+        )
+        assert page.evaluate("document.activeElement.id") == "video-artifact-close"
+
+        page.click("#video-artifact-tab-transcript")
+        assert page.locator("#video-artifact-title").text_content() == "Original transcript"
+        assert (
+            page.locator("#video-artifact-panel-transcript")
+            .get_by_text("First original line.")
+            .is_visible()
+        )
+        copy_button = page.locator("#video-copy-transcript")
+        assert copy_button.is_visible()
+        assert copy_button.bounding_box()["height"] <= 32
+        copy_button.click()
+        assert page.evaluate("window.__copiedTranscript") == (
+            "First original line.\n\nSecond original line."
+        )
+        assert page.locator("#video-copy-status").text_content() == "Copied"
+
+        page.keyboard.press("Escape")
+        assert page.locator("#video-artifact-modal").is_hidden()
+        assert summary_link.evaluate("element => document.activeElement === element")
+        assert errors == []
+        browser.close()
+
+
+def test_render_note_page_renders_obsidian_image_embeds(tmp_path: Path):
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    media_dir = output_dir / "_media" / "1" / "article"
+    notes_dir.mkdir(parents=True)
+    media_dir.mkdir(parents=True)
+    (media_dir / "4.jpg").write_bytes(b"jpg")
+    note = notes_dir / "source.md"
+    note.write_text(
+        "# Source\n\nBefore\n\n![[_media/1/article/4.jpg]]\n\nAfter",
+        encoding="utf-8",
+    )
+
+    html = _render_note_page(note, output_dir).decode()
+
+    assert '<img src="/media?path=_media%2F1%2Farticle%2F4.jpg" alt="4.jpg"' in html
+    assert "![[_media/1/article/4.jpg]]" not in html
+
+
+def test_render_note_page_omits_reprocess_without_item_id(tmp_path: Path):
+    output_dir = tmp_path / "vault" / "x-knowledge"
+    notes_dir = output_dir / "items"
+    notes_dir.mkdir(parents=True)
+    note = notes_dir / "source.md"
+    note.write_text("# Source\n\nBody", encoding="utf-8")
+
+    html = _render_note_page(note, output_dir).decode()
+
+    assert 'id="reprocess-note"' not in html
+    assert "/api/reprocess-note" not in html
+    assert 'id="delete-note"' not in html
+    assert "/api/delete-bookmark" not in html
+    assert 'id="topics-note"' not in html
+    assert "/api/topic-state" not in html
+    assert "/api/topic-action" not in html
+    assert 'id="note-theme"' in html
+    assert "xbrain.theme" in html
+
+
+def test_run_topic_action_accepts_and_rejects_topic_assignment(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = load_config(tmp_path)
+    save_vocab(
+        [
+            Topic(slug="misc", description="Miscellaneous"),
+            Topic(slug="ai-coding", description="AI coding"),
+        ],
+        cfg.data_dir / "vocab.yaml",
+    )
+    item = _linked_item("42")
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="api",
+        summary="summary",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="low",
+        suggested_new_topics=["frontier-ai"],
+    )
+    save_store({"42": item}, cfg.items_path)
+
+    accepted = _run_topic_action(cfg, "42", "accept")
+    store = load_store(cfg.items_path)
+
+    assert accepted.action == "accept"
+    assert store["42"].enriched.topic_confidence == "high"
+    assert store["42"].enriched.suggested_new_topics == []
+
+    rejected = _run_topic_action(cfg, "42", "reject")
+    store = load_store(cfg.items_path)
+
+    assert rejected.action == "reject"
+    assert store["42"].enriched.primary_topic == "misc"
+    assert store["42"].enriched.topics == ["misc"]
+    assert store["42"].enriched.topic_confidence == "high"
+    assert (cfg.output_dir / "dashboard.html").exists()
+
+
+def test_run_topic_action_regenerate_reenriches_item_and_refreshes_outputs(
+    tmp_path: Path, monkeypatch
+):
+    from xbrain.executors.base import EnrichmentJudgment
+    import xbrain.cli as cli
+
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = load_config(tmp_path)
+    save_vocab(
+        [
+            Topic(slug="misc", description="Miscellaneous"),
+            Topic(slug="ai-coding", description="AI coding"),
+        ],
+        cfg.data_dir / "vocab.yaml",
+    )
+    item = _linked_item("42")
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="api",
+        summary="old summary",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="low",
+    )
+    save_store({"42": item}, cfg.items_path)
+    calls: list[str] = []
+
+    class _FakeApiExecutor:
+        def __init__(self, *args, **kwargs):
+            calls.append("executor")
+
+        def enrich_items(self, items, vocab):
+            calls.append(f"enrich:{[item.id for item in items]}")
+            return [
+                EnrichmentJudgment(
+                    item_id="42",
+                    summary="new summary",
+                    primary_topic="ai-coding",
+                    topics=["ai-coding"],
+                    topic_confidence="high",
+                )
+            ]
+
+    monkeypatch.setattr(cli, "ApiExecutor", _FakeApiExecutor)
+    monkeypatch.setattr(
+        cli, "_run_topics_executor", lambda *_args, **_kwargs: calls.append("topics")
+    )
+    monkeypatch.setattr(cli, "_run_generate", lambda *_args, **_kwargs: calls.append("generate"))
+
+    report = _run_topic_action(cfg, "42", "regenerate")
+    store = load_store(cfg.items_path)
+
+    assert report.action == "regenerate"
+    assert report.primary_topic == "ai-coding"
+    assert store["42"].enriched.summary == "new summary"
+    assert calls == ["executor", "enrich:['42']", "topics", "generate"]
+    assert any(
+        path.name.endswith("-pre-topic-regenerate-42")
+        for path, _ in snapshot.snapshot_list(cfg.data_dir)
+    )
+
+
+def test_run_topic_action_regenerate_prioritizes_selected_suggestions(tmp_path: Path, monkeypatch):
+    from xbrain.executors.base import EnrichmentJudgment
+    import xbrain.cli as cli
+
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = load_config(tmp_path)
+    save_vocab(
+        [
+            Topic(slug="misc", description="Miscellaneous"),
+            Topic(slug="ai-coding", description="AI coding"),
+        ],
+        cfg.data_dir / "vocab.yaml",
+    )
+    item = _linked_item("42")
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="api",
+        summary="old summary",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="low",
+        suggested_new_topics=["ai-productivity-tools", "llm-workflows"],
+    )
+    save_store({"42": item}, cfg.items_path)
+    calls: list[object] = []
+
+    class _FakeApiExecutor:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs.get("topic_hints"))
+
+        def enrich_items(self, items, vocab):
+            return [
+                EnrichmentJudgment(
+                    item_id="42",
+                    summary="new summary",
+                    primary_topic="ai-coding",
+                    topics=["ai-coding"],
+                    topic_confidence="medium",
+                    suggested_new_topics=["ai-productivity-tools"],
+                )
+            ]
+
+    monkeypatch.setattr(cli, "ApiExecutor", _FakeApiExecutor)
+    monkeypatch.setattr(cli, "_run_topics_executor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_run_generate", lambda *_args, **_kwargs: None)
+
+    report = _run_topic_action(
+        cfg,
+        "42",
+        "regenerate",
+        prioritize_suggestions=True,
+        suggested_topics=["ai-productivity-tools"],
+    )
+
+    assert report.action == "regenerate"
+    assert calls == [{"42": ["ai-productivity-tools"]}]
+    assert [topic.slug for topic in load_vocab(cfg.data_dir / "vocab.yaml")] == [
+        "misc",
+        "ai-coding",
+    ]
+
+
+def test_run_topic_action_promotes_selected_suggestions_before_regenerate(
+    tmp_path: Path, monkeypatch
+):
+    from xbrain.executors.base import EnrichmentJudgment
+    import xbrain.cli as cli
+
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = load_config(tmp_path)
+    save_vocab([Topic(slug="misc", description="Miscellaneous")], cfg.data_dir / "vocab.yaml")
+    item = _linked_item("42")
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="api",
+        summary="old summary",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="low",
+        suggested_new_topics=["ai-productivity-tools"],
+    )
+    save_store({"42": item}, cfg.items_path)
+    calls: list[object] = []
+
+    class _FakeApiExecutor:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs.get("topic_hints"))
+
+        def enrich_items(self, items, vocab):
+            assert {topic.slug for topic in vocab} == {"misc", "ai-productivity-tools"}
+            return [
+                EnrichmentJudgment(
+                    item_id="42",
+                    summary="new summary",
+                    primary_topic="ai-productivity-tools",
+                    topics=["ai-productivity-tools"],
+                    topic_confidence="high",
+                )
+            ]
+
+    monkeypatch.setattr(cli, "ApiExecutor", _FakeApiExecutor)
+    monkeypatch.setattr(cli, "_run_topics_executor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_run_generate", lambda *_args, **_kwargs: None)
+
+    report = _run_topic_action(
+        cfg,
+        "42",
+        "regenerate",
+        promote_suggestions=True,
+        suggested_topics=["ai-productivity-tools"],
+    )
+    store = load_store(cfg.items_path)
+
+    assert report.promoted_topics == ["ai-productivity-tools"]
+    assert store["42"].enriched.primary_topic == "ai-productivity-tools"
+    assert calls == [{"42": ["ai-productivity-tools"]}]
+    assert [topic.slug for topic in load_vocab(cfg.data_dir / "vocab.yaml")] == [
+        "misc",
+        "ai-productivity-tools",
+    ]
+
+
+def test_run_topic_action_rejects_unavailable_topic_suggestions(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = load_config(tmp_path)
+    save_vocab([Topic(slug="misc", description="Miscellaneous")], cfg.data_dir / "vocab.yaml")
+    item = _linked_item("42")
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="api",
+        summary="old summary",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="low",
+        suggested_new_topics=["ai-productivity-tools"],
+    )
+    save_store({"42": item}, cfg.items_path)
+
+    with pytest.raises(ValueError, match="not available"):
+        _run_topic_action(
+            cfg,
+            "42",
+            "regenerate",
+            prioritize_suggestions=True,
+            suggested_topics=["invented-topic"],
+        )
+
+
+def test_run_reprocess_note_refreshes_single_item_pipeline(tmp_path: Path, monkeypatch):
+    from xbrain.executors.base import EnrichmentJudgment
+    import xbrain.cli as cli
+
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = load_config(tmp_path)
+    save_vocab([Topic(slug="misc", description="Miscellaneous")], cfg.data_dir / "vocab.yaml")
+    save_store({"42": _linked_item("42"), "43": _linked_item("43")}, cfg.items_path)
+    calls: list[str] = []
+
+    def _fake_fetch_pending(selected, *, force):
+        calls.append(f"fetch:{sorted(selected)}:{force}")
+        return 1
+
+    def _fake_fetch_x_articles(selected, _storage_state, force, *, headless, linked_store):
+        assert sorted(linked_store) == ["42", "43"]
+        calls.append(f"x_fetch:{sorted(selected)}:{force}:{headless}")
+        return 2
+
+    class _FakeApiExecutor:
+        def __init__(self, *args, **kwargs):
+            calls.append("executor")
+
+        def enrich_items(self, items, vocab):
+            calls.append(f"enrich:{[item.id for item in items]}")
+            return [
+                EnrichmentJudgment(
+                    item_id="42",
+                    summary="reprocessed",
+                    primary_topic="misc",
+                    topics=["misc"],
+                    topic_confidence="high",
+                )
+            ]
+
+    monkeypatch.setattr(cli, "fetch_pending", _fake_fetch_pending)
+    monkeypatch.setattr(cli, "fetch_x_articles", _fake_fetch_x_articles)
+    monkeypatch.setattr(cli, "_run_digest_video", lambda *_args, **_kwargs: calls.append("digest"))
+    monkeypatch.setattr(cli, "_run_media", lambda *_args, **_kwargs: calls.append("media"))
+    monkeypatch.setattr(cli, "_run_describe", lambda *_args, **_kwargs: calls.append("describe"))
+    monkeypatch.setattr(cli, "ApiExecutor", _FakeApiExecutor)
+    monkeypatch.setattr(
+        cli, "_run_topics_executor", lambda *_args, **_kwargs: calls.append("topics")
+    )
+    monkeypatch.setattr(cli, "_run_generate", lambda *_args, **_kwargs: calls.append("generate"))
+
+    report = _run_reprocess_note(cfg, "42", headless=True)
+    store = load_store(cfg.items_path)
+
+    assert report.item_id == "42"
+    assert report.articles == 1
+    assert report.x_articles == 2
+    assert store["42"].enriched.summary == "reprocessed"
+    assert store["43"].enriched is None
+    assert calls == [
+        "fetch:['42']:True",
+        "x_fetch:['42']:True:True",
+        "digest",
+        "media",
+        "describe",
+        "executor",
+        "enrich:['42']",
+        "topics",
+        "generate",
+    ]
+    assert any(
+        path.name.endswith("-pre-reprocess-note-42")
+        for path, _ in snapshot.snapshot_list(cfg.data_dir)
+    )
+
+
+def test_run_delete_bookmark_removes_store_note_media_and_regenerates(tmp_path: Path, monkeypatch):
+    vault = _setup_repo(tmp_path, monkeypatch)
+    output_dir = vault / "x-knowledge"
+    save_store(
+        {"42": _linked_item("42"), "43": _linked_item("43")},
+        tmp_path / "data" / "items.json",
+    )
+    result = runner.invoke(app, ["generate"])
+    assert result.exit_code == 0, result.output
+    assert list((output_dir / "items").glob("*-42.md"))
+
+    data_media = tmp_path / "data" / "media" / "42"
+    vault_media = output_dir / "_media" / "42"
+    video_artifact = output_dir / "videos" / "clip-42"
+    data_media.mkdir(parents=True)
+    vault_media.mkdir(parents=True)
+    video_artifact.mkdir(parents=True)
+    (data_media / "0.jpg").write_bytes(b"jpg")
+    (vault_media / "0.jpg").write_bytes(b"jpg")
+    (video_artifact / "summary.md").write_text("---\nid: 42\n---\n# Clip", encoding="utf-8")
+
+    report = _run_delete_bookmark(load_config(tmp_path), "42")
+
+    assert report.item_id == "42"
+    assert "42" not in load_store(tmp_path / "data" / "items.json")
+    assert "43" in load_store(tmp_path / "data" / "items.json")
+    assert not list((output_dir / "items").glob("*-42.md"))
+    assert list((output_dir / "items").glob("*-43.md"))
+    assert not data_media.exists()
+    assert not vault_media.exists()
+    assert not video_artifact.exists()
+    assert (output_dir / "dashboard.html").exists()
 
 
 def test_cli_reports_missing_config_cleanly(tmp_path: Path, monkeypatch):
@@ -477,7 +1367,15 @@ _HLS_URL = "https://video.twimg.com/ext_tw_video/1/pl/B.m3u8?c=fmp4"
 _POSTER = "https://pbs.twimg.com/ext_tw_video_thumb/1/img/P.jpg"
 
 
-def _video_item(item_id: str, url: str = _MP4_URL, source: str = "bookmark"):
+def _video_item(
+    item_id: str,
+    url: str = _MP4_URL,
+    source: str = "bookmark",
+    *,
+    transcript_url: str | None = None,
+    transcript_language: str | None = "en",
+    transcript_format: str | None = "vtt",
+):
     from xbrain.models import MediaVideoPending
 
     item = Item(
@@ -490,231 +1388,50 @@ def _video_item(item_id: str, url: str = _MP4_URL, source: str = "bookmark"):
         captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
     )
     item.media = [
-        MediaVideoPending(url=url, thumbnail_url=_POSTER, bitrate=2_176_000, duration_millis=30_000)
+        MediaVideoPending(
+            url=url,
+            thumbnail_url=_POSTER,
+            bitrate=2_176_000,
+            duration_millis=30_000,
+            transcript_url=transcript_url,
+            transcript_language=transcript_language,
+            transcript_format=transcript_format,
+        )
     ]
     return item
 
 
-class _FakeVideoSession:
-    """Fake session that returns mp4 bytes for any GET (videos are not decoded)."""
+def test_download_videos_command_is_disabled_and_does_not_write(tmp_path: Path, monkeypatch):
+    """The CLI must not provide any MP4 persistence path."""
+    from xbrain.models import MediaVideoPending
+    from xbrain.store import load_store
 
-    payload = b"\x00\x00\x00\x18ftypmp42" + (b"\x00" * 1024)
-
-    def __init__(self):
-        self.headers: dict[str, str] = {}
-
-    def get(self, _url, *, timeout):
-        class _Resp:
-            status_code = 200
-            content = _FakeVideoSession.payload
-
-        return _Resp()
-
-
-class _FailVideoSession:
-    """Fake session that returns a 500 for any GET (every download fails)."""
-
-    def __init__(self):
-        self.headers: dict[str, str] = {}
-
-    def get(self, _url, *, timeout):
-        class _Resp:
-            status_code = 500
-            content = b"err"
-
-        return _Resp()
-
-
-def test_download_videos_command_noop_when_no_videos(tmp_path: Path, monkeypatch):
-    """A store with no downloadable mp4 is a no-op: exit 0, items.json unchanged,
-    no confirmation needed, no snapshot taken (nothing is written)."""
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
-    save_store({"1": _linked_item("1")}, items_path)
+    save_store({"42": _video_item("42")}, items_path)
     before = items_path.read_bytes()
 
-    result = runner.invoke(app, ["download-videos"])
+    result = runner.invoke(app, ["download-videos", "--max-size", "banana", "--yes"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1
+    assert "deshabilitado" in result.output
+    assert "no guarda MP4" in result.output
     assert items_path.read_bytes() == before
+    assert isinstance(load_store(items_path)["42"].media[0], MediaVideoPending)
+    assert not (tmp_path / "data" / "media").exists()
     snapshots = tmp_path / "data" / "snapshots"
-    assert not snapshots.exists() or not any(
-        "pre-download-videos" in p.name for p in snapshots.iterdir()
-    )
+    assert not snapshots.exists()
 
 
-def test_download_videos_command_downloads_mp4_with_yes(tmp_path: Path, monkeypatch):
-    """`--yes` bypasses the size gate; the mp4 lands as MediaVideoDownloaded with
-    the bytes on disk, and the destructive-op snapshot fires first."""
-    from xbrain.models import MediaVideoDownloaded
-    from xbrain.store import load_store
-
+def test_download_videos_command_is_disabled_before_confirmation(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
-
-    result = runner.invoke(app, ["download-videos", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "About to download" in result.output
-
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    entry = reloaded["42"].media[0]
-    assert isinstance(entry, MediaVideoDownloaded)
-    assert entry.local_path == "42/0.mp4"
-    assert (tmp_path / "data" / "media" / "42" / "0.mp4").exists()
-    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
-    assert any("pre-download-videos" in p.name for p in snapshots)
-
-
-def test_download_videos_command_aborts_when_declined(tmp_path: Path, monkeypatch):
-    """Without `--yes`, declining the gate aborts: no download, and (item 6a) NO
-    snapshot is left on disk — the snapshot is taken only after confirmation."""
-    from xbrain.models import MediaVideoPending
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
-
-    result = runner.invoke(app, ["download-videos"], input="n\n")
-    assert result.exit_code != 0
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    assert isinstance(reloaded["42"].media[0], MediaVideoPending)
-    assert not (tmp_path / "data" / "media" / "42" / "0.mp4").exists()
-    # Item 6a: a declined gate leaves no snapshot behind.
-    snapshots = tmp_path / "data" / "snapshots"
-    assert not snapshots.exists() or not any(
-        "pre-download-videos" in p.name for p in snapshots.iterdir()
-    )
-
-
-def test_download_videos_command_proceeds_when_confirmed(tmp_path: Path, monkeypatch):
-    """Confirming the gate with `y` proceeds to download."""
-    from xbrain.models import MediaVideoDownloaded
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
 
     result = runner.invoke(app, ["download-videos"], input="y\n")
-    assert result.exit_code == 0, result.output
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    assert isinstance(reloaded["42"].media[0], MediaVideoDownloaded)
 
-
-def test_download_videos_command_skips_hls(tmp_path: Path, monkeypatch):
-    """An HLS-only store is a no-op for download but reports the deferred count —
-    and still emits the SUMMARY line (item 5: monitor parity with `media`)."""
-    from xbrain.models import MediaVideoPending
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
-
-    result = runner.invoke(app, ["download-videos"])
-    assert result.exit_code == 0, result.output
-    assert "HLS" in result.output
-    # Item 5: a skip-only run emits SUMMARY, just like the photo command.
-    assert "SUMMARY:" in result.output
-    assert "skipped_hls: 1" in result.output
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    assert isinstance(reloaded["7"].media[0], MediaVideoPending)
-
-
-def test_download_videos_command_source_filter(tmp_path: Path, monkeypatch):
-    """`--source bookmarks` only touches bookmark items; own_tweets are left alone."""
-    from xbrain.models import MediaVideoDownloaded, MediaVideoPending
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store(
-        {
-            "b": _video_item("b", source="bookmark"),
-            "t": _video_item("t", source="own_tweet"),
-        },
-        tmp_path / "data" / "items.json",
-    )
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
-
-    result = runner.invoke(app, ["download-videos", "--source", "bookmarks", "--yes"])
-    assert result.exit_code == 0, result.output
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    assert isinstance(reloaded["b"].media[0], MediaVideoDownloaded)
-    assert isinstance(reloaded["t"].media[0], MediaVideoPending)
-
-
-def test_download_videos_command_items_filter(tmp_path: Path, monkeypatch):
-    """`--items` restricts the run to specific ids."""
-    from xbrain.models import MediaVideoDownloaded, MediaVideoPending
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"a": _video_item("a"), "b": _video_item("b")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
-
-    result = runner.invoke(app, ["download-videos", "--items", "b", "--yes"])
-    assert result.exit_code == 0, result.output
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    assert isinstance(reloaded["a"].media[0], MediaVideoPending)
-    assert isinstance(reloaded["b"].media[0], MediaVideoDownloaded)
-
-
-def test_download_videos_command_persists_failed_on_total_failure(tmp_path: Path, monkeypatch):
-    """Item 6b: a total-failure RuntimeError exits 1, but the CLI try/finally
-    still persists the MediaVideoFailed record (no in-memory work lost)."""
-    from xbrain.models import MediaVideoFailed
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-
-    class _Fake404Session:
-        def __init__(self):
-            self.headers: dict[str, str] = {}
-
-        def get(self, _url, *, timeout):
-            class _Resp:
-                status_code = 404
-                content = b""
-                headers: dict[str, str] = {}
-
-            return _Resp()
-
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _Fake404Session)
-    result = runner.invoke(app, ["download-videos", "--yes"])
-    assert result.exit_code == 1  # total failure surfaces as clean exit-1
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    entry = reloaded["42"].media[0]
-    assert isinstance(entry, MediaVideoFailed)
-    assert entry.failure_reason == "http_4xx"
-
-
-def test_download_videos_command_max_size_skips_big_video(tmp_path: Path, monkeypatch):
-    """Item 7 (CLI): `--max-size` skips an over-cap video; nothing is downloaded."""
-    from xbrain.models import MediaVideoPending
-    from xbrain.store import load_store
-
-    _setup_repo(tmp_path, monkeypatch)
-    # _video_item estimates 2_176_000 b/s × 30 s / 8 = 8.16 MB → over a 1MB cap.
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
-
-    result = runner.invoke(app, ["download-videos", "--max-size", "1MB", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "max-size" in result.output
-    reloaded = load_store(tmp_path / "data" / "items.json")
-    assert isinstance(reloaded["42"].media[0], MediaVideoPending)  # skipped, untouched
-    assert not (tmp_path / "data" / "media" / "42" / "0.mp4").exists()
-
-
-def test_download_videos_command_rejects_bad_max_size(tmp_path: Path, monkeypatch):
-    """A garbage `--max-size` value is a clean operator error (exit 1)."""
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    result = runner.invoke(app, ["download-videos", "--max-size", "banana", "--yes"])
     assert result.exit_code == 1
-    assert "Error:" in result.output
+    assert "deshabilitado" in result.output
+    assert "Continuar" not in result.output
 
 
 def test_parse_date_returns_utc_aware():
@@ -950,6 +1667,53 @@ def test_enrich_api_executor_enriches_the_store(tmp_path, monkeypatch):
     assert store["1"].enriched is not None
 
 
+def test_enrich_taxonomy_risk_reenriches_existing_misc_item(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import load_store, save_store
+    from xbrain.rubrics import save_vocab
+    from xbrain.models import Enrichment, Topic
+    from xbrain.executors.base import EnrichmentJudgment
+    import xbrain.cli as cli
+
+    item = _linked_item("1")
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="api",
+        summary="old",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="high",
+    )
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    save_vocab(
+        [Topic(slug="ai-coding", description="d"), Topic(slug="misc", description="d")],
+        tmp_path / "data" / "vocab.yaml",
+    )
+
+    class _FakeApiExecutor:
+        def __init__(self, *a, **k):
+            pass
+
+        def enrich_items(self, items, vocab):
+            return [
+                EnrichmentJudgment(
+                    item_id=i.id,
+                    summary="new",
+                    primary_topic="ai-coding",
+                    topics=["ai-coding"],
+                    topic_confidence="high",
+                )
+                for i in items
+            ]
+
+    monkeypatch.setattr(cli, "ApiExecutor", _FakeApiExecutor)
+    result = runner.invoke(app, ["enrich", "--executor", "api", "--taxonomy-risk"])
+    assert result.exit_code == 0, result.output
+    store = load_store(tmp_path / "data" / "items.json")
+    assert store["1"].enriched.summary == "new"
+    assert store["1"].enriched.primary_topic == "ai-coding"
+
+
 def test_enrich_rejects_unknown_executor(tmp_path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     from xbrain.store import save_store
@@ -1036,7 +1800,7 @@ def test_describe_apply_dispatches_and_reports_unmatched(tmp_path, monkeypatch):
     result = runner.invoke(app, ["describe", "--apply", str(ws)])
     assert result.exit_code == 0
     assert "1 fotos descritas" in result.output
-    assert "ghost#0" in result.output  # unmatched judgment surfaced, not dropped silently
+    assert "ghost#post:0" in result.output  # unmatched judgment surfaced, not dropped silently
     store = load_store(tmp_path / "data" / "items.json")
     assert isinstance(store["1"].media[0], MediaPhotoDescribed)
 
@@ -1102,6 +1866,35 @@ def test_cli_fetch_reports_x_articles(tmp_path, monkeypatch):
     assert "3 de X" in result.output
 
 
+def test_cli_fetch_prunes_non_library_items(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    import xbrain.cli as cli
+    from xbrain.models import Media
+    from xbrain.store import load_store
+
+    article = _linked_item("article")
+    video = _linked_item("video")
+    video.links = []
+    video.media = [Media(type="video", url="https://video.twimg.com/v/video.mp4")]
+    plain = _linked_item("plain")
+    plain.links = []
+    own = _linked_item("own")
+    own.source = "own_tweet"
+    save_store(
+        {item.id: item for item in [article, video, plain, own]},
+        tmp_path / "data" / "items.json",
+    )
+    monkeypatch.setattr(cli, "fetch_pending", lambda *a, **k: 0)
+    monkeypatch.setattr(cli, "fetch_x_articles", lambda *a, **k: 0)
+    monkeypatch.setattr(cli, "expand_threads", lambda *a, **k: 0)
+
+    result = runner.invoke(app, ["fetch"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 descartados por política" in result.output
+    assert set(load_store(tmp_path / "data" / "items.json")) == {"article", "video"}
+
+
 def test_cli_fetch_persists_partial_work_when_a_stage_raises(tmp_path, monkeypatch):
     # `_run_fetch` wraps the three fetch stages in `try:` and `save_store` in
     # `finally:` — a stage error must not discard the in-memory work the
@@ -1143,6 +1936,98 @@ def test_cli_fetch_persists_partial_work_when_a_stage_raises(tmp_path, monkeypat
     store = load_store(tmp_path / "data" / "items.json")
     assert store["1"].content is not None
     assert store["1"].content.sources[0].text == "cuerpo"
+
+
+def test_retry_failed_retries_only_failed_bookmarks(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    import xbrain.cli as cli
+    from xbrain.models import Content, ContentSourceFailure, ContentSourceSuccess
+
+    failed_external = _linked_item("ext")
+    failed_external.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://example.com/p",
+                failure_reason="js_required",
+            )
+        ],
+    )
+    failed_x = _linked_item("x")
+    failed_x.links = [Link(url="https://x.com/i/article/1", domain="x.com")]
+    failed_x.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceFailure(
+                kind="x_article",
+                url="https://x.com/i/article/1",
+                failure_reason="empty_content",
+            )
+        ],
+    )
+    own_failed = _linked_item("own")
+    own_failed.source = "own_tweet"
+    own_failed.content = failed_external.content
+    ok = _linked_item("ok")
+    ok.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(kind="external_article", url="https://example.com/p", text="ok")
+        ],
+    )
+    save_store(
+        {"ext": failed_external, "x": failed_x, "own": own_failed, "ok": ok},
+        tmp_path / "data" / "items.json",
+    )
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        cli, "_auto_snapshot", lambda _cfg, command: calls.append(("snapshot", command))
+    )
+    monkeypatch.setattr(
+        cli,
+        "fetch_pending",
+        lambda store, *args, **kwargs: (
+            calls.append(("fetch_pending", sorted(store), kwargs["force"])) or len(store)
+        ),
+    )
+
+    def _fake_fetch_x_articles(store, _state, force, *args, headless=False, **kwargs):
+        calls.append(("fetch_x", sorted(store), force, headless))
+        return len(store)
+
+    monkeypatch.setattr(cli, "fetch_x_articles", _fake_fetch_x_articles)
+    monkeypatch.setattr(
+        cli, "_run_generate", lambda _cfg, since, until: calls.append(("generate", since, until))
+    )
+
+    result = runner.invoke(app, ["retry-failed"])
+
+    assert result.exit_code == 0, result.output
+    assert ("snapshot", "retry-failed-bookmarks") in calls
+    assert ("fetch_pending", ["ext"], True) in calls
+    assert ("fetch_x", ["x"], True, True) in calls
+    assert ("generate", None, None) in calls
+    assert "Fallidos relanzados: 2 items" in result.output
+
+
+def test_retry_failed_noops_without_failed_bookmarks(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    import xbrain.cli as cli
+
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr(cli, "_auto_snapshot", lambda *_args, **_kwargs: pytest.fail("no snapshot"))
+    monkeypatch.setattr(cli, "fetch_pending", lambda *_args, **_kwargs: pytest.fail("no fetch"))
+    monkeypatch.setattr(
+        cli, "fetch_x_articles", lambda *_args, **_kwargs: pytest.fail("no x fetch")
+    )
+    monkeypatch.setattr(cli, "_run_generate", lambda *_args, **_kwargs: pytest.fail("no generate"))
+
+    result = runner.invoke(app, ["retry-failed"])
+
+    assert result.exit_code == 0, result.output
+    assert "No hay bookmarks fallidos que relanzar." in result.output
 
 
 def _enriched_item(item_id: str = "1"):
@@ -1463,6 +2348,7 @@ def test_describe_command_transitions_downloaded_to_described(tmp_path: Path, mo
     assert entry.description == "A chart."
     assert entry.description_lang == "English"
     assert entry.description_version == "v1"
+    assert fake_client.messages.calls[0]["model"] == "xiaomi/mimo-v2.5"
 
 
 def test_describe_command_runs_on_empty_store(tmp_path: Path, monkeypatch):
@@ -1481,6 +2367,14 @@ def test_describe_command_warns_when_items_filter_matches_nothing(tmp_path, monk
     result = runner.invoke(app, ["describe", "--items", "no-such-id"])
     assert result.exit_code == 0
     assert "AVISO" in result.output or "AVISO" in (result.stderr or "")
+
+
+def test_describe_command_rejects_provider_mismatched_model_override(tmp_path, monkeypatch):
+    """`--model` is still an API model, so it must match `[llm].provider`."""
+    _setup_describe_repo(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["describe", "--model", "claude-sonnet-4-6"])
+    assert result.exit_code == 1
+    assert "Anthropic-native" in result.output
 
 
 def test_describe_command_propagates_total_failure_as_exit_1(tmp_path, monkeypatch):
@@ -1957,6 +2851,60 @@ def test_extract_advances_cursor_to_integer_max_id(tmp_path: Path, monkeypatch):
     assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id == "100"
 
 
+def test_extract_reports_seen_existing_and_batch_duplicates(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _mock_browser(
+        monkeypatch,
+        lambda *a, **k: [_linked_item("1"), _linked_item("2"), _linked_item("2")],
+    )
+
+    result = runner.invoke(app, ["extract", "--source", "bookmarks"])
+
+    assert result.exit_code == 0, result.output
+    assert "bookmark: 1 nuevos, 1 ya existentes, 1 duplicados en lote (3 vistos)" in result.output
+
+
+def test_extract_discards_own_tweets_and_plain_bookmarks(tmp_path: Path, monkeypatch):
+    from xbrain.models import Media
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    article = _linked_item("1")
+    video = _linked_item("2")
+    video.links = []
+    video.media = [Media(type="video", url="https://video.twimg.com/v/2.mp4")]
+    plain = _linked_item("3")
+    plain.links = []
+
+    def _extract(_context, source, *_args, **_kwargs):
+        return [article, video, plain] if source == "bookmark" else []
+
+    _mock_browser(monkeypatch, _extract)
+
+    result = runner.invoke(app, ["extract", "--source", "all"])
+
+    assert result.exit_code == 0, result.output
+    assert "bookmark: 2 nuevos" in result.output
+    assert "1 descartados por política" in result.output
+    store = load_store(tmp_path / "data" / "items.json")
+    assert set(store) == {"1", "2"}
+
+
+def test_extract_tweets_source_is_disabled_by_content_policy(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _extract(*_args, **_kwargs):
+        raise AssertionError("own tweet extraction should not run")
+
+    _mock_browser(monkeypatch, _extract)
+
+    result = runner.invoke(app, ["extract", "--source", "tweets"])
+
+    assert result.exit_code == 0, result.output
+    assert "tweets propios desactivada" in result.output
+
+
 def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, monkeypatch):
     """A RateLimitTruncated source must not merge items nor advance the cursor."""
     from xbrain.extract.extractor import RateLimitTruncated
@@ -1976,13 +2924,81 @@ def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, m
     assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id is None
 
 
+def test_refresh_all_runs_daily_pipeline_in_order(tmp_path: Path, monkeypatch):
+    import xbrain.cli as cli
+
+    _setup_repo(tmp_path, monkeypatch)
+    calls: list[tuple] = []
+
+    monkeypatch.setattr(
+        cli,
+        "_run_extract",
+        lambda cfg, source, since, until, *, headless: calls.append(("extract", source, headless)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_fetch",
+        lambda cfg, since, until, force, *, headless: calls.append(("fetch", force, headless)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_media",
+        lambda cfg, *, force, limit, items_filter, verbose=False: calls.append(
+            ("media", force, limit, items_filter)
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_describe",
+        lambda cfg, **kwargs: calls.append(
+            ("describe", kwargs["model"], kwargs["batch_size"], kwargs["limit"])
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_enrich_api",
+        lambda cfg, since, until: calls.append(("enrich", since, until)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_topics_executor",
+        lambda cfg, executor, *, resynth=False: calls.append(("topics", executor, resynth)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_generate",
+        lambda cfg, since, until: calls.append(("generate", since, until)),
+    )
+
+    result = runner.invoke(app, ["refresh-all", "--describe-limit", "3"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        ("extract", "bookmarks", True),
+        ("fetch", False, True),
+        ("media", False, None, None),
+        ("describe", "xiaomi/mimo-v2.5", 5, 3),
+        ("enrich", None, None),
+        ("topics", "api", False),
+        ("generate", None, None),
+    ]
+    assert "refresh-all: completado" in result.output
+
+
 # ------------------------------------------------------ list-videos / fetch-video
 
 
-def _enriched_video_item(item_id: str, topic: str, url: str = _MP4_URL, source: str = "bookmark"):
+def _enriched_video_item(
+    item_id: str,
+    topic: str,
+    url: str = _MP4_URL,
+    source: str = "bookmark",
+    *,
+    transcript_url: str | None = None,
+):
     from xbrain.models import Enrichment
 
-    item = _video_item(item_id, url=url, source=source)
+    item = _video_item(item_id, url=url, source=source, transcript_url=transcript_url)
     item.enriched = Enrichment(
         enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
         executor="manual",
@@ -2002,9 +3018,10 @@ def test_list_videos_json_is_parseable_array(tmp_path: Path, monkeypatch):
     payload = json.loads(result.stdout)
     assert isinstance(payload, list) and len(payload) == 1
     row = payload[0]
-    assert set(row) == {"id", "url", "state", "topic", "size_bytes", "mp4_url", "text"}
+    assert set(row) == {"id", "url", "state", "digest", "topic", "size_bytes", "mp4_url", "text"}
     assert row["id"] == "42"
     assert row["state"] == "pending"
+    assert row["digest"] == "pending"
     assert row["topic"] == "ai"
     assert row["mp4_url"] == _MP4_URL
 
@@ -2016,6 +3033,7 @@ def test_list_videos_human_table(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["list-videos"])
     assert result.exit_code == 0, result.output
     assert "STATE" in result.stdout
+    assert "DIGEST" in result.stdout
     assert "pending" in result.stdout
     assert "ai" in result.stdout
 
@@ -2092,149 +3110,31 @@ def test_list_videos_status_poster_era_enum(tmp_path: Path, monkeypatch):
     assert [row["id"] for row in payload] == ["9"]
 
 
-def test_resolve_fetch_ids_union_dedup_and_source_asymmetry(tmp_path: Path, monkeypatch):
-    """--ids are verbatim (NOT source-scoped); --topic expansion IS source-scoped;
-    the union is order-preserving and de-duplicated."""
-    from xbrain.cli import _resolve_fetch_ids
-
-    store = {
-        "b": _enriched_video_item("b", "ai", source="bookmark"),
-        "t": _enriched_video_item("t", "ai", source="own_tweet"),
-    }
-    # "t" is kept verbatim though it is an own_tweet and source=bookmarks;
-    # the topic expansion under bookmarks yields only "b".
-    assert _resolve_fetch_ids(store, "t", "ai", "bookmarks") == ["t", "b"]
-    # order-preserving dedup across --ids + --topic.
-    assert _resolve_fetch_ids(store, "b,b", "ai", "all") == ["b", "t"]
-
-
-def test_resolve_fetch_ids_requires_selection():
-    import pytest
-
-    from xbrain.cli import _resolve_fetch_ids
-
-    with pytest.raises(ValueError, match="ids"):
-        _resolve_fetch_ids({}, None, None, "all")
-
-
-def test_fetch_video_total_failure_exits_nonzero(tmp_path: Path, monkeypatch):
-    """A run where every attempted download failed exits 1 (parity with
-    download-videos); a pure all-skips run stays exit 0."""
+def test_fetch_video_command_is_disabled_even_without_to(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FailVideoSession)
-    dest = tmp_path / "out"
 
-    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
+    result = runner.invoke(app, ["fetch-video", "--ids", "42"])
+
     assert result.exit_code == 1
-    assert not (dest / "42.mp4").exists()
+    assert "deshabilitado" in result.output
+    assert "no deja MP4 en disco" in result.output
+    assert not (tmp_path / "data" / "media").exists()
 
 
-def test_fetch_video_all_skips_exits_zero(tmp_path: Path, monkeypatch):
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    dest = tmp_path / "out"
-
-    result = runner.invoke(app, ["fetch-video", "--ids", "7", "--to", str(dest)])
-    assert result.exit_code == 0, result.output
-
-
-def test_fetch_video_downloads_to_dir(tmp_path: Path, monkeypatch):
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    dest = tmp_path / "out"
-
-    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
-    assert result.exit_code == 0, result.output
-    assert (dest / "42.mp4").exists()
-    assert str(dest / "42.mp4") in result.stdout
-
-
-def test_fetch_video_does_not_mutate_store(tmp_path: Path, monkeypatch):
-    """fetch-video writes only under --to: items.json byte-identical, no snapshot,
-    no data/media/ writes."""
+def test_fetch_video_command_is_disabled_and_does_not_write_to_dir(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
+    dest = tmp_path / "out"
     save_store({"42": _video_item("42")}, items_path)
     before = items_path.read_bytes()
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    dest = tmp_path / "out"
-
-    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
-    assert result.exit_code == 0, result.output
-    assert items_path.read_bytes() == before
-    assert not (tmp_path / "data" / "media").exists()
-    snapshots = tmp_path / "data" / "snapshots"
-    assert not snapshots.exists() or not any("fetch-video" in p.name for p in snapshots.iterdir())
-
-
-def test_fetch_video_json_output(tmp_path: Path, monkeypatch):
-    import json
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    dest = tmp_path / "out"
 
     result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest), "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload[0]["id"] == "42"
-    assert payload[0]["outcome"] == "fetched"
-    assert payload[0]["path"].endswith("42.mp4")
 
-
-def test_fetch_video_topic_selection(tmp_path: Path, monkeypatch):
-    _setup_repo(tmp_path, monkeypatch)
-    save_store(
-        {
-            "1": _enriched_video_item("1", "ai"),
-            "2": _enriched_video_item("2", "climate"),
-        },
-        tmp_path / "data" / "items.json",
-    )
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    dest = tmp_path / "out"
-
-    result = runner.invoke(app, ["fetch-video", "--topic", "ai", "--to", str(dest)])
-    assert result.exit_code == 0, result.output
-    assert (dest / "1.mp4").exists()
-    assert not (dest / "2.mp4").exists()
-
-
-def test_fetch_video_requires_ids_or_topic(tmp_path: Path, monkeypatch):
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    dest = tmp_path / "out"
-
-    result = runner.invoke(app, ["fetch-video", "--to", str(dest)])
     assert result.exit_code == 1
-    assert "ids" in result.output or "topic" in result.output
-
-
-def test_fetch_video_requires_to(tmp_path: Path, monkeypatch):
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-    result = runner.invoke(app, ["fetch-video", "--ids", "42"])
-    assert result.exit_code != 0
-
-
-def test_fetch_video_skips_hls(tmp_path: Path, monkeypatch):
-    import json
-
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    dest = tmp_path / "out"
-
-    result = runner.invoke(app, ["fetch-video", "--ids", "7", "--to", str(dest), "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload[0]["outcome"] == "skipped"
-    assert payload[0]["reason"] == "hls"
-    assert not (dest / "7.mp4").exists()
+    assert "deshabilitado" in result.output
+    assert items_path.read_bytes() == before
+    assert not dest.exists()
 
 
 # ------------------------------------------------------ digest-video
@@ -2243,112 +3143,157 @@ def test_fetch_video_skips_hls(tmp_path: Path, monkeypatch):
 # dedup keys on the stable path id, not the rotating URL.
 _AMPLIFY_URL_1 = "https://video.twimg.com/amplify_video/900/vid/720/a.mp4?tag=16"
 _AMPLIFY_URL_2 = "https://video.twimg.com/amplify_video/900/vid/1080/b.mp4?tag=21"
+_TRANSCRIPT_URL = "https://video.twimg.com/amplify_video/900/captions/en.vtt"
 
 
-def _wire_digest(monkeypatch, transcript, *, calls: list | None = None):
-    """Mock the network (fetch) + subprocess (transcribe) + throttle for digest-video.
+def _wire_caption_digest(
+    monkeypatch,
+    *,
+    transcript_text: str = "original transcript line",
+    summary_markdown: str = "### Executive Summary\n\nExecutive summary from captions.",
+    calls: list[str] | None = None,
+):
+    from xbrain.video_transcript import VideoExecutiveSummary, VideoTranscript
 
-    `fetch` returns mp4 bytes (via the shared `_FakeVideoSession`); the external
-    transcriber is replaced with a fake returning `transcript` (or, if callable,
-    `transcript(path)`). No real network, subprocess, or download runs.
-    """
-    from xbrain.transcribe import Transcript
-
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
-
-    def _fake_transcribe(path, **_kwargs):
+    def _fake_fetch(_item, entry, **_kwargs):
         if calls is not None:
-            calls.append(str(path))
-        return transcript(path) if callable(transcript) else transcript
+            calls.append(entry.url)
+        return VideoTranscript(
+            text=transcript_text,
+            language=entry.transcript_language,
+            source_url=entry.transcript_url,
+            format=entry.transcript_format or "vtt",
+        )
 
-    monkeypatch.setattr("xbrain.cli.transcribe_media", _fake_transcribe)
-    return Transcript
+    def _fake_summary_fn(**_kwargs):
+        def _summarize(_item, _transcript):
+            return VideoExecutiveSummary(title="Executive video", markdown=summary_markdown)
+
+        return _summarize
+
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _fake_fetch)
+    monkeypatch.setattr("xbrain.cli.configured_summary_fn", _fake_summary_fn)
 
 
-def _speech_transcript(text="a talk transcript"):
-    from xbrain.transcribe import Segment, Transcript
-
-    return Transcript(text=text, segments=[Segment(0.0, 1.0, text)], language="en", has_speech=True)
-
-
-def _silent_transcript():
-    from xbrain.transcribe import Transcript
-
-    return Transcript(text="", segments=[], language=None, has_speech=False)
-
-
-def test_digest_video_transcribes_and_attaches(tmp_path: Path, monkeypatch):
+def test_digest_video_captions_summarizes_and_attaches(tmp_path: Path, monkeypatch):
     from xbrain.store import load_store
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript("hello from the talk"))
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        items_path,
+    )
+    _wire_caption_digest(
+        monkeypatch,
+        transcript_text="hello from the original captions",
+        summary_markdown="### Executive Summary\n\nUseful executive summary.",
+    )
 
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
     assert result.exit_code == 0, result.output
     store = load_store(items_path)
     sources = store["42"].content.sources
     assert sources[0].kind == "x_video"
-    assert sources[0].text == "hello from the talk"
+    assert sources[0].text == "### Executive Summary\n\nUseful executive summary."
+    assert sources[0].raw_transcript == "hello from the original captions"
+    assert sources[0].raw_transcript_url == _TRANSCRIPT_URL
+    assert sources[0].raw_transcript_format == "vtt"
+    assert sources[0].executive_summary_version == "v1"
     assert sources[0].has_speech is True
+    assert sources[0].frames == []
+    assert "resumidos 1" in result.stdout
 
 
 def test_digest_video_dedups_same_video(tmp_path: Path, monkeypatch):
-    """Two items bookmarking the same video → transcribed ONCE, both carry it."""
+    """Two items bookmarking the same video → transcript fetched once, both carry summary."""
     from xbrain.store import load_store
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store(
         {
-            "a": _video_item("a", url=_AMPLIFY_URL_1),
-            "b": _video_item("b", url=_AMPLIFY_URL_2),
+            "a": _video_item("a", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL),
+            "b": _video_item("b", url=_AMPLIFY_URL_2, transcript_url=_TRANSCRIPT_URL),
         },
         items_path,
     )
-    calls: list = []
-    _wire_digest(monkeypatch, _speech_transcript("shared"), calls=calls)
+    calls: list[str] = []
+    _wire_caption_digest(
+        monkeypatch, summary_markdown="### Executive Summary\n\nShared.", calls=calls
+    )
 
     result = runner.invoke(app, ["digest-video", "--ids", "a,b"])
     assert result.exit_code == 0, result.output
-    assert len(calls) == 1  # transcribed once
+    assert len(calls) == 1
     store = load_store(items_path)
-    assert store["a"].content.sources[0].text == "shared"
-    assert store["b"].content.sources[0].text == "shared"
+    assert store["a"].content.sources[0].text == "### Executive Summary\n\nShared."
+    assert store["b"].content.sources[0].text == "### Executive Summary\n\nShared."
     assert "1 items ← 1 vídeos" not in result.stdout  # 2 items, 1 video
     assert "2 items ← 1 vídeos" in result.stdout
 
 
-def test_digest_video_no_speech_summary(tmp_path: Path, monkeypatch):
+def test_digest_video_without_captions_uses_temporary_transcript_fallback(
+    tmp_path: Path, monkeypatch
+):
     from xbrain.store import load_store
+    from xbrain.video_transcript import VideoExecutiveSummary, VideoTranscript
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _silent_transcript())
+
+    def _fake_transcript(item, entry, **kwargs):
+        assert item.id == "42"
+        assert entry.transcript_url is None
+        assert kwargs["transcribe_command"] == "parakeet-mlx"
+        return VideoTranscript(
+            text="transcript generated from temporary ASR",
+            language="en",
+            source_url=item.url,
+            format="text",
+        )
+
+    def _factory(**_kwargs):
+        def _summarize(_item, transcript):
+            assert transcript.text == "transcript generated from temporary ASR"
+            return VideoExecutiveSummary(
+                title="Temporary ASR",
+                markdown="### Executive Summary\n\nSummary from temporary transcript.",
+            )
+
+        return _summarize
+
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _fake_transcript)
+    monkeypatch.setattr("xbrain.cli.configured_summary_fn", _factory)
 
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
     assert result.exit_code == 0, result.output
-    assert "sin voz 1" in result.stdout
     store = load_store(items_path)
-    assert store["42"].content.sources[0].has_speech is False
+    source = store["42"].content.sources[0]
+    assert source.kind == "x_video"
+    assert source.raw_transcript == "transcript generated from temporary ASR"
+    assert source.raw_transcript_url == "https://x.com/a/status/42"
+    assert source.raw_transcript_format == "text"
+    assert not (tmp_path / "data" / "media").exists()
 
 
 def test_digest_video_idempotent(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    calls: list = []
-    _wire_digest(monkeypatch, _speech_transcript(), calls=calls)
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        items_path,
+    )
+    calls: list[str] = []
+    _wire_caption_digest(monkeypatch, calls=calls)
 
     first = runner.invoke(app, ["digest-video", "--ids", "42"])
     assert first.exit_code == 0, first.output
     second = runner.invoke(app, ["digest-video", "--ids", "42"])
     assert second.exit_code == 0, second.output
     assert "ya digeridos 1" in second.stdout
-    assert len(calls) == 1  # the idempotent re-run did NOT re-transcribe
+    assert len(calls) == 1
 
 
 def test_digest_video_force_redigests(tmp_path: Path, monkeypatch):
@@ -2356,15 +3301,18 @@ def test_digest_video_force_redigests(tmp_path: Path, monkeypatch):
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        items_path,
+    )
 
-    _wire_digest(monkeypatch, _speech_transcript("v1"))
+    _wire_caption_digest(monkeypatch, summary_markdown="### Executive Summary\n\nv1")
     runner.invoke(app, ["digest-video", "--ids", "42"])
-    _wire_digest(monkeypatch, _speech_transcript("v2"))
+    _wire_caption_digest(monkeypatch, summary_markdown="### Executive Summary\n\nv2")
     result = runner.invoke(app, ["digest-video", "--ids", "42", "--force"])
     assert result.exit_code == 0, result.output
     store = load_store(items_path)
-    assert store["42"].content.sources[0].text == "v2"
+    assert store["42"].content.sources[0].text == "### Executive Summary\n\nv2"
 
 
 def test_digest_video_all_pending_selects_pending(tmp_path: Path, monkeypatch):
@@ -2372,8 +3320,11 @@ def test_digest_video_all_pending_selects_pending(tmp_path: Path, monkeypatch):
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript())
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        items_path,
+    )
+    _wire_caption_digest(monkeypatch)
 
     result = runner.invoke(app, ["digest-video", "--all-pending"])
     assert result.exit_code == 0, result.output
@@ -2389,53 +3340,108 @@ def test_digest_video_requires_selection(tmp_path: Path, monkeypatch):
     assert "ids" in result.output or "all-pending" in result.output
 
 
-def test_digest_video_missing_transcriber_exits_nonzero(tmp_path: Path, monkeypatch):
-    """A missing external transcriber is a clean operator error (exit 1), not a
-    crash — and nothing is written to items.json."""
+def test_digest_video_transcript_fetch_failure_exits_zero_and_does_not_persist(
+    tmp_path: Path, monkeypatch
+):
     from xbrain.store import load_store
-    from xbrain.transcribe import TranscriberNotFound
+    from xbrain.video_transcript import VideoTranscriptFetchFailed
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
-    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        items_path,
+    )
 
-    def _boom(_path, **_kwargs):
-        raise TranscriberNotFound("parakeet-mlx not found — set [transcribe].command")
+    def _boom(_item, _entry, **_kwargs):
+        raise VideoTranscriptFetchFailed("caption HTTP 403")
 
-    monkeypatch.setattr("xbrain.cli.transcribe_media", _boom)
+    _wire_caption_digest(monkeypatch)
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _boom)
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
-    assert result.exit_code == 1
-    assert "parakeet-mlx" in result.output
-    assert load_store(items_path)["42"].content is None  # nothing persisted
+    assert result.exit_code == 0, result.output
+    assert "fallidos 1" in result.output
+    assert load_store(items_path)["42"].content is None
 
 
 # A SECOND, DISTINCT video (different ext_tw_video id) for limit/selection tests.
 _DISTINCT_VIDEO_URL = "https://video.twimg.com/ext_tw_video/7700/vid/720/z.mp4?tag=3"
+_DISTINCT_TRANSCRIPT_URL = "https://video.twimg.com/ext_tw_video/7700/captions/en.vtt"
 
 
 def test_digest_video_limit_caps_items(tmp_path: Path, monkeypatch):
-    """`--limit 1` over a 2-distinct-video store transcribes exactly one item."""
+    """`--limit 1` over a 2-distinct-video store summarizes exactly one item."""
     from xbrain.store import load_store
 
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store(
         {
-            "a": _video_item("a", url=_AMPLIFY_URL_1),
-            "b": _video_item("b", url=_DISTINCT_VIDEO_URL),
+            "a": _video_item("a", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL),
+            "b": _video_item("b", url=_DISTINCT_VIDEO_URL, transcript_url=_DISTINCT_TRANSCRIPT_URL),
         },
         items_path,
     )
-    _wire_digest(monkeypatch, _speech_transcript())
+    _wire_caption_digest(monkeypatch)
 
     result = runner.invoke(app, ["digest-video", "--ids", "a,b", "--limit", "1"])
     assert result.exit_code == 0, result.output
-    assert "transcritos 1" in result.stdout
+    assert "resumidos 1" in result.stdout
     store = load_store(items_path)
     digested = [i for i in ("a", "b") if store[i].content is not None]
     assert len(digested) == 1  # exactly one, not both
+
+
+def test_digest_video_max_size_caps_temporary_video_fallback(tmp_path: Path, monkeypatch):
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    seen: list[int | None] = []
+
+    def _fake_transcript(_item, _entry, **kwargs):
+        from xbrain.video_transcript import VideoTranscriptUnavailable
+
+        seen.append(kwargs["max_size_bytes"])
+        raise VideoTranscriptUnavailable("no transcript in this test")
+
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _fake_transcript)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--max-size", "500MB"])
+    assert result.exit_code == 0, result.output
+    assert seen == [500_000_000]
+    assert load_store(items_path)["42"].content is None
+
+
+def test_digest_video_invalid_max_size_is_rejected(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--max-size", "banana"])
+
+    assert result.exit_code == 1
+    assert "invalid --max-size" in result.output
+
+
+def test_digest_video_reports_temporary_video_too_large(tmp_path: Path, monkeypatch):
+    from xbrain.store import load_store
+    from xbrain.video_transcript import VideoTranscriptFetchSkipped
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+
+    def _fake_transcript(_item, _entry, **_kwargs):
+        raise VideoTranscriptFetchSkipped("too_large", "temporary video exceeds cap")
+
+    monkeypatch.setattr("xbrain.cli.fetch_or_transcribe_video_transcript", _fake_transcript)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--max-size", "10MB"])
+
+    assert result.exit_code == 0, result.output
+    assert "> --max-size 1" in result.stdout
+    assert load_store(items_path)["42"].content is None
 
 
 def test_digest_video_topic_selects_only_matching(tmp_path: Path, monkeypatch):
@@ -2446,12 +3452,19 @@ def test_digest_video_topic_selects_only_matching(tmp_path: Path, monkeypatch):
     items_path = tmp_path / "data" / "items.json"
     save_store(
         {
-            "1": _enriched_video_item("1", "ai", url=_AMPLIFY_URL_1),
-            "2": _enriched_video_item("2", "climate", url=_DISTINCT_VIDEO_URL),
+            "1": _enriched_video_item(
+                "1", "ai", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL
+            ),
+            "2": _enriched_video_item(
+                "2",
+                "climate",
+                url=_DISTINCT_VIDEO_URL,
+                transcript_url=_DISTINCT_TRANSCRIPT_URL,
+            ),
         },
         items_path,
     )
-    _wire_digest(monkeypatch, _speech_transcript())
+    _wire_caption_digest(monkeypatch)
 
     result = runner.invoke(app, ["digest-video", "--topic", "ai"])
     assert result.exit_code == 0, result.output
@@ -2460,230 +3473,71 @@ def test_digest_video_topic_selects_only_matching(tmp_path: Path, monkeypatch):
     assert store["2"].content is None  # climate video untouched
 
 
-# ------------------------------------------------------ digest-video --frames (PR4)
-
-
-def _setup_repo_with_vision(tmp_path: Path, monkeypatch, command: str = "vlm-describe") -> Path:
-    """`_setup_repo` + a configured external `[vision].command` so `--frames` runs."""
-    vault = _setup_repo(tmp_path, monkeypatch)
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        cfg.read_text(encoding="utf-8") + f'[vision]\ncommand = "{command}"\n', encoding="utf-8"
-    )
-    return vault
-
-
-def _write_slide_png(path: Path) -> None:
-    """A high-edge (text/line) image so the REAL `classify_visual` reads 'slides'."""
-    from PIL import Image, ImageDraw
-
-    img = Image.new("RGB", (640, 360), "white")
-    draw = ImageDraw.Draw(img)
-    for y in range(40, 320, 24):
-        draw.line([(40, y), (600, y)], fill="black", width=3)
-    draw.rectangle([300, 200, 560, 330], outline="black", width=4)
-    img.save(path)
-
-
-def _write_photo_png(path: Path) -> None:
-    """A low-edge (smooth gradient) image so the REAL `classify_visual` reads
-    'talking_head' — a camera frame / bokeh, not a slide."""
-    from PIL import Image
-
-    img = Image.new("L", (640, 360))
-    for x in range(640):
-        for y in range(360):
-            img.putpixel((x, y), int((x / 640) * 200 + (y / 360) * 40))
-    img.convert("RGB").save(path)
-
-
-def _wire_frames(monkeypatch, *, describe_calls: list | None = None, writer=_write_slide_png):
-    """Mock ffmpeg extraction (real PNGs) + the external vision subprocess.
-
-    `writer` paints each fake frame — `_write_slide_png` (default, high-edge →
-    'slides') or `_write_photo_png` (low-edge → 'talking_head'). The REAL
-    `classify_visual` runs on the produced images, so the CLI's slide-vs-
-    talking-head decision is exercised end-to-end."""
-    from xbrain.video_frames import KeyFrame
-
-    def _fake_extract(path, **_kwargs):
-        frames_dir = Path(path).parent / "xbrain-frames-fake"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        frames = []
-        for index in range(2):
-            frame_path = frames_dir / f"frame-{index:05d}.png"
-            writer(frame_path)
-            frames.append(KeyFrame(timestamp=float(index * 10), path=frame_path))
-        return frames
-
-    def _fake_describe(path, **_kwargs):
-        if describe_calls is not None:
-            describe_calls.append(str(path))
-        return f"slide {Path(path).stem}"
-
-    monkeypatch.setattr("xbrain.cli.extract_key_frames", _fake_extract)
-    monkeypatch.setattr("xbrain.cli.describe_image", _fake_describe)
-
-
-def test_digest_video_frames_requires_vision_command(tmp_path: Path, monkeypatch):
-    """`--frames` with no `[vision].command` configured is a clear operator error
-    (exit 1) — there is no bundled default — and nothing is persisted."""
+def test_digest_video_frames_are_disabled(tmp_path: Path, monkeypatch):
     from xbrain.store import load_store
 
-    _setup_repo(tmp_path, monkeypatch)  # no [vision] section
-    items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript())
-
-    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
-    assert result.exit_code == 1
-    assert "vision" in result.output.lower()
-    assert load_store(items_path)["42"].content is None  # nothing persisted
-
-
-def test_digest_video_frames_describes_and_persists_slides(tmp_path: Path, monkeypatch):
-    """`--frames` on a slide video: the frames are described (external vision) and
-    recorded on the `x_video` source, and the slide images are persisted under
-    `data/media/<id>/frames/` for the generator — the summary reports the layer."""
-    from xbrain.store import load_store
-
-    _setup_repo_with_vision(tmp_path, monkeypatch)
-    items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript("the talk"))
-    describe_calls: list = []
-    _wire_frames(monkeypatch, describe_calls=describe_calls)
-
-    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
-    assert result.exit_code == 0, result.output
-    store = load_store(items_path)
-    frames = store["42"].content.sources[0].frames
-    assert len(frames) == 2
-    assert frames[0].local_path == "42/frames/0.png"
-    assert frames[0].description == "slide frame-00000"
-    assert len(describe_calls) == 2  # vision ran on both slides
-    assert (tmp_path / "data" / "media" / "42" / "frames" / "0.png").exists()
-    assert "con slides" in result.stdout  # the visual segment of the summary
-
-
-def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
-    """`--vision-model NAME` overrides `[vision].model` for the run — NAME is what
-    reaches the vision command as `--model`, so a multi-backend wrapper can route
-    it (e.g. `opus` → cloud, `qwen-7b` → local)."""
-    _setup_repo_with_vision(tmp_path, monkeypatch)  # [vision].command set, model unset
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
-    _wire_digest(monkeypatch, _speech_transcript("the talk"))
-    _wire_frames(monkeypatch)  # extract → slide frames; real classify_visual runs
-    seen: list = []
-
-    def _capture(path, *, command, model):
-        seen.append(model)
-        return "slide"
-
-    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
-    result = runner.invoke(
-        app, ["digest-video", "--ids", "42", "--frames", "--vision-model", "opus"]
-    )
-    assert result.exit_code == 0, result.output
-    assert seen and set(seen) == {"opus"}  # override reached the vision command
-
-
-def test_digest_video_vision_model_without_frames_errors(tmp_path: Path, monkeypatch):
-    """`--vision-model` without `--frames` is a hard error, not a silent no-op."""
-    import re
-
-    _setup_repo_with_vision(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
-    result = runner.invoke(app, ["digest-video", "--ids", "42", "--vision-model", "opus"])
-    assert result.exit_code == 2  # click usage error (BadParameter), robust across widths
-    # Strip ANSI + collapse Rich's width-dependent wrapping before matching the message.
-    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
-    assert "--frames" in plain
-
-
-def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatch):
-    """With no `--vision-model`, the run uses `[vision].model` from config."""
     _setup_repo(tmp_path, monkeypatch)
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        cfg.read_text(encoding="utf-8") + '[vision]\ncommand = "vlm"\nmodel = "qwen-7b"\n',
-        encoding="utf-8",
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        items_path,
     )
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
-    _wire_digest(monkeypatch, _speech_transcript("the talk"))
-    _wire_frames(monkeypatch)
-    seen: list = []
-
-    def _capture(path, *, command, model):
-        seen.append(model)
-        return "slide"
-
-    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
-    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
-    assert result.exit_code == 0, result.output
-    assert seen and set(seen) == {"qwen-7b"}  # config model, no override
-
-
-def test_digest_video_frames_then_generate_embeds_slides(tmp_path: Path, monkeypatch):
-    """End-to-end #44 PR4 success criterion: a slide talk digested with `--frames`
-    then generated embeds its key slides into the note (mirrored into `_media/`)."""
-    vault = _setup_repo_with_vision(tmp_path, monkeypatch)
-    items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _enriched_video_item("42", "ai", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript("the talk body"))
-    _wire_frames(monkeypatch)
-
-    assert runner.invoke(app, ["digest-video", "--ids", "42", "--frames"]).exit_code == 0
-    assert runner.invoke(app, ["generate"]).exit_code == 0
-
-    note = next((vault / "x-knowledge" / "items").glob("*42*.md")).read_text(encoding="utf-8")
-    assert "## Video digest" in note
-    assert "![[_media/42/frames/0.png]]" in note
-    assert "slide frame-00000" in note  # the vision caption
-    assert (vault / "x-knowledge" / "_media" / "42" / "frames" / "0.png").exists()
-
-
-def test_digest_video_without_frames_attaches_no_slides(tmp_path: Path, monkeypatch):
-    """Opt-in: a normal `digest-video` (no `--frames`) never invokes ffmpeg/vision
-    and attaches no frames — even with a `[vision].command` configured."""
-    from xbrain.store import load_store
-
-    _setup_repo_with_vision(tmp_path, monkeypatch)
-    items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript())
-    describe_calls: list = []
-    _wire_frames(monkeypatch, describe_calls=describe_calls)
-
-    result = runner.invoke(app, ["digest-video", "--ids", "42"])  # no --frames
-    assert result.exit_code == 0, result.output
-    assert describe_calls == []  # vision NOT invoked
-    assert load_store(items_path)["42"].content.sources[0].frames == []
-    assert "Visual:" not in result.stdout  # summary unchanged
-
-
-def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Path, monkeypatch):
-    """End-to-end #44 PR4 success criterion (the Ng-interview direction): a
-    talking-head video digested with `--frames` embeds NO slides, wastes NO vision
-    call, and the summary reports the talking-head skip — the mirror image of the
-    slide-talk test. The REAL `classify_visual` runs on genuine low-edge frames."""
-    from xbrain.store import load_store
-
-    vault = _setup_repo_with_vision(tmp_path, monkeypatch)
-    items_path = tmp_path / "data" / "items.json"
-    save_store({"42": _enriched_video_item("42", "ai", url=_AMPLIFY_URL_1)}, items_path)
-    _wire_digest(monkeypatch, _speech_transcript("interview body"))
-    describe_calls: list = []
-    _wire_frames(monkeypatch, describe_calls=describe_calls, writer=_write_photo_png)
+    _wire_caption_digest(monkeypatch)
 
     result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
-    assert result.exit_code == 0, result.output
-    assert describe_calls == []  # NO vision call wasted on a talking-head
-    assert load_store(items_path)["42"].content.sources[0].frames == []  # nothing attached
-    assert "talking-head (saltados)" in result.stdout  # the skip is surfaced
 
+    assert result.exit_code == 1
+    assert "--frames está deshabilitado" in result.output
+    assert load_store(items_path)["42"].content is None
+    assert not (tmp_path / "data" / "media").exists()
+
+
+def test_digest_video_vision_model_is_disabled(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {"42": _video_item("42", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL)},
+        tmp_path / "data" / "items.json",
+    )
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--vision-model", "opus"])
+
+    assert result.exit_code == 1
+    assert "--vision-model" in result.output
+    assert "deshabilitado" in result.output
+
+
+def test_digest_video_then_generate_writes_summary_and_transcript_artifacts(
+    tmp_path: Path, monkeypatch
+):
+    vault = _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {
+            "42": _enriched_video_item(
+                "42", "ai", url=_AMPLIFY_URL_1, transcript_url=_TRANSCRIPT_URL
+            )
+        },
+        items_path,
+    )
+    _wire_caption_digest(
+        monkeypatch,
+        transcript_text="raw caption transcript kept for audit only",
+        summary_markdown="### Executive Summary\n\nDashboard-ready video summary.",
+    )
+
+    assert runner.invoke(app, ["digest-video", "--ids", "42"]).exit_code == 0
     assert runner.invoke(app, ["generate"]).exit_code == 0
-    note = next((vault / "x-knowledge" / "items").glob("*42*.md")).read_text(encoding="utf-8")
-    assert "## Video digest" in note  # the transcript digest still renders
-    assert "_media/42/frames" not in note  # but NO slide embed
-    assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()
+
+    output = vault / "x-knowledge"
+    note = next((output / "items").glob("*42*.md")).read_text(encoding="utf-8")
+    assert "Dashboard-ready video summary" in note
+    assert "raw caption transcript kept for audit only" not in note
+    assert "../videos/" in note
+    assert "![[_media/" not in note
+    assert "_media/42/frames" not in note
+
+    summary = next((output / "videos").glob("*/summary.md")).read_text(encoding="utf-8")
+    transcript = next((output / "videos").glob("*/transcript.md")).read_text(encoding="utf-8")
+    assert "Dashboard-ready video summary" in summary
+    assert "raw caption transcript kept for audit only" in transcript
+    assert "xbrain_exclude: true" in transcript

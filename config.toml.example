@@ -6,18 +6,60 @@ output_subdir = "learnings/x-knowledge"
 # Data directory for the JSON store, relative to the repo root.
 data_dir = "data"
 
+[drive]
+# Google Drive is opt-in. When enabled, XBrain uses a local cache and syncs it
+# with the selected Drive folder before/after write commands. When disabled,
+# all library files stay local using [paths].
+enabled = false
+# Set with `xbrain drive select-root <folder-id>` or paste it here.
+# root_folder_id = ""
+# Local working cache used only when enabled=true.
+cache_dir = ".xbrain-cache/google-drive"
+# OAuth desktop-client JSON downloaded from Google Cloud Console.
+credentials_path = "auth/google_drive_credentials.json"
+# User token created by `xbrain drive login`; keep it local and gitignored.
+token_path = "auth/google_drive_token.json"
+
+[email]
+# Optional notification after bookmark updates. It only sends when both
+# [drive].enabled=true and [email].enabled=true.
+enabled = false
+recipient = "you@example.com"
+# Sender may also be set with XBRAIN_EMAIL_FROM. Keep SMTP secrets in .env/env.
+sender = ""
+smtp_host = ""
+smtp_port = 587
+smtp_starttls = true
+smtp_ssl = false
+
+[snapshots]
+# Keep this many newest automatic snapshots. Manual snapshots are never removed
+# by the automatic policy. Set to 0 to disable automatic pruning.
+auto_prune_keep_last = 25
+
 [x]
 # Your X handle, without the @.
 handle = "your_handle"
 
+[llm]
+# Text LLM provider for the "api" executor:
+#   "nanogpt"   - calls NanoGPT's OpenAI-compatible chat completions API [default]
+#   "anthropic" - Anthropic provider for all API-backed LLM calls (needs ANTHROPIC_API_KEY)
+provider = "nanogpt"
+# NanoGPT-only API base URL; ignored when provider = "anthropic".
+base_url = "https://nano-gpt.com/api/v1"
+# API LLM model used by text stages: enrich, vocab and topics.
+model = "zai-org/glm-5.2"
+# Separate API LLM model for image/vision tasks (`describe`).
+# With NanoGPT, default is xiaomi/mimo-v2.5 because text-only models may not process images.
+vision_model = "xiaomi/mimo-v2.5"
+
 [enrich]
 # Executor that produces the LLM judgment:
 #   "claude-code" - exports a worksheet a Claude Code session fills (no API cost) [default]
-#   "api"         - calls the Anthropic API (needs ANTHROPIC_API_KEY, pay-per-token)
+#   "api"         - calls [llm].provider (NanoGPT by default, needs NANOGPT_API_KEY)
 #   "manual"      - exports a worksheet to fill by hand
 executor = "claude-code"
-# Model used by the "api" executor. A cheap model for volume; a stronger one for quality.
-model = "claude-haiku-4-5-20251001"
 
 [vocab]
 # Number of topics the `vocab` stage induces from the corpus.
@@ -41,53 +83,31 @@ language = "English"
 topic_style = "wikilink"
 
 [describe]
-# Vision model used by `xbrain describe`. Sonnet 4.6 is the default —
-# the quality / cost sweet spot (~$3-5 for a 2k-image corpus). Override
-# per run with `--model` while iterating; the CLI flag wins.
-model = "claude-sonnet-4-6"
-# Description-version tag persisted on every described photo. Bumping
+# Description-version tag persisted on every described image. Bumping
 # this value invalidates existing descriptions: the next `xbrain
 # describe` run re-describes stale entries automatically. Use it when
 # you change the describe-image rubric or expectations.
 version = "v1"
 
 [transcribe]
-# External transcriber that `xbrain digest-video` shells out to. The heavy ASR
-# (Parakeet TDT 0.6b via `parakeet-mlx` on Apple Silicon; `whisper` /
-# `faster-whisper` is the portable fallback) lives OUTSIDE xbrain core — the CLI
-# carries no MLX/CoreML dependency and only invokes this command as a subprocess.
-# May be a multi-token wrapper (split with shlex, run without a shell). xbrain
-# invokes:  <command> [--model M] --output-format json --output-dir <TMPDIR> <mediapath>
-# and reads the JSON transcript from the FILE parakeet-mlx writes at
-# <TMPDIR>/<stem>.json ({"text", "language", "segments":[{start,end,text}]}).
-# Note: --language is NOT passed (parakeet auto-detects and rejects it). A wrapper
-# that emits JSON on stdout instead of a file is also supported.
-#
-# The bundled `scripts/xbrain-transcribe` wraps parakeet-mlx so videos with NO
-# audio track (silent clips, GIFs) attach as has_speech=false instead of failing
-# (parakeet writes no file for them). Point at the wrapper, or straight at
-# `parakeet-mlx` if you don't need silent-video handling.
+# Optional ASR fallback for `xbrain digest-video` when X does not expose captions.
+# XBrain may stream the MP4 into a private temporary directory, run this
+# external command, store only the transcript text, and delete the temporary
+# media bytes. It never stores MP4/audio/frames in data/ or the vault.
 command = "parakeet-mlx"
-# command = "/absolute/path/to/scripts/xbrain-transcribe"
-# Optional model id passed through to the transcriber. Omit for the tool default.
 # model = "parakeet-tdt-0.6b-v2"
-
-[vision]
-# External vision model that `xbrain digest-video --frames` shells out to (#44
-# PR4) to describe key-frame slides. Like the transcriber, the heavy vision lives
-# OUTSIDE xbrain core — the CLI carries no vision/ML dependency and only invokes
-# this command as a subprocess. There is NO bundled default: leave it unset and
-# `--frames` errors clearly until you configure a local VLM. xbrain invokes:
-#   <command> [--model M] <image-path>
-# and reads the frame's text description from stdout. May be a multi-token wrapper
-# (split with shlex, run without a shell). `--frames` is fully opt-in: a normal
-# `digest-video` run never touches ffmpeg or this command.
 #
-# The bundled `scripts/xbrain-vision` wrapper is a MULTI-BACKEND SELECTOR: the
-# `--model` name routes to a local mlx-vlm model OR a cloud Claude model, so one
-# command serves both. Pick per run with `digest-video --vision-model NAME`, or
-# set the default here:
-#   local (Apple Silicon, free/offline): qwen-3b | qwen-7b | qwen-32b | <hf/repo>
-#   cloud (needs ANTHROPIC_API_KEY):      opus | sonnet | haiku | claude-<id>
-# command = "/absolute/path/to/scripts/xbrain-vision"
-# model = "qwen-3b"                       # omit → the wrapper's default (qwen-3b)
+# Linux/VPS CPU example after installing faster-whisper in /opt/xbrain-asr.
+# The wrapper streams the MP4 into XBrain's temp dir, extracts mono 16k audio
+# there, transcribes that smaller WAV, and deletes every temporary media file.
+# `XBRAIN_WHISPER_BEAM_SIZE=1` is the recommended VPS default for long videos;
+# raise it to 3/5 if you prefer accuracy over runtime.
+# command = "env XBRAIN_WHISPER_CACHE=/opt/xbrain-asr/models XBRAIN_WHISPER_CPU_THREADS=6 XBRAIN_WHISPER_BEAM_SIZE=1 XBRAIN_WHISPER_DELETE_SOURCE_AFTER_AUDIO=1 /opt/xbrain-asr/bin/python /absolute/path/to/xbrain/scripts/xbrain-transcribe-faster-whisper"
+# model = "small"
+# timeout_seconds = 7200
+
+# Video policy:
+# `xbrain digest-video` never stores MP4, audio or frames. It uses caption/text
+# tracks captured from X when available; otherwise it may use the temporary ASR
+# fallback above. The raw transcript is a reference artifact; only the executive
+# summary flows through enrich/topics/dashboard/Ask.

@@ -202,8 +202,8 @@ def _video_item(item_id: str, *, text: str, has_speech: bool = True) -> Item:
 
 
 def test_export_worksheet_carries_video_transcript_in_its_own_field(tmp_path):
-    """A video transcript is exported under `video_transcript`, NOT `article` —
-    so the manual/claude-code enrich track sees it as a transcript."""
+    """A video summary is exported under the legacy `video_transcript` field,
+    NOT `article`, so manual enrich sees it as video-derived evidence."""
     path = tmp_path / "ws.json"
     export_worksheet(
         [_video_item("1", text="deep talk on retrieval")], VOCAB, path, "manual", "English"
@@ -215,7 +215,7 @@ def test_export_worksheet_carries_video_transcript_in_its_own_field(tmp_path):
 
 
 def test_export_worksheet_omits_no_speech_video_transcript(tmp_path):
-    """A no-speech video contributes no transcript text to the worksheet."""
+    """An empty video summary contributes no video text to the worksheet."""
     path = tmp_path / "ws.json"
     export_worksheet(
         [_video_item("1", text="", has_speech=False)], VOCAB, path, "manual", "English"
@@ -225,7 +225,7 @@ def test_export_worksheet_omits_no_speech_video_transcript(tmp_path):
 
 
 def test_export_worksheet_truncates_an_over_cap_video_transcript(tmp_path):
-    """A 72-min-talk-scale transcript is capped in the worksheet's `video_transcript`
+    """A very long video summary is capped in the worksheet's `video_transcript`
     field (same `TRANSCRIPT_CHAR_LIMIT` as the `api` prompt) so the manual/claude-code
     track sees identical, bounded input and one long talk can't bloat the worksheet."""
     from xbrain.rubrics import TRANSCRIPT_CHAR_LIMIT
@@ -235,5 +235,5 @@ def test_export_worksheet_truncates_an_over_cap_video_transcript(tmp_path):
     export_worksheet([_video_item("1", text=long_text)], VOCAB, path, "manual", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     transcript = data["items"][0]["video_transcript"]
-    assert "transcript truncated" in transcript
+    assert "video content truncated" in transcript
     assert len(transcript) < len(long_text)

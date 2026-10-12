@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from xbrain.describe import apply_describe_worksheet, export_describe_worksheet
 from xbrain.generate import generate
 from xbrain.models import (
+    ArticleImageBlock,
     Author,
+    Content,
+    ContentSourceSuccess,
     Item,
     MediaPhotoDescribed,
     MediaPhotoDownloaded,
@@ -38,6 +41,23 @@ def _item(item_id="1", media=None):
     )
 
 
+def _article_item(item_id="1", block=None):
+    item = _item(item_id)
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceSuccess(
+                kind="x_article",
+                url=f"https://x.com/i/article/{item_id}",
+                title="Article",
+                text="",
+                blocks=[block or ArticleImageBlock(media=_photo(f"{item_id}/article/0.png"))],
+            )
+        ],
+    )
+    return item
+
+
 def test_export_lists_eligible_photos_with_image_paths(tmp_path):
     store = {
         "1": _item("1", [_photo("1/0.png")]),
@@ -49,9 +69,77 @@ def test_export_lists_eligible_photos_with_image_paths(tmp_path):
     )
     ws = json.loads(ws_path.read_text(encoding="utf-8"))
     assert n == 3
-    assert {(p["item_id"], p["index"]) for p in ws["photos"]} == {("1", 0), ("2", 0), ("2", 1)}
+    assert {(p["item_id"], p["location"], p["index"]) for p in ws["photos"]} == {
+        ("1", "post", 0),
+        ("2", "post", 0),
+        ("2", "post", 1),
+    }
     assert ws["photos"][0]["image_path"].endswith("1/0.png")
     assert ws["rubric"] and ws["judgments"] == []
+
+
+def test_export_and_apply_article_image_judgment(tmp_path):
+    block = ArticleImageBlock(media=_photo("1/article/0.png"))
+    store = {"1": _article_item("1", block)}
+    ws_path = tmp_path / "ws.json"
+    n = export_describe_worksheet(
+        store, tmp_path / "media", ws_path, version="v1", output_language="Spanish"
+    )
+    ws = json.loads(ws_path.read_text(encoding="utf-8"))
+    assert n == 1
+    assert ws["photos"][0]["location"] == "article"
+    assert ws["photos"][0]["requires_description"] is True
+    ws["judgments"] = [
+        {
+            "item_id": "1",
+            "location": "article",
+            "index": 0,
+            "is_decorative": False,
+            "description": "Un diagrama dentro del articulo.",
+        }
+    ]
+    ws_path.write_text(json.dumps(ws), encoding="utf-8")
+
+    applied, invalid = apply_describe_worksheet(store, ws_path)
+    assert applied == 1
+    assert invalid == []
+    assert isinstance(block.media, MediaPhotoDescribed)
+    assert block.media.description == "Un diagrama dentro del articulo."
+
+
+def test_apply_rejects_decorative_article_cover_judgment(tmp_path):
+    block = ArticleImageBlock(media=_photo("1/article/0.png"))
+    store = {"1": _article_item("1", block)}
+    ws_path = tmp_path / "ws.json"
+    ws_path.write_text(
+        json.dumps(
+            {
+                "version": "v1",
+                "language": "Spanish",
+                "judgments": [
+                    {
+                        "item_id": "1",
+                        "location": "article",
+                        "index": 0,
+                        "is_decorative": True,
+                        "description": "",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    applied, invalid = apply_describe_worksheet(store, ws_path)
+
+    assert applied == 0
+    assert isinstance(block.media, MediaPhotoDownloaded)
+    assert invalid == [
+        (
+            "1#article:0",
+            ["article cover images must be non-decorative and have a visual description"],
+        )
+    ]
 
 
 def test_apply_transitions_to_described_and_enforces_decorative_empty(tmp_path):
@@ -102,7 +190,7 @@ def test_apply_skips_unknown_id_and_index(tmp_path):
     assert isinstance(store["1"].media[0], MediaPhotoDownloaded)  # unchanged
     # Both judgments are well-formed but address no downloaded photo → reported,
     # not silently dropped.
-    assert {label for label, _ in invalid} == {"1#9", "nope#0"}
+    assert {label for label, _ in invalid} == {"1#post:9", "nope#post:0"}
 
 
 def test_apply_reports_malformed_judgments_but_applies_valid(tmp_path):
@@ -158,7 +246,7 @@ def test_apply_reports_duplicate_keys(tmp_path):
     applied, invalid = apply_describe_worksheet(store, ws_path)
     assert applied == 1  # first-wins; duplicate is rejected, not last-wins
     assert store["1"].media[0].description == "first"
-    assert [label for label, _ in invalid] == ["1#0"]
+    assert [label for label, _ in invalid] == ["1#post:0"]
 
 
 def test_apply_raises_on_non_object_worksheet(tmp_path):
@@ -221,4 +309,9 @@ def test_generate_renders_photo_description_as_caption(tmp_path):
     assert "> Un diagrama de flujo." in note1  # described photo → searchable caption
 
     note2 = next((tmp_path / "items").glob("*-2.md")).read_text(encoding="utf-8")
-    assert "\n> " not in note2  # decorative photo → no caption line
+    caption_lines = [
+        line
+        for line in note2.splitlines()
+        if line.startswith("> ") and not line.startswith("> XBrain storage:")
+    ]
+    assert caption_lines == []  # decorative photo → no caption line

@@ -13,9 +13,17 @@ from pathlib import Path
 
 from xbrain import notes_io
 from xbrain.i18n import Strings, strings_for
-from xbrain.models import ContentSourceSuccess, Item, MediaPhotoDescribed, Topic, TopicPage
-from xbrain.rubrics import TOPIC_TRANSCRIPT_CHAR_LIMIT, truncate_transcript
+from xbrain.models import (
+    ArticleImageBlock,
+    ContentSourceSuccess,
+    Item,
+    MediaPhotoDescribed,
+    Topic,
+    TopicPage,
+)
+from xbrain.rubrics import TOPIC_TRANSCRIPT_CHAR_LIMIT
 from xbrain.topic_synth import OverviewJudgment, TopicInput
+from xbrain.video_content import video_content_text
 
 
 @dataclass
@@ -183,44 +191,56 @@ def _collect_image_descriptions(item_pool: list[Item]) -> list[str]:
 
     Decorative photos are filtered out at this seam so the topic prompt
     never carries avatar / reaction-meme noise — same filter the enrich
-    prompt applies in `xbrain.executors.api`.
+    prompt applies in `xbrain.executors.api`. Inline X Article images are
+    included after post photos.
     """
-    return [
-        entry.description
-        for item in item_pool
-        for entry in item.media
-        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
-    ]
+    descriptions: list[str] = []
+    for item in item_pool:
+        descriptions.extend(_described_photo_text(entry) for entry in item.media)
+        if item.content is None:
+            continue
+        for source in item.content.sources:
+            if not (isinstance(source, ContentSourceSuccess) and source.kind == "x_article"):
+                continue
+            descriptions.extend(
+                _described_photo_text(block.media)
+                for block in source.blocks
+                if isinstance(block, ArticleImageBlock)
+            )
+    return [description for description in descriptions if description]
 
 
-def _collect_video_transcripts(item_pool: list[Item]) -> list[str]:
-    """Bounded per-video transcript excerpts across a pool of items (#44).
+def _described_photo_text(entry: object) -> str:
+    """Return a non-decorative image description, or an empty string."""
+    if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative:
+        return entry.description
+    return ""
 
-    Each with-speech `x_video` source contributes its transcript trimmed to
-    `TOPIC_TRANSCRIPT_CHAR_LIMIT`, so a topic with many long talks stays within
-    the synthesis prompt's token budget. No-speech sources (`has_speech=False`,
-    empty text) contribute nothing — same skip the enrich prompt applies.
+
+def _collect_video_summaries(item_pool: list[Item]) -> list[str]:
+    """Bounded per-video executive summaries across a pool of items.
+
+    Each `x_video` source contributes only `source.text`, which is the executive
+    summary produced from a raw transcript. Raw transcripts and legacy key-frame
+    descriptions are intentionally ignored by `video_content_text`.
     """
-    transcripts: list[str] = []
+    summaries: list[str] = []
     for item in item_pool:
         if item.content is None:
             continue
         for src in item.content.sources:
-            if (
-                isinstance(src, ContentSourceSuccess)
-                and src.kind == "x_video"
-                and src.has_speech
-                and src.text
-            ):
-                transcripts.append(truncate_transcript(src.text, TOPIC_TRANSCRIPT_CHAR_LIMIT))
-    return transcripts
+            if isinstance(src, ContentSourceSuccess):
+                text = video_content_text(src, TOPIC_TRANSCRIPT_CHAR_LIMIT)
+                if text:
+                    summaries.append(text)
+    return summaries
 
 
 def build_topic_inputs(
     slugs: list[str], vocab: list[Topic], all_posts: dict[str, TopicPosts]
 ) -> list[TopicInput]:
     """Build the synthesis input for each slug — description + summaries + image
-    descriptions + bounded video transcripts (#44)."""
+    descriptions + bounded video executive summaries."""
     by_slug = {topic.slug: topic for topic in vocab}
     inputs: list[TopicInput] = []
     for slug in slugs:
@@ -235,7 +255,7 @@ def build_topic_inputs(
                 description=topic.description,
                 summaries=_collect_summaries(item_pool),
                 image_descriptions=_collect_image_descriptions(item_pool),
-                video_transcripts=_collect_video_transcripts(item_pool),
+                video_transcripts=_collect_video_summaries(item_pool),
             )
         )
     return inputs

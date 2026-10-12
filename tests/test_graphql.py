@@ -317,6 +317,35 @@ def test_extract_media_video_captures_poster_and_size_metadata():
     assert entry.duration_millis == 30000
 
 
+def test_extract_media_video_captures_caption_track_metadata():
+    """If X exposes a caption/text-track URL, store it as metadata only."""
+    from xbrain.extract.graphql import _extract_media
+
+    legacy = _video_legacy(
+        [
+            {
+                "bitrate": 2176000,
+                "content_type": "video/mp4",
+                "url": "https://video.twimg.com/high.mp4?tag=12",
+            },
+        ],
+    )
+    media_entry = legacy["extended_entities"]["media"][0]
+    media_entry["video_info"]["subtitles"] = [
+        {
+            "url": "https://video.twimg.com/captions/en.vtt",
+            "language_code": "en",
+            "content_type": "text/vtt",
+        }
+    ]
+
+    entry = _extract_media(legacy)[0]
+
+    assert entry.transcript_url == "https://video.twimg.com/captions/en.vtt"
+    assert entry.transcript_language == "en"
+    assert entry.transcript_format == "vtt"
+
+
 def test_extract_media_video_no_variants_falls_back_to_poster():
     """A video entry with no usable variants (empty list, no playable stream)
     falls back to the poster url so the item is not silently dropped; the poster

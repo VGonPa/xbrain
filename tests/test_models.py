@@ -46,6 +46,24 @@ def test_enrichment_has_primary_topic_and_no_note_worthiness():
     assert not hasattr(e, "note_worthiness")
 
 
+def test_enrichment_round_trips_taxonomy_diagnostics():
+    from datetime import datetime, timezone
+    from xbrain.models import Enrichment
+
+    e = Enrichment(
+        enriched_at=datetime.now(timezone.utc),
+        executor="api",
+        summary="resumen",
+        primary_topic="misc",
+        topics=["misc"],
+        topic_confidence="low",
+        suggested_new_topics=["modern-statistics"],
+    )
+    restored = Enrichment.model_validate(e.model_dump(mode="json"))
+    assert restored.topic_confidence == "low"
+    assert restored.suggested_new_topics == ["modern-statistics"]
+
+
 def test_topic_model_holds_slug_and_description():
     from xbrain.models import Topic
 
@@ -447,6 +465,9 @@ def test_media_photo_described_round_trips_through_json():
         "description_lang": "English",
         "description_version": "v1",
         "described_at": datetime(2026, 5, 24, 12, tzinfo=timezone.utc).isoformat(),
+        "extracted_text": "## Rules\n- Ask before acting.",
+        "extracted_text_language": "markdown",
+        "extracted_text_confidence": "high",
     }
     entry = MediaEntryAdapter.validate_python(payload)
     assert isinstance(entry, MediaPhotoDescribed)
@@ -454,10 +475,39 @@ def test_media_photo_described_round_trips_through_json():
     assert entry.description.startswith("A chart")
     assert entry.description_lang == "English"
     assert entry.description_version == "v1"
+    assert entry.extracted_text == "## Rules\n- Ask before acting."
+    assert entry.extracted_text_language == "markdown"
+    assert entry.extracted_text_confidence == "high"
     # Re-dump and re-parse: variant must survive verbatim.
     restored = MediaEntryAdapter.validate_python(entry.model_dump(mode="json"))
     assert isinstance(restored, MediaPhotoDescribed)
     assert restored == entry
+
+
+def test_media_photo_described_normalizes_blank_extracted_text_fields():
+    """Blank OCR fields load as absent so old/manual payloads stay clean."""
+    from datetime import datetime, timezone
+
+    from xbrain.models import MediaPhotoDescribed
+
+    entry = MediaPhotoDescribed(
+        url="https://pbs.twimg.com/media/X.jpg",
+        local_path="123/0.jpg",
+        width=1200,
+        height=800,
+        bytes_size=99000,
+        downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        is_decorative=False,
+        description="A screenshot of markdown.",
+        description_lang="English",
+        description_version="v1",
+        described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+        extracted_text="   ",
+        extracted_text_language="",
+    )
+    assert entry.extracted_text is None
+    assert entry.extracted_text_language is None
+    assert entry.extracted_text_confidence is None
 
 
 def test_media_photo_described_decorative_carries_empty_description():

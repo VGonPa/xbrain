@@ -157,6 +157,150 @@ def test_non_image_atomic_entity_is_skipped_and_inline_link_text_kept():
     assert blocks == [ArticleTextBlock(text="see this link")]
 
 
+def test_markdown_atomic_entity_becomes_text_block():
+    content_state = {
+        "blocks": [
+            {
+                "key": "md",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            },
+            {"key": "after", "text": "plain after", "type": "unstyled", "entityRanges": []},
+        ],
+        "entityMap": {
+            "0": {
+                "type": "MARKDOWN",
+                "data": {"markdown": "## Captured heading\n\nCaptured body."},
+            }
+        },
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [
+        ArticleTextBlock(text="```markdown\n## Captured heading\n\nCaptured body.\n```"),
+        ArticleTextBlock(text="\n\nplain after"),
+    ]
+
+
+def test_markdown_atomic_entity_accepts_text_key_and_unwraps_existing_fence():
+    content_state = {
+        "blocks": [
+            {
+                "key": "md",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            }
+        ],
+        "entityMap": {
+            "0": {
+                "type": "MARKDOWN",
+                "data": {"text": "```bash\necho hi\n```"},
+            }
+        },
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [ArticleTextBlock(text="```bash\necho hi\n```")]
+
+
+def test_code_block_runs_are_grouped_and_fenced_as_markdown():
+    content_state = {
+        "blocks": [
+            {"key": "before", "text": "Before.", "type": "unstyled", "entityRanges": []},
+            {
+                "key": "c1",
+                "text": "## Project context",
+                "type": "code-block",
+                "entityRanges": [],
+            },
+            {
+                "key": "c2",
+                "text": "This workspace is for AI-assisted research.",
+                "type": "code-block",
+                "entityRanges": [],
+            },
+            {"key": "c3", "text": "", "type": "code-block", "entityRanges": []},
+            {"key": "c4", "text": "## Rules", "type": "code-block", "entityRanges": []},
+            {
+                "key": "c5",
+                "text": "- Ask clarifying questions.",
+                "type": "code-block",
+                "entityRanges": [],
+            },
+            {"key": "after", "text": "After.", "type": "unstyled", "entityRanges": []},
+        ],
+        "entityMap": {},
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [
+        ArticleTextBlock(text="Before."),
+        ArticleTextBlock(
+            text="\n\n```markdown\n"
+            "## Project context\n"
+            "This workspace is for AI-assisted research.\n"
+            "\n"
+            "## Rules\n"
+            "- Ask clarifying questions.\n"
+            "```"
+        ),
+        ArticleTextBlock(text="\n\nAfter."),
+    ]
+
+
+def test_code_block_runs_unwrap_existing_markdown_fence():
+    content_state = {
+        "blocks": [
+            {"key": "c0", "text": "```markdown", "type": "code-block", "entityRanges": []},
+            {
+                "key": "c1",
+                "text": "You are the Supervisor Agent in a multi-agent system.",
+                "type": "code-block",
+                "entityRanges": [],
+            },
+            {"key": "c2", "text": "", "type": "code-block", "entityRanges": []},
+            {
+                "key": "c3",
+                "text": "Current task: [User’s request]",
+                "type": "code-block",
+                "entityRanges": [],
+            },
+            {"key": "c4", "text": "```", "type": "code-block", "entityRanges": []},
+        ],
+        "entityMap": {},
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [
+        ArticleTextBlock(
+            text="```markdown\n"
+            "You are the Supervisor Agent in a multi-agent system.\n"
+            "\n"
+            "Current task: [User’s request]\n"
+            "```"
+        )
+    ]
+
+
+def test_code_atomic_entity_accepts_language_metadata():
+    content_state = {
+        "blocks": [
+            {
+                "key": "code",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            }
+        ],
+        "entityMap": {
+            "0": {
+                "type": "CODE_BLOCK",
+                "data": {"code": "print('hello')", "language": "python"},
+            }
+        },
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [ArticleTextBlock(text="```python\nprint('hello')\n```")]
+
+
 def test_image_only_article_yields_blocks_with_empty_flattened_text():
     content_state = {
         "blocks": [

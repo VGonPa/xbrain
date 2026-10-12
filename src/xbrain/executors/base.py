@@ -12,7 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
-from xbrain.models import Item, Topic
+from xbrain.models import Item, Topic, TopicConfidence
 
 
 class EnrichmentJudgment(BaseModel):
@@ -26,6 +26,8 @@ class EnrichmentJudgment(BaseModel):
     summary: str
     primary_topic: str
     topics: list[str] = Field(min_length=1)
+    topic_confidence: TopicConfidence | None = None
+    suggested_new_topics: list[str] = Field(default_factory=list)
 
 
 class EnrichmentExecutor(Protocol):

@@ -77,12 +77,13 @@ each topic page — also via a worksheet, at no API cost.
 2. **Read `data/topic-worksheet.json`.** It has `rubric` and `topics` (each with
    a `slug`, a `description`, the `summaries` of its posts, and — when the posts
    carry them — `image_descriptions` (prose for the topic's content-bearing
-   photos) and `video_transcripts` (bounded transcript excerpts of its videos)).
+   photos) and `video_transcripts` (legacy field name for bounded executive
+   summaries generated from its videos)).
 
 3. **Produce one judgment per topic**, following the embedded rubric exactly:
    - `overview`: 1-3 paragraphs of plain Spanish prose, faithful to the
      summaries. When a topic carries `image_descriptions` or `video_transcripts`,
-     weigh them as visual/transcript evidence alongside the summaries — they carry
+     weigh them as visual/video-summary evidence alongside the summaries — they carry
      topic signal a one-line summary may only hint at.
    - `notes`: 0-15 plain-prose strings, one important idea each.
    - Emit only `{slug, overview, notes}`. **Never write a wikilink (`[[...]]`),

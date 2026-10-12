@@ -42,6 +42,7 @@ def test_classify_x_url():
     assert _classify_x_url("https://x.com/jack/status/123") == "status"
     assert _classify_x_url("https://x.com/i/article/456") == "article"
     assert _classify_x_url("https://x.com/some_profile") == "other"
+    assert _classify_x_url("https://evil.example/i/article/456") == "other"
 
 
 def test_classify_x_url_does_not_misroute_article_containing_status():
@@ -199,6 +200,72 @@ def test_fetch_x_articles_preserves_external_sources():
     assert kinds == {"external_article", "x_article"}
 
 
+def test_fetch_x_articles_reuses_rich_linked_item_and_preserves_broken_sibling():
+    status_url = "https://x.com/jack/status/9?s=20"
+    parent = _item("1", [status_url])
+    broken = ContentSourceFailure(
+        kind="external_article",
+        url="https://broken.example/article",
+        failure_reason="unknown_error",
+    )
+    parent.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=[broken]
+    )
+    linked = _item("9", [_ARTICLE_URL])
+    linked.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_article",
+                url=_ARTICLE_URL,
+                title="Readable nested article",
+                text="A complete and useful article body.",
+            )
+        ],
+    )
+
+    def should_not_fetch(_url):
+        raise AssertionError("cached linked content should be reused")
+
+    fetch_x_articles(
+        {"1": parent},
+        None,
+        force=True,
+        link_fetcher=should_not_fetch,
+        linked_store={"1": parent, "9": linked},
+    )
+
+    assert parent.content.sources[0] is broken
+    readable = parent.content.sources[1]
+    assert isinstance(readable, ContentSourceSuccess)
+    assert readable.url == _ARTICLE_URL
+    assert readable.title == "Readable nested article"
+    assert readable.text == "A complete and useful article body."
+
+
+def test_fetch_x_articles_isolates_one_unexpected_link_failure():
+    first = "https://x.com/jack/status/9"
+    second = "https://x.com/jack/status/10"
+    item = _item("1", [first, second])
+
+    def fetcher(url):
+        if url == first:
+            raise RuntimeError("one link exploded")
+        return ContentSourceSuccess(kind="x_article", url=url, text="readable sibling")
+
+    fetch_x_articles({"1": item}, None, link_fetcher=fetcher)
+
+    assert item.content is not None
+    assert len(item.content.sources) == 2
+    failed, readable = item.content.sources
+    assert isinstance(failed, ContentSourceFailure)
+    assert failed.url == first
+    assert failed.failure_reason == "unknown_error"
+    assert isinstance(readable, ContentSourceSuccess)
+    assert readable.url == second
+    assert readable.text == "readable sibling"
+
+
 # --- fetch: structured article body via GraphQL interception (#39 PR3) ---
 #
 # FIXTURE PROVENANCE: the captured GraphQL payload below is CONSTRUCTED from the
@@ -294,6 +361,47 @@ class _FakeContext:
         return self._page
 
 
+class _FakeSequenceContext:
+    def __init__(self, pages: list[_FakePage]):
+        self._pages = iter(pages)
+
+    def new_page(self) -> _FakePage:
+        return next(self._pages)
+
+
+def test_status_link_follows_discovered_x_article_one_hop(monkeypatch):
+    anchor = _item("1900000000000000001", [_ARTICLE_URL])
+    anchor.text = "Read the full article"
+    monkeypatch.setattr(fx, "parse_tweets", lambda response, source: response)
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: None)
+    status_page = _FakePage(
+        url=_STATUS_URL,
+        html="<html>tweet</html>",
+        responses=[_FakeResponse("https://x.com/i/api/graphql/q/TweetDetail", [anchor])],
+    )
+    article_page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>article</html>",
+        responses=[
+            _FakeResponse("https://x.com/i/api/graphql/q/TweetArticleContent", _article_payload())
+        ],
+    )
+
+    sources = fx._fetch_x_link_sources(
+        _FakeSequenceContext([status_page, article_page]), _STATUS_URL
+    )
+
+    assert len(sources) == 2
+    direct, article = sources
+    assert isinstance(direct, ContentSourceSuccess)
+    assert direct.url == _STATUS_URL
+    assert direct.text == "Read the full article"
+    assert isinstance(article, ContentSourceSuccess)
+    assert article.url == _ARTICLE_URL
+    assert article.title == "Structured Read"
+    assert article.blocks
+
+
 def test_fetch_rendered_structured_path_builds_ordered_blocks(monkeypatch):
     # Mock trafilatura so the parser test never imports/runs the real extractor
     # (the truncation tripwire calls trafilatura.extract even on the structured
@@ -336,6 +444,24 @@ def test_fetch_rendered_falls_back_to_trafilatura_when_no_graphql(monkeypatch):
     assert source.text == "fallback body"
     assert source.blocks == []
     assert source.title is None
+
+
+def test_fetch_rendered_rejects_x_js_disabled_interstitial(monkeypatch):
+    interstitial = (
+        "We've detected that JavaScript is disabled in this browser. "
+        "Please enable JavaScript or switch to a supported browser to continue using x.com. "
+        "You can see a list of supported browsers in our Help Center. "
+        "Help Center Terms of Service Privacy Policy Cookie Policy Imprint Ads info © 2026 X Corp."
+    )
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: interstitial)
+    page = _FakePage(url=_ARTICLE_URL, html="<html>body</html>", responses=[])
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.kind == "x_article"
+    assert source.failure_reason == "js_required"
+    assert source.http_status == 200
+    assert "JavaScript" in source.error
 
 
 def test_fetch_rendered_falls_back_when_captured_payload_is_malformed(monkeypatch):

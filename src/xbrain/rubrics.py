@@ -13,10 +13,11 @@ import yaml
 
 from xbrain.models import Topic
 
-# Case-insensitive sniff for any leftover `{...language...}` placeholder
-# after substitution — catches typos like `{Language}` or `{LANGUAGE}` that
-# str.replace("{language}", ...) would silently miss.
-_LEFTOVER_PLACEHOLDER = re.compile(r"\{[^}]*language[^}]*\}", re.IGNORECASE)
+# Case-insensitive sniff for a leftover language placeholder after substitution
+# — catches typos like `{Language}` or `{LANGUAGE}` that
+# str.replace("{language}", ...) would silently miss without mistaking JSON
+# examples containing an `extracted_text_language` key for placeholders.
+_LEFTOVER_PLACEHOLDER = re.compile(r"\{\s*language\s*\}", re.IGNORECASE)
 
 _PKG = Path(__file__).resolve().parent
 _RUBRICS_DIR = _PKG / "rubrics"
@@ -26,34 +27,31 @@ _GUARDRAILS = _PKG / "guardrails.yaml"
 # `api` executor prompt and the worksheet export so both truncate identically.
 ARTICLE_CHAR_LIMIT = 4000
 
-# Max characters of an `x_video` transcript passed to the per-item ENRICH prompt
-# (#44). A 72-min talk transcribes to ~68k chars, but the LLM saturates on
-# topic + gist far sooner, so we cap at 12000 chars (~3k tokens, ~3× the article
-# limit): the first ~13 minutes of speech, enough to assign a real
-# `primary_topic` + summary without a single long talk blowing the prompt.
+# Max characters of an `x_video` executive summary passed to the per-item ENRICH
+# prompt. Raw video transcripts are retained as vault reference artifacts only;
+# they must not feed enrich/topics/dashboard/Ask.
 # Shared by the `api` executor prompt and the worksheet export so both truncate
 # identically.
 TRANSCRIPT_CHAR_LIMIT = 12000
 
-# Tighter per-video cap for the TOPIC-page synthesis prompt (#44). A single topic
-# can gather many video items, so each member's transcript is trimmed to 2000
+# Tighter per-video cap for the TOPIC-page synthesis prompt. A single topic can
+# gather many video items, so each member's executive summary is trimmed to 2000
 # chars (~500 tokens): the total token cost stays bounded even for a topic with a
-# dozen talks, while every video still contributes more evidence than its
-# one-line summary alone.
+# dozen videos.
 TOPIC_TRANSCRIPT_CHAR_LIMIT = 2000
 
 
 def truncate_transcript(text: str, limit: int) -> str:
-    """Trim a transcript to `limit` chars, signposting when it was cut.
+    """Trim video text to `limit` chars, signposting when it was cut.
 
     Unlike the silent article slice (`text[:ARTICLE_CHAR_LIMIT]`), a truncated
-    transcript carries an explicit ``[… transcript truncated …]`` marker so the
-    LLM does not read the cut point as the end of the talk. Returns `text`
+    video summary carries an explicit ``[… video content truncated …]`` marker
+    so the LLM does not read the cut point as complete coverage. Returns `text`
     unchanged when it already fits within `limit`.
     """
     if len(text) <= limit:
         return text
-    return text[:limit].rstrip() + "\n[… transcript truncated …]"
+    return text[:limit].rstrip() + "\n[… video content truncated …]"
 
 
 def load_rubric(name: str, *, language: str | None = None) -> str:

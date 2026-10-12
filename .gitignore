@@ -7,13 +7,19 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+.xbrain-cache/
 auth/storage_state.json
+auth/google_drive_credentials.json
+auth/google_drive_token.json
+auth/google_drive_selection.json
 *.tmp
 
 # Personal data and config — never commit (see launch plan §7)
 data/*
 !data/.gitkeep
 config.toml
+.env
+!.env.example
 
 # Working docs (not tracked)
 zz-support-files/

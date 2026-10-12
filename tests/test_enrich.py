@@ -1,7 +1,11 @@
 # tests/test_enrich.py
 from datetime import datetime, timezone
 
-from xbrain.enrich import apply_enrichment, items_pending_enrichment
+from xbrain.enrich import (
+    apply_enrichment,
+    items_for_taxonomy_reenrichment,
+    items_pending_enrichment,
+)
 from xbrain.models import Author, Enrichment, Item
 
 
@@ -32,6 +36,63 @@ def test_apply_enrichment_attaches_result():
     assert items_pending_enrichment({"1": item}) == []
 
 
+def test_items_for_taxonomy_reenrichment_selects_weak_assignments():
+    strong = _item("1")
+    apply_enrichment(
+        strong,
+        Enrichment(
+            enriched_at=datetime.now(timezone.utc),
+            executor="api",
+            summary="s",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+            topic_confidence="high",
+        ),
+    )
+    misc = _item("2")
+    apply_enrichment(
+        misc,
+        Enrichment(
+            enriched_at=datetime.now(timezone.utc),
+            executor="api",
+            summary="s",
+            primary_topic="misc",
+            topics=["misc"],
+            topic_confidence="high",
+        ),
+    )
+    unknown = _item("3")
+    apply_enrichment(
+        unknown,
+        Enrichment(
+            enriched_at=datetime.now(timezone.utc),
+            executor="api",
+            summary="s",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+        ),
+    )
+    suggested = _item("4")
+    apply_enrichment(
+        suggested,
+        Enrichment(
+            enriched_at=datetime.now(timezone.utc),
+            executor="api",
+            summary="s",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+            topic_confidence="medium",
+            suggested_new_topics=["modern-statistics"],
+        ),
+    )
+
+    selected = items_for_taxonomy_reenrichment(
+        {"1": strong, "2": misc, "3": unknown, "4": suggested}
+    )
+
+    assert [item.id for item in selected] == ["2", "3", "4"]
+
+
 def test_enrich_with_executor_attaches_valid_judgments():
     from xbrain.enrich import enrich_with_executor
     from xbrain.executors.base import EnrichmentJudgment
@@ -52,6 +113,33 @@ def test_enrich_with_executor_attaches_valid_judgments():
     enriched, invalid = enrich_with_executor(store, _Fake(), vocab)
     assert enriched == 2 and invalid == []
     assert store["1"].enriched.primary_topic == "ai-coding"
+
+
+def test_enrich_with_executor_persists_taxonomy_diagnostics():
+    from xbrain.enrich import enrich_with_executor
+    from xbrain.executors.base import EnrichmentJudgment
+    from xbrain.models import Topic
+
+    store = {"1": _item("1")}
+    vocab = [Topic(slug="misc", description="d")]
+
+    class _Fake:
+        def enrich_items(self, items, vocab):
+            return [
+                EnrichmentJudgment(
+                    item_id="1",
+                    summary="resumen",
+                    primary_topic="misc",
+                    topics=["misc"],
+                    topic_confidence="low",
+                    suggested_new_topics=["modern-statistics"],
+                )
+            ]
+
+    enriched, invalid = enrich_with_executor(store, _Fake(), vocab)
+    assert enriched == 1 and invalid == []
+    assert store["1"].enriched.topic_confidence == "low"
+    assert store["1"].enriched.suggested_new_topics == ["modern-statistics"]
 
 
 def test_enrich_with_executor_rejects_invalid_judgment():
@@ -87,6 +175,29 @@ def test_apply_worksheet_judgments_attaches_valid_dicts():
     )
     assert enriched == 1 and invalid == []
     assert store["1"].enriched.executor == "claude-code"
+
+
+def test_apply_worksheet_judgments_persists_taxonomy_diagnostics():
+    from xbrain.enrich import apply_worksheet_judgments
+    from xbrain.models import Topic
+
+    store = {"1": _item("1")}
+    judgments = [
+        {
+            "item_id": "1",
+            "summary": "s",
+            "primary_topic": "misc",
+            "topics": ["misc"],
+            "topic_confidence": "low",
+            "suggested_new_topics": ["modern-statistics"],
+        }
+    ]
+    enriched, invalid = apply_worksheet_judgments(
+        store, judgments, [Topic(slug="misc", description="d")]
+    )
+    assert enriched == 1 and invalid == []
+    assert store["1"].enriched.topic_confidence == "low"
+    assert store["1"].enriched.suggested_new_topics == ["modern-statistics"]
 
 
 def test_apply_worksheet_judgments_handles_null_topics():

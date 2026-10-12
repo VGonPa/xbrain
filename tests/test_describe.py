@@ -1,6 +1,6 @@
 """Tests for `xbrain.describe` — the vision-describe orchestrator.
 
-The Anthropic client is faked via `tests.conftest.FakeAnthropic`; no
+The LLM client is faked via `tests.conftest.FakeLLMClient`; no
 real API calls. Photo bytes are written to a tmp `data/media/` tree so
 the orchestrator can read them through its normal `_load_bytes` path.
 
@@ -34,6 +34,9 @@ from xbrain.describe import (
     emit_summary_line,
 )
 from xbrain.models import (
+    ArticleImageBlock,
+    Content,
+    ContentSourceSuccess,
     Author,
     Item,
     MediaPhotoDescribed,
@@ -43,7 +46,7 @@ from xbrain.models import (
     MediaVideoPending,
 )
 
-from tests.conftest import FakeAnthropic, FakeBlock, FakeResponse
+from tests.conftest import FakeLLMClient, FakeBlock, FakeResponse
 
 # --------------------------------------------------------------------- fixtures + helpers
 
@@ -135,6 +138,23 @@ def _item(item_id: str, media: list) -> Item:
     )
 
 
+def _article_item(item_id: str, block: ArticleImageBlock) -> Item:
+    item = _item(item_id, [])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_article",
+                url=f"https://x.com/i/article/{item_id}",
+                title="Article",
+                text="",
+                blocks=[block],
+            )
+        ],
+    )
+    return item
+
+
 def _judgment(index: int, *, decorative: bool = False, description: str = "ok") -> dict:
     """Build one per-image judgment dict matching the wire contract."""
     return {
@@ -147,7 +167,7 @@ def _judgment(index: int, *, decorative: bool = False, description: str = "ok") 
 def _payload(judgments: list[dict]) -> list[dict]:
     """Wrap a list of judgments as the JSON list the rubric expects.
 
-    `FakeAnthropic` JSON-encodes the payload as `json.dumps(payload)` —
+    `FakeLLMClient` JSON-encodes the payload as `json.dumps(payload)` —
     a list payload survives that path unchanged because `dumps` accepts
     any JSON-serialisable value, not just dicts. The orchestrator's
     parser pulls the text from `.content[0].text` and parses it as a
@@ -159,7 +179,7 @@ def _payload(judgments: list[dict]) -> list[dict]:
 class _FakeListResponse:
     """A `FakeResponse`-shaped object whose `.content[0].text` is a JSON list.
 
-    `FakeAnthropic` wraps payloads in `FakeResponse(payload)` which calls
+    `FakeLLMClient` wraps payloads in `FakeResponse(payload)` which calls
     `json.dumps(payload)` — that path expects a dict. For describe we
     need to ship a list payload, so we build a parallel response
     type that mirrors the shape `_parse_batch_response` consumes.
@@ -386,6 +406,22 @@ def test_validate_judgment_entry_rejects_non_bool_decorative():
         )
 
 
+def test_validate_judgment_entry_rejects_invalid_extracted_text_confidence():
+    """OCR confidence is constrained so downstream rendering/filters can trust it."""
+    with pytest.raises(ValueError, match="extracted_text_confidence"):
+        _validate_judgment_entry(
+            {
+                "index": 0,
+                "is_decorative": False,
+                "description": "A markdown screenshot.",
+                "extracted_text": "## Rules",
+                "extracted_text_language": "markdown",
+                "extracted_text_confidence": "certain",
+            },
+            batch_size=1,
+        )
+
+
 # --------------------------------------------------------------------- orchestrator
 
 
@@ -412,6 +448,128 @@ def test_describe_all_transitions_downloaded_to_described(tmp_path: Path):
     assert report.photos_described == 1
     assert report.photos_failed == 0
     assert report.batches_attempted == 1
+
+
+def test_describe_all_transitions_downloaded_article_image_to_described(tmp_path: Path):
+    """Inline Article images are described through the same photo-state union."""
+    media_root = tmp_path / "media"
+    entry = _downloaded(item_id="1", index=0, media_root=media_root)
+    block = ArticleImageBlock(media=entry, alt="Architecture diagram")
+    item = _article_item("1", block)
+    store = {"1": item}
+    client = _FakeVisionClient([[_judgment(0, description="A system diagram.")]])
+
+    report = describe_all(
+        store,
+        media_root,
+        model="xiaomi/mimo-v2.5",
+        output_language="English",
+        description_version="v1",
+        client=client,
+    )
+
+    assert isinstance(block.media, MediaPhotoDescribed)
+    assert block.media.description == "A system diagram."
+    assert report.items_processed == 1
+    assert report.photos_described == 1
+
+
+def test_describe_all_repairs_decorative_article_cover_without_force(tmp_path: Path):
+    """A lead image with no caption is stale even when its rubric version is current."""
+    media_root = tmp_path / "media"
+    downloaded = _downloaded(item_id="1", index=0, media_root=media_root)
+    cover = MediaPhotoDescribed(
+        url=downloaded.url,
+        local_path=downloaded.local_path,
+        width=downloaded.width,
+        height=downloaded.height,
+        bytes_size=downloaded.bytes_size,
+        downloaded_at=downloaded.downloaded_at,
+        is_decorative=True,
+        description="",
+        description_lang="English",
+        description_version="v1",
+        described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+    )
+    block = ArticleImageBlock(media=cover)
+    item = _article_item("1", block)
+    client = _FakeVisionClient(
+        [[_judgment(0, description="A white profile with an exposed red brain.")]]
+    )
+
+    report = describe_all(
+        {"1": item},
+        media_root,
+        model="xiaomi/mimo-v2.5",
+        output_language="English",
+        description_version="v1",
+        client=client,
+    )
+
+    assert report.photos_described == 1
+    assert isinstance(block.media, MediaPhotoDescribed)
+    assert block.media.is_decorative is False
+    assert block.media.description == "A white profile with an exposed red brain."
+    directive = client.messages.calls[0]["messages"][0]["content"][-1]["text"]
+    assert "article lead/cover" in directive
+    assert "Always set is_decorative=false" in directive
+
+
+def test_describe_all_rejects_empty_article_cover_description(tmp_path: Path):
+    media_root = tmp_path / "media"
+    block = ArticleImageBlock(media=_downloaded(item_id="1", index=0, media_root=media_root))
+    item = _article_item("1", block)
+    client = _FakeVisionClient([[_judgment(0, decorative=True)]])
+
+    with pytest.raises(RuntimeError, match="describe batches failed"):
+        describe_all(
+            {"1": item},
+            media_root,
+            model="xiaomi/mimo-v2.5",
+            output_language="English",
+            description_version="v1",
+            client=client,
+        )
+
+    assert isinstance(block.media, MediaPhotoDownloaded)
+
+
+def test_describe_all_persists_extracted_text_fields(tmp_path: Path):
+    """Vision OCR fields are stored separately from the visual description."""
+    media_root = tmp_path / "media"
+    entry = _downloaded(item_id="1", index=0, media_root=media_root)
+    item = _item("1", [entry])
+    store = {"1": item}
+    client = _FakeVisionClient(
+        [
+            [
+                {
+                    "index": 0,
+                    "is_decorative": False,
+                    "description": "A screenshot of a CLAUDE.md rules file.",
+                    "extracted_text": "## Rules\n- Ask before acting.",
+                    "extracted_text_language": "markdown",
+                    "extracted_text_confidence": "high",
+                }
+            ]
+        ]
+    )
+
+    describe_all(
+        store,
+        media_root,
+        model="xiaomi/mimo-v2.5",
+        output_language="English",
+        description_version="v1",
+        client=client,
+    )
+
+    described = item.media[0]
+    assert isinstance(described, MediaPhotoDescribed)
+    assert described.description == "A screenshot of a CLAUDE.md rules file."
+    assert described.extracted_text == "## Rules\n- Ask before acting."
+    assert described.extracted_text_language == "markdown"
+    assert described.extracted_text_confidence == "high"
 
 
 def test_describe_all_is_noop_for_already_described_current_version(tmp_path: Path):
@@ -589,6 +747,39 @@ def test_describe_all_isolates_a_batch_error(tmp_path: Path, capsys):
     # orchestrator stays silent so the CLI is the single source of truth.
     err = capsys.readouterr().err
     assert "SUMMARY:" not in err
+
+
+def test_describe_all_retries_malformed_batch_one_by_one(tmp_path: Path):
+    """A malformed multi-photo JSON response falls back to per-photo calls."""
+    media_root = tmp_path / "media"
+    item = _item(
+        "1",
+        [_downloaded(item_id="1", index=i, media_root=media_root) for i in range(2)],
+    )
+    store = {"1": item}
+    client = _FakeVisionClient(
+        [
+            _FakeTruncatedResponse(),
+            [_judgment(0, description="first image")],
+            [_judgment(0, description="second image")],
+        ]
+    )
+
+    report = describe_all(
+        store,
+        media_root,
+        model="m",
+        output_language="English",
+        description_version="v1",
+        batch_size=2,
+        client=client,
+    )
+
+    assert len(client.messages.calls) == 3
+    assert report.batches_failed == 1
+    assert report.photos_failed == 0
+    assert report.photos_described == 2
+    assert [media.description for media in item.media] == ["first image", "second image"]
 
 
 def test_describe_all_raises_when_every_batch_fails(tmp_path: Path):
@@ -1205,7 +1396,7 @@ def test_fake_response_round_trips():
 
 
 def test_fake_anthropic_records_calls():
-    """`FakeAnthropic.messages.calls` records every kwarg dict — relied on by other tests."""
-    client = FakeAnthropic([{"x": 1}])
+    """`FakeLLMClient.messages.calls` records every kwarg dict — relied on by other tests."""
+    client = FakeLLMClient([{"x": 1}])
     client.messages.create(model="m", system="s", messages=[])
     assert client.messages.calls[0]["model"] == "m"

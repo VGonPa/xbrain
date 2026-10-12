@@ -3,8 +3,9 @@
 Pure selection/derivation logic: given a store of `Item`s, produce one
 `VideoRow` per video media entry, with a derived state (downloaded / failed /
 pending / poster-era), an estimated (or exact, for downloaded) size, the item's
-`primary_topic`, the resolved stream URL and a short text snippet. No network,
-no writes — `list_video_entries` is a pure function over the in-memory store.
+`primary_topic`, the digest state, the resolved stream URL and a short text
+snippet. No network, no writes — `list_video_entries` is a pure function over
+the in-memory store.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import pytest
 
 from xbrain.models import (
     Author,
+    Content,
+    ContentSourceSuccess,
     Enrichment,
     Item,
     MediaPhotoPending,
@@ -42,6 +45,7 @@ def _item(
     source: str = "bookmark",
     text: str = "some note",
     primary_topic: str | None = None,
+    has_video_digest: bool = False,
 ) -> Item:
     item = Item(
         id=item_id,
@@ -59,6 +63,19 @@ def _item(
             enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
             executor="manual",
             primary_topic=primary_topic,
+        )
+    if has_video_digest:
+        item.content = Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url=item.url,
+                    text="Executive summary",
+                    has_speech=True,
+                    raw_transcript="Raw transcript",
+                )
+            ],
         )
     return item
 
@@ -113,6 +130,7 @@ def test_pending_mp4_row_is_pending_state_with_estimated_size():
     assert row.id == "1"
     assert row.url == "https://x.com/a/status/1"
     assert row.state == "pending"
+    assert row.digest == "pending"
     assert row.topic == "ai"
     assert row.mp4_url == _MP4_URL
     # bitrate 2_176_000 bits/s × 30_000 ms / 8000 = 8_160_000 bytes
@@ -150,6 +168,13 @@ def test_missing_topic_is_none():
     store = {"1": _item("1", media=[_pending()])}
     row = list_video_entries(store)[0]
     assert row.topic is None
+
+
+def test_video_digest_done_is_independent_from_media_pending_state():
+    store = {"1": _item("1", media=[_pending()], has_video_digest=True)}
+    row = list_video_entries(store)[0]
+    assert row.state == "pending"
+    assert row.digest == "done"
 
 
 def test_photos_are_ignored():
@@ -212,8 +237,8 @@ def test_filter_by_source():
         "t": _item("t", media=[_pending()], source="own_tweet"),
     }
     assert [r.id for r in list_video_entries(store, source="bookmarks")] == ["b"]
-    assert [r.id for r in list_video_entries(store, source="tweets")] == ["t"]
-    assert {r.id for r in list_video_entries(store, source="all")} == {"b", "t"}
+    assert list_video_entries(store, source="tweets") == []
+    assert [r.id for r in list_video_entries(store, source="all")] == ["b"]
 
 
 def test_invalid_source_raises():
@@ -234,10 +259,20 @@ def test_row_to_json_schema_is_stable():
     store = {"1": _item("1", media=[_pending()], primary_topic="ai")}
     row = list_video_entries(store)[0]
     payload = row_to_json(row)
-    assert set(payload) == {"id", "url", "state", "topic", "size_bytes", "mp4_url", "text"}
+    assert set(payload) == {
+        "id",
+        "url",
+        "state",
+        "digest",
+        "topic",
+        "size_bytes",
+        "mp4_url",
+        "text",
+    }
     # round-trips through json cleanly
     assert json.loads(json.dumps(payload)) == payload
     assert payload["topic"] == "ai"
+    assert payload["digest"] == "pending"
 
 
 def test_row_to_json_missing_topic_is_null():
@@ -258,7 +293,7 @@ def test_row_to_json_poster_era_mp4_url_is_null():
 def test_format_video_table_has_headers_and_rows():
     store = {"1": _item("1", media=[_pending()], primary_topic="ai")}
     table = format_video_table(list_video_entries(store))
-    assert "ID" in table and "STATE" in table and "TOPIC" in table
+    assert "ID" in table and "STATE" in table and "DIGEST" in table and "TOPIC" in table
     assert "pending" in table
     assert "ai" in table
 

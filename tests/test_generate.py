@@ -1,8 +1,11 @@
 # tests/test_generate.py
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.generate import generate
+from xbrain.generate import _storage_summary
 from xbrain.models import (
     Author,
     Content,
@@ -35,6 +38,62 @@ def test_generate_creates_index_log_and_only_link_notes(tmp_path: Path):
     assert (tmp_path / "log.md").exists()
     notes = list((tmp_path / "items").glob("*.md"))
     assert len(notes) == 1
+
+
+def test_generate_dashboard_updated_stamp_includes_hour_and_minute(tmp_path: Path):
+    store = {"1": _item("1", with_link=True)}
+
+    generate(store, tmp_path)
+
+    html = (tmp_path / "dashboard.html").read_text(encoding="utf-8")
+    assert re.search(r'"updated": "[A-Z]{3} \d{1,2}, \d{4} \d{2}:\d{2} UTC"', html)
+
+
+def test_generate_writes_derived_obsidian_canvas_without_overwriting_editable_copy(
+    tmp_path: Path,
+):
+    item = _item("1", with_link=True)
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="manual",
+        summary="Agent coding note",
+        primary_topic="ai-coding",
+        topics=["ai-coding", "ai-agents"],
+        topic_confidence="high",
+    )
+    topics_dir = tmp_path / "topics"
+    topics_dir.mkdir()
+    (topics_dir / "ai-coding.md").write_text("# AI Coding", encoding="utf-8")
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir()
+    editable = maps_dir / "xbrain-map.canvas"
+    editable.write_text("manual canvas", encoding="utf-8")
+
+    generate({"1": item}, tmp_path)
+
+    canvas_path = maps_dir / "xbrain-map.generated.canvas"
+    assert canvas_path.exists()
+    assert editable.read_text(encoding="utf-8") == "manual canvas"
+    canvas = json.loads(canvas_path.read_text(encoding="utf-8"))
+    files = {node["file"] for node in canvas["nodes"] if node["type"] == "file"}
+    assert "topics/ai-coding.md" in files
+    assert any(path.startswith("items/") and path.endswith("-1.md") for path in files)
+    assert canvas["edges"]
+
+
+def test_generate_removes_stale_item_notes(tmp_path: Path):
+    from xbrain.notes_io import note_filename
+
+    item = _item("1", with_link=True)
+    items_dir = tmp_path / "items"
+    items_dir.mkdir(parents=True)
+    stale = items_dir / "stale.md"
+    stale.write_text("old", encoding="utf-8")
+
+    generate({"1": item}, tmp_path)
+
+    assert (items_dir / note_filename(item)).exists()
+    assert not stale.exists()
 
 
 def test_regeneration_preserves_user_content_after_marker(tmp_path: Path):
@@ -89,6 +148,54 @@ def test_generate_renders_downloaded_photo_as_obsidian_embed(tmp_path: Path):
     assert (output_dir / "_media" / "1" / "0.png").exists()
 
 
+def test_generate_skips_media_copy_when_media_root_is_vault_media(tmp_path: Path):
+    from xbrain.models import MediaPhotoDownloaded
+
+    output_dir = tmp_path / "vault"
+    media_root = output_dir / "_media"
+    photo_dir = media_root / "1"
+    photo_dir.mkdir(parents=True)
+    photo = photo_dir / "0.png"
+    photo.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/A.png",
+            local_path="1/0.png",
+            width=10,
+            height=8,
+            bytes_size=12,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    generate({"1": item}, output_dir, media_root=media_root)
+
+    note = next((output_dir / "items").glob("*.md"))
+    assert "![[_media/1/0.png]]" in note.read_text(encoding="utf-8")
+    assert photo.read_bytes() == b"\x89PNG\r\n\x1a\nfake"
+
+
+def test_storage_summary_counts_vault_media_when_data_media_is_absent(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    output_dir = tmp_path / "vault" / "learnings" / "x-knowledge"
+    data_dir.mkdir(parents=True)
+    (data_dir / "items.json").write_text("{}", encoding="utf-8")
+    media = output_dir / "_media" / "1" / "0.png"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"image-bytes")
+
+    summary = _storage_summary(data_dir, output_dir)
+
+    assert summary["media_bytes"] == len(b"image-bytes")
+    assert summary["mirrored_media_bytes"] == 0
+    assert summary["total_bytes"] == len(b"{}") + len(b"image-bytes")
+    assert summary["data_bytes"] == len(b"{}")
+    assert summary["vault_bytes"] == len(b"image-bytes")
+    assert summary["media_storage"] == "vault/_media"
+
+
 def test_generate_renders_failed_photo_as_warning(tmp_path: Path):
     """A `MediaPhotoFailed` becomes a one-line ⚠ warning carrying URL + reason."""
     from xbrain.models import MediaPhotoFailed
@@ -136,7 +243,7 @@ def test_generate_skips_pending_photo_silently(tmp_path: Path):
 
 def test_generate_renders_video_pending_as_clickable_play_link(tmp_path: Path):
     """The video URL is now the playable mp4 (not the poster), so render it as a
-    labelled clickable link, flagged as pending local download."""
+    labelled external link, explicitly not a local download."""
     from xbrain.models import MediaVideoPending
 
     item = _item("1", with_link=True)
@@ -145,14 +252,12 @@ def test_generate_renders_video_pending_as_clickable_play_link(tmp_path: Path):
     generate({"1": item}, tmp_path)
     note = next((tmp_path / "items").glob("*.md"))
     body = note.read_text(encoding="utf-8")
-    assert "[Ver vídeo](https://video.twimg.com/high.mp4?tag=12)" in body
-    assert "pendiente de descarga" in body
+    assert "[Ver vídeo externo](https://video.twimg.com/high.mp4?tag=12)" in body
+    assert "no se descarga" in body
 
 
-def test_generate_renders_downloaded_video_as_obsidian_embed(tmp_path: Path):
-    """A `MediaVideoDownloaded` becomes a `![[_media/<id>/<n>.mp4]]` embed and the
-    mp4 bytes are mirrored into the vault's `_media/` tree (self-contained vault),
-    exactly like a downloaded photo."""
+def test_generate_never_embeds_downloaded_video_bytes(tmp_path: Path):
+    """Even a legacy `MediaVideoDownloaded` is rendered as an external link only."""
     from xbrain.models import MediaVideoDownloaded
 
     media_root = tmp_path / "media"
@@ -176,8 +281,9 @@ def test_generate_renders_downloaded_video_as_obsidian_embed(tmp_path: Path):
     output_dir = tmp_path / "vault"
     generate({"1": item}, output_dir, media_root=media_root)
     body = next((output_dir / "items").glob("*.md")).read_text(encoding="utf-8")
-    assert "![[_media/1/0.mp4]]" in body
-    assert (output_dir / "_media" / "1" / "0.mp4").exists()
+    assert "![[_media/1/0.mp4]]" not in body
+    assert "[Ver vídeo externo](https://video.twimg.com/x.mp4)" in body
+    assert not (output_dir / "_media" / "1" / "0.mp4").exists()
 
 
 def test_generate_renders_failed_video_as_warning(tmp_path: Path):
@@ -653,7 +759,7 @@ def test_generate_video_digest_spanish_header(tmp_path: Path):
     assert "Cuerpo de la transcripción." in note
 
 
-# ----------------------------------------------------------- x_video slide frames (#44 PR4)
+# ----------------------------------------------------------- x_video text artifacts
 
 
 def _frames():
@@ -665,11 +771,8 @@ def _frames():
     ]
 
 
-def test_generate_embeds_and_mirrors_slide_frames(tmp_path: Path):
-    """A slide-heavy `x_video` source (#44 PR4) embeds each kept slide into the
-    digest section the SAME way downloaded photos are embedded — `![[_media/...]]`
-    — with its vision description as a caption, and the image is mirrored from
-    `media_root` into the vault's `_media/` tree so the embed resolves."""
+def test_generate_ignores_legacy_slide_frames(tmp_path: Path):
+    """Legacy frame metadata must not render or mirror visual video artifacts."""
     media_root = tmp_path / "media"
     (media_root / "7" / "frames").mkdir(parents=True)
     (media_root / "7" / "frames" / "0.png").write_bytes(b"\x89PNG slide0")
@@ -681,12 +784,9 @@ def test_generate_embeds_and_mirrors_slide_frames(tmp_path: Path):
 
     assert "## Video digest: The Talk" in note
     assert "The talk transcript." in note
-    assert "![[_media/7/frames/0.png]]" in note  # embedded like a photo
-    assert "![[_media/7/frames/1.png]]" in note
-    assert "A title slide." in note  # the vision description as caption
-    # mirrored into the self-contained vault _media/ tree
-    assert (tmp_path / "_media" / "7" / "frames" / "0.png").exists()
-    assert (tmp_path / "_media" / "7" / "frames" / "1.png").exists()
+    assert "_media/7/frames" not in note
+    assert "A title slide." not in note
+    assert not (tmp_path / "_media" / "7" / "frames").exists()
 
 
 def test_generate_no_frames_note_is_unchanged(tmp_path: Path):
@@ -703,63 +803,36 @@ def test_generate_no_frames_note_is_unchanged(tmp_path: Path):
     assert "_media" not in note_a  # no embed lines when there are no frames
 
 
-def test_generate_silent_slide_deck_embeds_frames(tmp_path: Path):
-    """A SILENT slide deck (no speech but with frames) renders the digest heading +
-    the slide embeds — the visual layer is where a screen-only video's content
-    lives — instead of the bare silent-video line."""
-    media_root = tmp_path / "media"
-    (media_root / "7" / "frames").mkdir(parents=True)
-    (media_root / "7" / "frames" / "0.png").write_bytes(b"\x89PNG s0")
-    (media_root / "7" / "frames" / "1.png").write_bytes(b"\x89PNG s1")
-
-    store = {"7": _video_item(text="", has_speech=False, frames=_frames())}
-    generate(store, tmp_path, media_root=media_root)
-    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
-    assert "## Video digest: The Talk" in note
-    assert "![[_media/7/frames/0.png]]" in note
-    assert "silent video" not in note.lower()
-
-
-def test_generate_frames_embed_without_media_root(tmp_path: Path):
-    """Like photos, the frame embed lines render even without `media_root` (the URL
-    is in the data; only the mirrored bytes are missing) — a missing mirror renders
-    a broken embed, not a crash."""
-    store = {"7": _video_item(text="body", frames=_frames())}
-    generate(store, tmp_path)  # no media_root
-    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
-    assert "![[_media/7/frames/0.png]]" in note
-
-
-def test_slide_caption_collapses_internal_newlines(tmp_path: Path):
-    """A multi-line vision description must render as ONE valid `> ...` blockquote
-    caption: internal newlines are collapsed to spaces so the second line can't
-    spill OUT of the blockquote (an Obsidian caption is a single line)."""
-    from xbrain.generate import _slide_embed_lines
-    from xbrain.models import VideoFrame
-
-    frames = [
-        VideoFrame(
-            timestamp=1.0,
-            local_path="7/frames/0.png",
-            description="First line of the slide.\nSecond line of the slide.",
-        )
-    ]
-    lines = _slide_embed_lines(frames)
-    # Every emitted line is truly a single line — none carries an internal newline
-    # that would break the blockquote when the note is joined with "\n".
-    assert all("\n" not in line for line in lines)
-    assert "> First line of the slide. Second line of the slide." in lines
-
-
-def test_generate_silent_line_wins_over_stale_text_when_no_speech(tmp_path: Path):
-    """Defensive: a malformed third-party transcriber that reports `has_speech=False`
-    yet leaves non-empty `text` must still render the SILENT line — the tweet-signal
-    truth — not the stale/contradictory transcript text (and no digest heading)."""
-    generate({"7": _video_item(text="stale", has_speech=False, frames=[])}, tmp_path)
+def test_generate_silent_line_when_video_has_no_summary(tmp_path: Path):
+    """No summary means no analyzable video content, even if legacy flags exist."""
+    generate({"7": _video_item(text="", has_speech=False, frames=_frames())}, tmp_path)
     note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
     assert "silent video" in note.lower() or "sin voz" in note.lower()
-    assert "stale" not in note
     assert "## Video digest" not in note
+
+
+def test_generate_writes_video_summary_and_transcript_artifacts(tmp_path: Path):
+    """Raw transcript is stored near the summary, but item note includes only summary."""
+    item = _video_item(text="### Executive Summary\n\nUseful summary.")
+    source = item.content.sources[0]
+    source.raw_transcript = "Full original transcript."
+    source.raw_transcript_url = "https://video.example/captions.vtt"
+    source.raw_transcript_format = "vtt"
+    source.language = "en"
+
+    generate({"7": item}, tmp_path)
+
+    item_note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "Useful summary." in item_note
+    assert "Full original transcript." not in item_note
+    assert "../videos/" in item_note
+
+    folder = next((tmp_path / "videos").iterdir())
+    summary = (folder / "summary.md").read_text(encoding="utf-8")
+    transcript = (folder / "transcript.md").read_text(encoding="utf-8")
+    assert "Useful summary." in summary
+    assert "Full original transcript." in transcript
+    assert "xbrain_exclude: true" in transcript
 
 
 # --------------------------------------------------------------- topic_style
@@ -1081,6 +1154,44 @@ def test_generate_article_described_image_renders_caption(tmp_path: Path):
     assert "![[_media/99/article/0.png]]" in body
     assert "> A labeled architecture diagram." in body
     assert (tmp_path / "_media" / "99" / "article" / "0.png").exists()
+
+
+def test_generate_article_described_image_keeps_extracted_text_out_of_visible_note(
+    tmp_path: Path,
+):
+    """OCR text from an image is stored data, not visible note body noise."""
+    from xbrain.models import ArticleImageBlock, MediaPhotoDescribed
+
+    media_root = tmp_path / "media"
+    (media_root / "99" / "article").mkdir(parents=True)
+    (media_root / "99" / "article" / "0.png").write_bytes(b"\x89PNG d0")
+
+    block = ArticleImageBlock(
+        media=MediaPhotoDescribed(
+            url="https://pbs.twimg.com/media/d.png",
+            local_path="99/article/0.png",
+            width=10,
+            height=8,
+            bytes_size=12,
+            downloaded_at=_ART_TS,
+            is_decorative=False,
+            description="Screenshot of a CLAUDE.md file with project rules.",
+            description_lang="English",
+            description_version="v1",
+            described_at=_ART_TS,
+            extracted_text="## Project context\nThis workspace is for research.\n\n## Rules\n- Ask before acting.",
+            extracted_text_language="markdown",
+            extracted_text_confidence="high",
+        ),
+        alt=None,
+    )
+    generate({"99": _article_item(blocks=[block])}, tmp_path, media_root=media_root)
+    body = next((tmp_path / "items").glob("*-99.md")).read_text(encoding="utf-8")
+
+    assert "> Screenshot of a CLAUDE.md file with project rules." in body
+    assert "## Project context" not in body
+    assert "This workspace is for research." not in body
+    assert "- Ask before acting." not in body
 
 
 def test_generate_article_empty_blocks_falls_back_to_text(tmp_path: Path):

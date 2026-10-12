@@ -15,6 +15,7 @@ from xbrain.snapshot import (
     snapshot_create,
     snapshot_list,
     snapshot_prune,
+    snapshot_prune_auto,
     snapshot_restore,
     snapshot_show,
     snapshots_dir,
@@ -299,6 +300,36 @@ def test_snapshot_prune_rejects_negative_keep_last(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         snapshot_prune(data_dir, keep_last=-1)
+
+
+def test_snapshot_prune_auto_keeps_manual_snapshots(tmp_path: Path) -> None:
+    """Automatic retention must not delete user-created checkpoints."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    manual = snapshot_create(data_dir, command="manual", dir_label="checkpoint")[0]
+    auto_paths = [
+        snapshot_create(data_dir, command="media", dir_label=f"pre-media-{i}")[0] for i in range(3)
+    ]
+
+    deleted = snapshot_prune_auto(data_dir, keep_last=1)
+
+    remaining = {path for path, _ in snapshot_list(data_dir)}
+    assert deleted == 2
+    assert manual in remaining
+    assert auto_paths[-1] in remaining
+    assert auto_paths[0] not in remaining
+    assert auto_paths[1] not in remaining
+
+
+def test_snapshot_prune_auto_zero_disables_pruning(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    snapshot_create(data_dir, command="media", dir_label="pre-media-a")
+
+    deleted = snapshot_prune_auto(data_dir, keep_last=0)
+
+    assert deleted == 0
+    assert len(snapshot_list(data_dir)) == 1
 
 
 def test_snapshot_show_raises_for_unknown_snapshot(tmp_path: Path) -> None:

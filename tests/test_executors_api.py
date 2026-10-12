@@ -2,9 +2,19 @@
 from datetime import datetime, timezone
 
 from xbrain.executors.api import ApiExecutor, _user_prompt
-from xbrain.models import Author, Item, Link, Topic
+from xbrain.models import (
+    ArticleImageBlock,
+    ArticleTextBlock,
+    Author,
+    Content,
+    ContentSourceSuccess,
+    Item,
+    Link,
+    Topic,
+    VideoFrame,
+)
 
-from tests.conftest import FakeAnthropic
+from tests.conftest import FakeLLMClient
 
 
 def _item(item_id: str, **extra) -> Item:
@@ -28,11 +38,26 @@ VOCAB = [
 
 def test_api_executor_returns_one_judgment_per_item():
     payload = {"summary": "r", "primary_topic": "ai-coding", "topics": ["ai-coding"]}
-    client = FakeAnthropic([payload, payload])
+    client = FakeLLMClient([payload, payload])
     ex = ApiExecutor(model="claude-haiku-4-5-20251001", output_language="English", client=client)
     out = ex.enrich_items([_item("1"), _item("2")], VOCAB)
     assert {j.item_id for j in out} == {"1", "2"}
     assert len(client.messages.calls) == 2
+
+
+def test_api_executor_returns_taxonomy_diagnostics():
+    payload = {
+        "summary": "r",
+        "primary_topic": "misc",
+        "topics": ["misc"],
+        "topic_confidence": "low",
+        "suggested_new_topics": ["modern-statistics"],
+    }
+    client = FakeLLMClient([payload])
+    ex = ApiExecutor(model="claude-haiku-4-5-20251001", output_language="English", client=client)
+    out = ex.enrich_items([_item("1")], VOCAB)
+    assert out[0].topic_confidence == "low"
+    assert out[0].suggested_new_topics == ["modern-statistics"]
 
 
 def test_api_executor_substitutes_language_in_system_prompt():
@@ -41,7 +66,7 @@ def test_api_executor_substitutes_language_in_system_prompt():
     `language=`, the placeholder leaks and we get wrong-language output.
     """
     payload = {"summary": "r", "primary_topic": "misc", "topics": ["misc"]}
-    client = FakeAnthropic([payload])
+    client = FakeLLMClient([payload])
     ApiExecutor(model="m", output_language="Spanish", client=client).enrich_items(
         [_item("1")], VOCAB
     )
@@ -51,7 +76,7 @@ def test_api_executor_substitutes_language_in_system_prompt():
 
 
 def test_api_executor_sends_the_configured_model():
-    client = FakeAnthropic([{"summary": "r", "primary_topic": "misc", "topics": ["misc"]}])
+    client = FakeLLMClient([{"summary": "r", "primary_topic": "misc", "topics": ["misc"]}])
     ApiExecutor(model="claude-sonnet-4-6", output_language="English", client=client).enrich_items(
         [_item("1")], VOCAB
     )
@@ -83,10 +108,16 @@ def test_user_prompt_includes_link_domains_when_no_folder():
     assert not item.bookmark_folder
 
 
+def test_user_prompt_includes_operator_topic_hints():
+    prompt = _user_prompt(_item("1"), VOCAB, {"1": ["frontier-ai-tools"]})
+    assert "Operator-prioritized taxonomy hints" in prompt
+    assert "- frontier-ai-tools" in prompt
+
+
 def test_api_executor_skips_wrong_shape_response(capsys):
     # A response that is valid JSON but not a judgment object must be skipped
     # with a warning, not silently become an empty enrichment.
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             {"not": "a judgment"},
             {"summary": "r", "primary_topic": "misc", "topics": ["misc"]},
@@ -103,7 +134,7 @@ def test_api_executor_skips_item_on_api_failure(capsys):
     # A transient API failure on one item must not abort the whole batch.
     from anthropic import APIError
 
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             APIError("503 service unavailable", request=None, body=None),
             {"summary": "r", "primary_topic": "misc", "topics": ["misc"]},
@@ -124,7 +155,7 @@ def test_api_executor_raises_when_all_items_fail():
     import pytest
     from anthropic import APIError
 
-    client = FakeAnthropic(
+    client = FakeLLMClient(
         [
             APIError("401 unauthorized", request=None, body=None),
             APIError("401 unauthorized", request=None, body=None),
@@ -180,7 +211,7 @@ def test_api_executor_emits_no_summary_on_total_failure(capsys):
     import pytest
     from anthropic import APIError
 
-    client = FakeAnthropic([APIError("503", request=None, body=None)])
+    client = FakeLLMClient([APIError("503", request=None, body=None)])
     ex = ApiExecutor(model="m", output_language="English", client=client)
     with pytest.raises(RuntimeError):
         ex.enrich_items([_item("1")], VOCAB)
@@ -190,7 +221,7 @@ def test_api_executor_emits_no_summary_on_total_failure(capsys):
 def test_api_executor_emits_no_summary_when_all_succeed(capsys):
     """No failures, no noise: a clean batch stays silent on stderr."""
     payload = {"summary": "r", "primary_topic": "misc", "topics": ["misc"]}
-    client = FakeAnthropic([payload])
+    client = FakeLLMClient([payload])
     ex = ApiExecutor(model="m", output_language="English", client=client)
     ex.enrich_items([_item("1")], VOCAB)
     assert "SUMMARY:" not in capsys.readouterr().err
@@ -229,6 +260,35 @@ def test_user_prompt_includes_content_bearing_image_descriptions():
     prompt = _user_prompt(item, VOCAB)
     assert "Images in this post:" in prompt
     assert "A chart of MMLU scores." in prompt
+
+
+def test_user_prompt_includes_article_image_descriptions_near_article_body():
+    """Described inline Article images travel with the linked article section."""
+    item = _item(
+        "1",
+        content=Content(
+            fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_article",
+                    url="https://x.com/i/article/1",
+                    title="Deep dive",
+                    text="Article paragraph.",
+                    blocks=[
+                        ArticleTextBlock(text="Article paragraph."),
+                        ArticleImageBlock(
+                            media=_described_photo(description="A workflow diagram.")
+                        ),
+                    ],
+                )
+            ],
+        ),
+    )
+    prompt = _user_prompt(item, VOCAB)
+    assert "Images in this post:" not in prompt
+    assert "Linked article (Deep dive):" in prompt
+    assert "Images in linked article:" in prompt
+    assert "A workflow diagram." in prompt
 
 
 def test_user_prompt_excludes_decorative_image_descriptions():
@@ -286,37 +346,70 @@ def _video_item(item_id: str, *, text: str = "a talk about scaling laws", has_sp
 
 
 def test_user_prompt_includes_video_transcript_section():
-    """An `x_video` transcript surfaces under a labelled `Video transcript:` block."""
+    """An `x_video` executive summary surfaces under a labelled block."""
     prompt = _user_prompt(_video_item("1"), VOCAB)
-    assert "Video transcript:" in prompt
+    assert "Video summary:" in prompt
     assert "a talk about scaling laws" in prompt
 
 
 def test_user_prompt_omits_video_transcript_when_no_speech():
     """A no-speech (has_speech=False, empty) transcript adds nothing — no section."""
     prompt = _user_prompt(_video_item("1", text="", has_speech=False), VOCAB)
+    assert "Video summary:" not in prompt
+
+
+def test_user_prompt_includes_visual_only_video_content_section():
+    """Legacy frames alone do not contribute to the analysis prompt."""
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _item(
+        "1",
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/a/status/1/video/1",
+                    title="Visual digest",
+                    text="",
+                    has_speech=False,
+                    frames=[
+                        VideoFrame(
+                            timestamp=3.0,
+                            local_path="1/frames/0.png",
+                            description="A workflow builder canvas.",
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+    prompt = _user_prompt(item, VOCAB)
+    assert "Video summary:" not in prompt
     assert "Video transcript:" not in prompt
+    assert "workflow builder" not in prompt
 
 
 def test_user_prompt_video_transcript_not_relabelled_as_article():
-    """The transcript must render as `Video transcript:`, never mislabelled as a
+    """The summary must render as `Video summary:`, never mislabelled as a
     `Linked article` (would tell the LLM the wrong content type)."""
     prompt = _user_prompt(_video_item("1"), VOCAB)
     assert "Linked article" not in prompt
+    assert "Video summary:" in prompt
 
 
 def test_user_prompt_truncates_a_long_video_transcript():
-    """A 72-min-talk-scale transcript is capped so one item can't blow the prompt."""
+    """A long video executive summary is capped so one item can't blow the prompt."""
     from xbrain.rubrics import TRANSCRIPT_CHAR_LIMIT
 
     long_text = "word " * (TRANSCRIPT_CHAR_LIMIT)  # >> the cap
     prompt = _user_prompt(_video_item("1", text=long_text), VOCAB)
-    assert "transcript truncated" in prompt
+    assert "video content truncated" in prompt
     assert len(prompt) < len(long_text)
 
 
 def test_user_prompt_video_transcript_sits_between_images_and_links_and_article():
-    """The `Video transcript:` block is spliced AFTER the image descriptions and
+    """The `Video summary:` block is spliced AFTER the image descriptions and
     BEFORE the links/article — mirroring the image-ordering guard so an accidental
     reorder in `_user_prompt` is caught (the transcript is post content, read in the
     same natural order as images: post body → images → transcript → links → article)."""
@@ -347,7 +440,7 @@ def test_user_prompt_video_transcript_sits_between_images_and_links_and_article(
     )
     prompt = _user_prompt(item, VOCAB)
     image_idx = prompt.index("Images in this post:")
-    transcript_idx = prompt.index("Video transcript:")
+    transcript_idx = prompt.index("Video summary:")
     links_idx = prompt.index("Links in the post")
     article_idx = prompt.index("Linked article")
     assert image_idx < transcript_idx < links_idx
