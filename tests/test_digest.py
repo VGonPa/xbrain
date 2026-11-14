@@ -436,6 +436,28 @@ def test_fetch_failure_is_recorded_not_fatal(tmp_path: Path):
     assert store["b1"].content.sources[0].kind == "x_video"
 
 
+def test_fetch_failure_logs_the_item_and_its_reason(tmp_path: Path, caplog):
+    """A failed download used to surface ONLY as `fallidos 1` in the summary. The
+    `FetchResult` carried the reason and the batch discarded it. Measured 2026-10-11: a
+    487 MB video failed twice in a row, with a log one line long. `fetch-video` on the
+    same id finally said why: HTTP 403, an expired signed URL. One record has to name
+    the item AND the reason. Two separate mentions somewhere in the log prove nothing."""
+    import logging
+
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    with caplog.at_level(logging.WARNING, logger="xbrain.digest"):
+        digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(fail_ids={"a1"}),
+            transcribe_fn=lambda _p: _speech(),
+            temp_root=tmp_path,
+        )
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("a1" in m and "http_5xx" in m and "boom" in m for m in messages), messages
+
+
 def test_temp_video_discarded_after_transcription(tmp_path: Path):
     """No video bytes persist: the fetched mp4 exists AT transcribe time, and the
     whole temp dir is gone after the run (ephemeral, one-at-a-time)."""

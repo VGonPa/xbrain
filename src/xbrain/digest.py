@@ -455,6 +455,14 @@ def _fetched_path(report: FetchReport, item_id: str) -> Path | None:
     return None
 
 
+def _warn_fetch_failure(report: FetchReport, item_id: str) -> None:
+    """Log WHY `item_id`'s download failed. Without this, the only trace is `fallidos N`."""
+    result = next((r for r in report.results if r.id == item_id), None)
+    reason = result.reason if result is not None else "no fetch result"
+    error = result.error if result is not None else None
+    logger.warning("digest-video: fetch failed for item %s: %s %s", item_id, reason, error or "")
+
+
 def _describe_frames(
     frames: list[KeyFrame],
     visual: VisualConfig,
@@ -758,6 +766,7 @@ def _process_batch(
     fetch_report = fetch_fn(store, [representative], dest_dir)
     fetched = _fetched_path(fetch_report, representative)
     if fetched is None:
+        _warn_fetch_failure(fetch_report, representative)
         return _GroupOutcome(failed=len(batch))
     analysis = _analyze_media(
         fetched,
