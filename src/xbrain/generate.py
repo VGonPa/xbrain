@@ -35,23 +35,11 @@ from xbrain.models import (
     TopicPage,
     VideoFrame,
 )
-from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
+from xbrain.notes_io import default_tail, note_filename, slugify, title_of, user_tail, wrap
 from xbrain.verification import ALL_TARGETS, VerifyTarget, verdict_is_current
 from xbrain.video_digest import _video_source
 
 logger = logging.getLogger(__name__)
-
-_FAILURE_ES: dict[FailureReason, str] = {
-    "not_found": "no encontrado",
-    "forbidden": "acceso denegado",
-    "paywall": "muro de pago",
-    "timeout": "tiempo de espera agotado",
-    "dns_error": "dominio no resuelto",
-    "js_required": "requiere JavaScript",
-    "empty_content": "sin contenido extraíble",
-    "blocked_interstitial": "muro de cookies o login (sin artículo)",
-    "unknown_error": "error desconocido",
-}
 
 
 # Subdirectory under `output_dir` where downloaded photos are mirrored at
@@ -64,7 +52,7 @@ _FAILURE_ES: dict[FailureReason, str] = {
 _VAULT_MEDIA_SUBDIR = "_media"
 
 
-def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
+def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime, strings: Strings) -> str:
     """A one-line, human-readable record of a link that could not be fetched.
 
     Accepts only the failure variant — the type system enforces that
@@ -73,10 +61,13 @@ def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str
     bits: list[str] = []
     if source.http_status:
         bits.append(f"HTTP {source.http_status}")
-    bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
-    detail = " · ".join(bits) or "no se pudo recuperar"
+    bits.append(strings.content_failure_reasons.get(source.failure_reason, source.failure_reason))
+    detail = " · ".join(bits) or strings.broken_link_unknown
     date = fetched_at.date().isoformat()
-    return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
+    return (
+        f"> ⚠ {strings.broken_link}: <{source.url}> — {detail} "
+        f"({strings.broken_link_checked} {date})"
+    )
 
 
 def _blockquote(text: str) -> list[str]:
@@ -205,7 +196,7 @@ def generate(
     (output_dir / "_index.md").write_text(
         _render_index(items, strings, dashboard_href), encoding="utf-8"
     )
-    (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
+    (output_dir / "log.md").write_text(_render_log(items, strings), encoding="utf-8")
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
             if media_root is not None:
@@ -283,12 +274,12 @@ def _write_note(items_dir: Path, item: Item, strings: Strings, topic_style: str)
     block = wrap(_render_note(item, strings, topic_style))
     source = path if path.exists() else _stale_note(items_dir, item, path)
     if source is not None:
-        tail = user_tail(source.read_text(encoding="utf-8"), DEFAULT_TAIL)
+        tail = user_tail(source.read_text(encoding="utf-8"), default_tail(strings))
         if source != path:
             source.unlink()
             logger.info("Migrated note %s -> %s", source.name, path.name)
     else:
-        tail = DEFAULT_TAIL
+        tail = default_tail(strings)
     path.write_text(block + tail, encoding="utf-8")
 
 
@@ -375,7 +366,12 @@ def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[st
     return lines
 
 
-def _render_media_lines(item: Item) -> list[str]:
+def _pending_video_line(url: str, strings: Strings) -> str:
+    """A playable stream not downloaded yet: a clickable link, never a silent drop."""
+    return f"> 🎥 [{strings.watch_video}]({url}) ({strings.pending_download})"
+
+
+def _render_media_lines(item: Item, strings: Strings) -> list[str]:
     """One line per `Item.media` entry, ready to splice into the Tweet section.
 
     Variant handling:
@@ -416,35 +412,21 @@ def _render_media_lines(item: Item) -> list[str]:
             if isinstance(entry, MediaPhotoDescribed) and entry.description:
                 lines.extend(f"> {line}" for line in entry.description.splitlines())
         elif isinstance(entry, MediaPhotoFailed):
-            reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
-            lines.append(f"> ⚠ Foto no disponible ({reason}): <{entry.url}>")
+            reason = strings.media_failure_reasons.get(entry.failure_reason, entry.failure_reason)
+            lines.append(f"> ⚠ {strings.photo_unavailable} ({reason}): <{entry.url}>")
         elif isinstance(entry, MediaVideoFailed):
-            reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
-            lines.append(f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>")
+            reason = strings.media_failure_reasons.get(entry.failure_reason, entry.failure_reason)
+            lines.append(f"> ⚠ {strings.video_unavailable} ({reason}): <{entry.url}>")
         elif isinstance(entry, MediaPhotoPending):
             # Silent: a future `xbrain media` run will advance this entry.
             continue
         elif isinstance(entry, MediaVideoPending):
             # `entry.url` is the playable stream (mp4 or HLS), not the poster,
             # so surface it as a clickable link; bytes are not saved yet.
-            lines.append(f"> 🎥 [Ver vídeo]({entry.url}) (pendiente de descarga)")
+            lines.append(_pending_video_line(entry.url, strings))
         else:
             assert_never(entry)
     return lines
-
-
-# Translations for media failure reasons — symmetric with `_FAILURE_ES`
-# (content-source failures). Kept separate because the vocabularies differ:
-# media has `http_4xx` and `format_error`, content has `js_required` and
-# `paywall`, etc. A wrong translation here doesn't break anything (the slug
-# itself is a fallback), but the operator-facing line should read cleanly.
-_FAILURE_ES_MEDIA: dict[str, str] = {
-    "http_4xx": "URL no encontrada (HTTP 4xx)",
-    "http_5xx": "error del servidor (HTTP 5xx)",
-    "timeout": "tiempo de espera agotado",
-    "format_error": "formato no reconocido",
-    "unknown_error": "error desconocido",
-}
 
 
 def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
@@ -686,7 +668,7 @@ def _video_digest_lines(
     return lines
 
 
-def _article_image_lines(block: ArticleImageBlock) -> list[str]:
+def _article_image_lines(block: ArticleImageBlock, strings: Strings) -> list[str]:
     """Render one inline Article image block (#39 PR5) — embed, warning, or silent.
 
     Mirrors the photo convention in `_render_media_lines`:
@@ -695,8 +677,8 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
       by any caption lines: the author's `alt` text and — for a described image —
       the vision description, each as `> …` blockquote lines (one `>` per physical
       line so a multi-line caption can't spill out of the blockquote).
-    - `MediaPhotoFailed` → a one-line `⚠ Imagen no disponible (<reason>): <url>`
-      note (reason via `_FAILURE_ES_MEDIA`) — visible evidence, never a silent drop.
+    - `MediaPhotoFailed` → a one-line `⚠ <image unavailable> (<reason>): <url>`
+      note (both localised via `strings`) — visible evidence, never a silent drop.
     - `MediaPhotoPending` → silent (a future `xbrain media` run advances it).
 
     A video variant never appears on an article image (the PR3 producer only ever
@@ -709,8 +691,8 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
         lines += _article_caption_lines(block, entry)
         return lines
     if isinstance(entry, MediaPhotoFailed):
-        reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
-        return [f"> ⚠ Imagen no disponible ({reason}): <{entry.url}>"]
+        reason = strings.media_failure_reasons.get(entry.failure_reason, entry.failure_reason)
+        return [f"> ⚠ {strings.image_unavailable} ({reason}): <{entry.url}>"]
     if isinstance(entry, MediaPhotoPending):
         return []  # Silent: a future `xbrain media` run will advance this image.
     logger.warning(
@@ -720,7 +702,7 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
     return []
 
 
-def _article_video_lines(block: ArticleVideoBlock) -> list[str]:
+def _article_video_lines(block: ArticleVideoBlock, strings: Strings) -> list[str]:
     """Render one inline Article VIDEO block — embed or clickable stream link.
 
     Mirrors the video convention in `_render_media_lines` so an article-embedded
@@ -739,10 +721,10 @@ def _article_video_lines(block: ArticleVideoBlock) -> list[str]:
     if isinstance(entry, MediaVideoDownloaded):
         return [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]", *caption]
     if isinstance(entry, MediaVideoFailed):
-        reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
-        return [f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>", *caption]
+        reason = strings.media_failure_reasons.get(entry.failure_reason, entry.failure_reason)
+        return [f"> ⚠ {strings.video_unavailable} ({reason}): <{entry.url}>", *caption]
     if isinstance(entry, MediaVideoPending):
-        return [f"> 🎥 [Ver vídeo]({entry.url}) (pendiente de descarga)", *caption]
+        return [_pending_video_line(entry.url, strings), *caption]
     logger.warning(
         "Article video carries an unexpected %s media variant; skipping its embed.",
         type(entry).__name__,
@@ -790,9 +772,9 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
                 body += [text, ""]
             continue
         if isinstance(block, ArticleImageBlock):
-            media_lines = _article_image_lines(block)
+            media_lines = _article_image_lines(block, strings)
         elif isinstance(block, ArticleVideoBlock):
-            media_lines = _article_video_lines(block)
+            media_lines = _article_video_lines(block, strings)
         else:
             assert_never(block)
         if media_lines:
@@ -839,7 +821,7 @@ def _content_lines(item: Item, strings: Strings) -> list[str]:
         if isinstance(source, ContentSourceSuccess):
             lines += _success_source_lines(item, source, digest_source, strings)
         elif source.kind in ("external_article", "x_article"):
-            lines += [_broken_link_line(source, content.fetched_at), ""]
+            lines += [_broken_link_line(source, content.fetched_at, strings), ""]
     return lines
 
 
@@ -877,7 +859,7 @@ def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
     lines = [_frontmatter(item), "", f"# {title_of(item)}", ""]
     lines += _enrichment_lines(item, strings, topic_style)
     lines += ["## Tweet", "", item.text, ""]
-    media_lines = _render_media_lines(item)
+    media_lines = _render_media_lines(item, strings)
     if media_lines:
         lines += media_lines
         lines.append("")
@@ -888,10 +870,10 @@ def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
     # summary long before the thing it is about.
     lines += _quoted_lines(item, strings)
     if item.links:
-        lines.append("## Enlaces")
+        lines.append(f"## {strings.links_header}")
         lines += [f"- <{link.url}>" for link in item.links]
         lines.append("")
-    lines += [f"[Ver tweet original]({item.url})", ""]
+    lines += [f"[{strings.view_original}]({item.url})", ""]
     lines += _content_lines(item, strings)
     return "\n".join(lines).rstrip()
 
@@ -949,19 +931,19 @@ def _render_index(items: list[Item], strings: Strings, dashboard_href: str) -> s
     lines = [
         "# XBrain",
         "",
-        f"> Generado: {datetime.now(timezone.utc).date().isoformat()}",
+        f"> {strings.generated_label}: {datetime.now(timezone.utc).date().isoformat()}",
         "",
         f"## {strings.summary_header}",
         "",
-        f"- Items totales: {len(items)}",
-        f"- Bookmarks: {bookmarks} · Tweets propios: {own}",
-        f"- Con nota propia: {noted}",
-        f"- Enriquecidos: {enriched}",
+        f"- {strings.total_items}: {len(items)}",
+        f"- Bookmarks: {bookmarks} · {strings.own_posts}: {own}",
+        f"- {strings.with_own_note}: {noted}",
+        f"- {strings.enriched_label}: {enriched}",
         "",
-        "## Índices",
+        f"## {strings.indexes_header}",
         "",
-        "- [[log|Log cronológico completo]]",
-        f"- [📊 Dashboard interactivo]({dashboard_href}) — métricas, drill-down y enlaces (se abre en el navegador)",
+        f"- [[log|{strings.full_log_link}]]",
+        f"- [📊 {strings.dashboard_link}]({dashboard_href}) — {strings.dashboard_hint}",
         "",
         f"## {strings.topics_label}",
         "",
@@ -971,11 +953,12 @@ def _render_index(items: list[Item], strings: Strings, dashboard_href: str) -> s
     return "\n".join(lines) + "\n"
 
 
-def _render_log(items: list[Item]) -> str:
-    lines = ["# Log cronológico", ""]
+def _render_log(items: list[Item], strings: Strings) -> str:
+    lines = [f"# {strings.log_title}", ""]
     for item in items:
         date = item.created_at.date().isoformat()
         snippet = item.text.replace("\n", " ")[:120]
-        link = f" → [[items/{Path(note_filename(item)).stem}|nota]]" if _has_note(item) else ""
+        stem = Path(note_filename(item)).stem
+        link = f" → [[items/{stem}|{strings.note_link}]]" if _has_note(item) else ""
         lines.append(f"- `{date}` @{item.author.handle}: {snippet}{link}")
     return "\n".join(lines) + "\n"

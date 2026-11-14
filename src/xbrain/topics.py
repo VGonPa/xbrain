@@ -96,18 +96,17 @@ def render_topic_page(
         "",
     ]
     if page is None:
-        lines += ["*(Overview pendiente — ejecuta `xbrain topics`.)*", ""]
+        lines += [strings.overview_pending, ""]
     else:
         if posts.total > page.post_count_at_synth:
             delta = posts.total - page.post_count_at_synth
             lines += [
-                f"> ⚠ Overview desactualizado: {delta:+d} posts desde la última "
-                "síntesis. Ejecuta `xbrain topics --resynth`.",
+                strings.overview_stale.format(delta=f"{delta:+d}"),
                 "",
             ]
         lines += [page.overview, ""]
         if page.notes:
-            lines += ["## Notas importantes", ""]
+            lines += [f"## {strings.key_notes_header}", ""]
             lines += [f"- {note}" for note in page.notes]
             lines += [""]
     lines += _post_block(strings.primary_posts, posts.primary)
@@ -134,9 +133,9 @@ def write_topic_pages(
         block = render_topic_page(topic, posts, pages.get(topic.slug), strings)
         path = topics_dir / f"{topic.slug}.md"
         tail = (
-            notes_io.user_tail(path.read_text(encoding="utf-8"), notes_io.DEFAULT_TAIL)
+            notes_io.user_tail(path.read_text(encoding="utf-8"), notes_io.default_tail(strings))
             if path.exists()
-            else notes_io.DEFAULT_TAIL
+            else notes_io.default_tail(strings)
         )
         path.write_text(block + tail, encoding="utf-8")
         written += 1
