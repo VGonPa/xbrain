@@ -100,7 +100,7 @@ def test_render_topic_page_has_frontmatter_overview_and_post_blocks():
     assert "tags: [x-knowledge-topic, ai-coding]" in rendered
     assert "posts: 2" in rendered
     assert "El overview." in rendered
-    assert "## Notas importantes" in rendered
+    assert "## Key notes" in rendered.splitlines()
     assert "## Primary posts (1)" in rendered
     assert "## Also relevant (1)" in rendered
     assert "[[items/" in rendered
@@ -114,7 +114,10 @@ def test_render_topic_page_marks_a_stale_overview():
         posts.primary.append(_enriched(str(n), "ai-coding", ["ai-coding"]))
     page = _topic_page("ai-coding", count=2)  # synthesized when the topic had 2
     rendered = render_topic_page(_VOCAB[0], posts, page, _STRINGS_EN)
-    assert "Overview desactualizado" in rendered
+    assert (
+        "> ⚠ Overview out of date: +3 posts since the last synthesis. "
+        "Run `xbrain topics --resynth`." in rendered.splitlines()
+    )
 
 
 def test_render_topic_page_handles_a_missing_overview():
@@ -123,7 +126,7 @@ def test_render_topic_page_handles_a_missing_overview():
     posts = TopicPosts()
     posts.primary.append(_enriched("1", "ai-coding", ["ai-coding"]))
     rendered = render_topic_page(_VOCAB[0], posts, None, _STRINGS_EN)
-    assert "Overview pendiente" in rendered
+    assert "*(Overview pending — run `xbrain topics`.)*" in rendered.splitlines()
 
 
 def test_write_topic_pages_skips_empty_topics(tmp_path):

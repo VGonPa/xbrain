@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from xbrain.generate import _SF_DATALESS, _is_dataless, _mirror_file, generate
 from xbrain.models import (
     Author,
@@ -15,6 +17,7 @@ from xbrain.models import (
     Item,
     Link,
 )
+from xbrain.i18n import SUPPORTED_LANGUAGES, strings_for
 from xbrain.notes_io import note_filename, slugify
 
 
@@ -111,10 +114,13 @@ def test_generate_renders_failed_photo_as_warning(tmp_path: Path):
     body = note.read_text(encoding="utf-8")
     assert "⚠" in body
     assert "https://pbs.twimg.com/media/dead.png" in body
-    # The `http_4xx` reason maps to "URL no encontrada (HTTP 4xx)" via
-    # `_FAILURE_ES_MEDIA`. The whole rendered phrase must be present —
+    # The `http_4xx` reason is localised via `Strings.media_failure_reasons`
+    # (English by default). The whole rendered line must be present —
     # asserting one substring or the other is brittle.
-    assert "URL no encontrada (HTTP 4xx)" in body
+    assert (
+        "> ⚠ Photo unavailable (URL not found (HTTP 4xx)): "
+        "<https://pbs.twimg.com/media/dead.png>" in body.splitlines()
+    )
 
 
 def test_generate_skips_pending_photo_silently(tmp_path: Path):
@@ -148,8 +154,10 @@ def test_generate_renders_video_pending_as_clickable_play_link(tmp_path: Path):
     generate({"1": item}, tmp_path)
     note = next((tmp_path / "items").glob("*.md"))
     body = note.read_text(encoding="utf-8")
-    assert "[Ver vídeo](https://video.twimg.com/high.mp4?tag=12)" in body
-    assert "pendiente de descarga" in body
+    assert (
+        "> 🎥 [Watch video](https://video.twimg.com/high.mp4?tag=12) (not downloaded yet)"
+        in body.splitlines()
+    )
 
 
 def test_generate_renders_downloaded_video_as_obsidian_embed(tmp_path: Path):
@@ -201,7 +209,10 @@ def test_generate_renders_failed_video_as_warning(tmp_path: Path):
     body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
     assert "⚠" in body
     assert "https://video.twimg.com/dead.mp4" in body
-    assert "error del servidor (HTTP 5xx)" in body
+    assert (
+        "> ⚠ Video unavailable (server error (HTTP 5xx)): <https://video.twimg.com/dead.mp4>"
+        in body.splitlines()
+    )
 
 
 def test_generate_media_only_item_gets_a_note(tmp_path: Path):
@@ -258,10 +269,10 @@ def test_generate_media_block_precedes_links_section(tmp_path: Path):
     generate({"1": item}, tmp_path, media_root=media_root)
     body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
     embed_idx = body.find("![[_media/1/0.png]]")
-    enlaces_idx = body.find("## Enlaces")
+    links_idx = body.find("\n## Links\n")
     assert embed_idx != -1
-    assert enlaces_idx != -1
-    assert embed_idx < enlaces_idx
+    assert links_idx != -1
+    assert embed_idx < links_idx
 
 
 def test_generate_renders_multiple_photos_inline(tmp_path: Path):
@@ -454,13 +465,16 @@ def test_generate_since_until_filters_item_notes(tmp_path: Path):
     assert "New note" in log
 
 
-def test_failure_es_covers_every_failure_reason():
+@pytest.mark.parametrize("language", SUPPORTED_LANGUAGES)
+def test_failure_reasons_cover_every_slug_in_every_language(language):
+    """A reason missing from a language would print the raw slug into the note."""
     from typing import get_args
 
-    from xbrain.generate import _FAILURE_ES
-    from xbrain.models import FailureReason
+    from xbrain.models import FailureReason, MediaFailureReason
 
-    assert set(_FAILURE_ES) == set(get_args(FailureReason))
+    strings = strings_for(language)
+    assert set(strings.content_failure_reasons) == set(get_args(FailureReason))
+    assert set(strings.media_failure_reasons) == set(get_args(MediaFailureReason))
 
 
 def test_note_renders_broken_link_evidence(tmp_path):
@@ -491,9 +505,10 @@ def test_note_renders_broken_link_evidence(tmp_path):
     )
     generate({"1": item}, tmp_path)
     note = next((tmp_path / "items").glob("*-1.md")).read_text(encoding="utf-8")
-    assert "Enlace roto" in note
-    assert "HTTP 404" in note
-    assert "2026-05-17" in note
+    assert (
+        "> ⚠ Broken link: <https://dead.example.com/p> — HTTP 404 · not found "
+        "(checked 2026-05-17)" in note.splitlines()
+    )
 
 
 # --------------------------------------------------------------------- i18n
@@ -1105,8 +1120,10 @@ def test_generate_article_failed_image_renders_warning(tmp_path: Path):
     generate({"99": _article_item(blocks=blocks)}, tmp_path)
     body = next((tmp_path / "items").glob("*-99.md")).read_text(encoding="utf-8")
     assert "⚠" in body
-    assert "https://pbs.twimg.com/media/dead.png" in body
-    assert "URL no encontrada (HTTP 4xx)" in body
+    assert (
+        "> ⚠ Image unavailable (URL not found (HTTP 4xx)): "
+        "<https://pbs.twimg.com/media/dead.png>" in body.splitlines()
+    )
 
 
 def test_generate_article_described_image_renders_caption(tmp_path: Path):
@@ -1410,7 +1427,6 @@ def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
 # conflation the attribution rule exists to stop, rendered for the reader.
 
 from xbrain.executors.api import quoted_source, quoted_text  # noqa: E402
-from xbrain.i18n import SUPPORTED_LANGUAGES, strings_for  # noqa: E402
 from xbrain.models import QUOTED_CONTENT_KINDS  # noqa: E402
 
 _QUOTED_BODY = "Karpathy's career moves map AI's centre of gravity.\n\n2015: co-founds OpenAI."

@@ -12,6 +12,7 @@ derived from the dict — no second list to keep in sync.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -47,6 +48,38 @@ class Strings:
     quoted_unavailable_deleted: str  # `not_found`  — X tombstoned it
     quoted_unavailable_protected: str  # `forbidden`  — protected / suspended
     quoted_unavailable_unknown: str  # anything else — X served us nothing usable
+    # --- Note body lines written by `generate` (were hard-coded Spanish until v0.2.1) ---
+    links_header: str  # "## Links" section of an item note
+    view_original: str  # permalink label under the links
+    broken_link: str  # "⚠ Broken link: <url> — detail (checked DATE)"
+    broken_link_checked: str
+    broken_link_unknown: str  # detail when there is neither an HTTP status nor a reason
+    content_failure_reasons: Mapping[str, str]  # `FailureReason` slug -> reader text
+    media_failure_reasons: Mapping[str, str]  # `MediaFailureReason` slug -> reader text
+    photo_unavailable: str
+    image_unavailable: str  # an X Article inline image
+    video_unavailable: str
+    watch_video: str  # link label of a playable stream not downloaded yet
+    pending_download: str
+    # --- The user tail appended to a freshly created page (item notes + topic pages) ---
+    my_notes_header: str
+    my_notes_hint: str
+    # --- `_index.md` and `log.md` ---
+    generated_label: str
+    total_items: str
+    own_posts: str
+    with_own_note: str
+    enriched_label: str
+    indexes_header: str
+    full_log_link: str
+    dashboard_link: str
+    dashboard_hint: str
+    log_title: str
+    note_link: str  # wikilink alias from a log line to its note
+    # --- Topic pages ---
+    overview_pending: str
+    overview_stale: str  # format string: `{delta}` is the signed post delta (e.g. "+2")
+    key_notes_header: str
 
 
 _STRINGS: dict[str, Strings] = {
@@ -67,6 +100,56 @@ _STRINGS: dict[str, Strings] = {
         quoted_unavailable_deleted="deleted or never existed",
         quoted_unavailable_protected="protected or suspended account",
         quoted_unavailable_unknown="X served no content for it",
+        links_header="Links",
+        view_original="View original post",
+        broken_link="Broken link",
+        broken_link_checked="checked",
+        broken_link_unknown="could not be retrieved",
+        content_failure_reasons={
+            "not_found": "not found",
+            "forbidden": "access denied",
+            "paywall": "paywall",
+            "timeout": "timed out",
+            "dns_error": "domain did not resolve",
+            "js_required": "requires JavaScript",
+            "empty_content": "no extractable content",
+            "blocked_interstitial": "cookie or login wall (no article)",
+            "unknown_error": "unknown error",
+        },
+        media_failure_reasons={
+            "http_4xx": "URL not found (HTTP 4xx)",
+            "http_5xx": "server error (HTTP 5xx)",
+            "timeout": "timed out",
+            "format_error": "unrecognised format",
+            "unknown_error": "unknown error",
+        },
+        photo_unavailable="Photo unavailable",
+        image_unavailable="Image unavailable",
+        video_unavailable="Video unavailable",
+        watch_video="Watch video",
+        pending_download="not downloaded yet",
+        my_notes_header="My notes",
+        my_notes_hint=(
+            "*(Write below. Everything above this point is regenerated "
+            "automatically; do not edit it.)*"
+        ),
+        generated_label="Generated",
+        total_items="Total items",
+        own_posts="Own posts",
+        with_own_note="With a note",
+        enriched_label="Enriched",
+        indexes_header="Indexes",
+        full_log_link="Full chronological log",
+        dashboard_link="Interactive dashboard",
+        dashboard_hint="metrics, drill-down and links (opens in the browser)",
+        log_title="Chronological log",
+        note_link="note",
+        overview_pending="*(Overview pending — run `xbrain topics`.)*",
+        overview_stale=(
+            "> ⚠ Overview out of date: {delta} posts since the last synthesis. "
+            "Run `xbrain topics --resynth`."
+        ),
+        key_notes_header="Key notes",
     ),
     "Spanish": Strings(
         language="Spanish",
@@ -85,6 +168,56 @@ _STRINGS: dict[str, Strings] = {
         quoted_unavailable_deleted="borrado o inexistente",
         quoted_unavailable_protected="cuenta protegida o suspendida",
         quoted_unavailable_unknown="X no sirvió su contenido",
+        links_header="Enlaces",
+        view_original="Ver tweet original",
+        broken_link="Enlace roto",
+        broken_link_checked="verificado",
+        broken_link_unknown="no se pudo recuperar",
+        content_failure_reasons={
+            "not_found": "no encontrado",
+            "forbidden": "acceso denegado",
+            "paywall": "muro de pago",
+            "timeout": "tiempo de espera agotado",
+            "dns_error": "dominio no resuelto",
+            "js_required": "requiere JavaScript",
+            "empty_content": "sin contenido extraíble",
+            "blocked_interstitial": "muro de cookies o login (sin artículo)",
+            "unknown_error": "error desconocido",
+        },
+        media_failure_reasons={
+            "http_4xx": "URL no encontrada (HTTP 4xx)",
+            "http_5xx": "error del servidor (HTTP 5xx)",
+            "timeout": "tiempo de espera agotado",
+            "format_error": "formato no reconocido",
+            "unknown_error": "error desconocido",
+        },
+        photo_unavailable="Foto no disponible",
+        image_unavailable="Imagen no disponible",
+        video_unavailable="Vídeo no disponible",
+        watch_video="Ver vídeo",
+        pending_download="pendiente de descarga",
+        my_notes_header="Mis notas",
+        my_notes_hint=(
+            "*(Escribe debajo. El bloque por encima de este punto se regenera "
+            "automáticamente; no lo edites.)*"
+        ),
+        generated_label="Generado",
+        total_items="Items totales",
+        own_posts="Tweets propios",
+        with_own_note="Con nota propia",
+        enriched_label="Enriquecidos",
+        indexes_header="Índices",
+        full_log_link="Log cronológico completo",
+        dashboard_link="Dashboard interactivo",
+        dashboard_hint="métricas, drill-down y enlaces (se abre en el navegador)",
+        log_title="Log cronológico",
+        note_link="nota",
+        overview_pending="*(Overview pendiente — ejecuta `xbrain topics`.)*",
+        overview_stale=(
+            "> ⚠ Overview desactualizado: {delta} posts desde la última "
+            "síntesis. Ejecuta `xbrain topics --resynth`."
+        ),
+        key_notes_header="Notas importantes",
     ),
 }
 

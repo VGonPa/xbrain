@@ -299,10 +299,10 @@ generates an Obsidian wiki.
   <title>` — walking `source.blocks` IN AUTHORED ORDER: `ArticleTextBlock` → a body
   paragraph (the baked `\n\n` separator stripped via `removeprefix` so it never leaks
   as a stray blank line), `ArticleImageBlock` → an inline `![[_media/<id>/article/<n>]]`
-  embed (alt + a described image's caption as `> …` lines; failed → `⚠ Imagen no
-  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`, and
+  embed (alt + a described image's caption as `> …` lines; failed → `⚠ Image
+  unavailable`; pending → silent), the SAME photo convention as `_render_media_lines`, and
   `ArticleVideoBlock` → `_article_video_lines`, mirroring the video convention (downloaded →
-  local mp4 embed; failed → a visible `⚠`; **pending → a `🎥 Ver vídeo` link, deliberately NOT
+  local mp4 embed; failed → a visible `⚠`; **pending → a `🎥 Watch video` link (localised), deliberately NOT
   silent**, because no later pass advances an article video — `xbrain media` downloads photos
   — so silence would reproduce the very defect the variant exists to fix).
   `_mirror_item_article_images` copies the bytes into the vault via the shared

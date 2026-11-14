@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 
 import pytest
 
@@ -53,6 +54,34 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
         "quoted_unavailable_deleted",
         "quoted_unavailable_protected",
         "quoted_unavailable_unknown",
+        "links_header",
+        "view_original",
+        "broken_link",
+        "broken_link_checked",
+        "broken_link_unknown",
+        "content_failure_reasons",
+        "media_failure_reasons",
+        "photo_unavailable",
+        "image_unavailable",
+        "video_unavailable",
+        "watch_video",
+        "pending_download",
+        "my_notes_header",
+        "my_notes_hint",
+        "generated_label",
+        "total_items",
+        "own_posts",
+        "with_own_note",
+        "enriched_label",
+        "indexes_header",
+        "full_log_link",
+        "dashboard_link",
+        "dashboard_hint",
+        "log_title",
+        "note_link",
+        "overview_pending",
+        "overview_stale",
+        "key_notes_header",
     }
 
 
@@ -87,7 +116,11 @@ def test_every_supported_language_populates_every_field() -> None:
         s = strings_for(language)
         for field in fields:
             value = getattr(s, field)
-            assert isinstance(value, str) and value, f"{language}.{field} is empty"
+            if isinstance(value, Mapping):
+                # A reason table: non-empty, and no slug mapped to an empty label.
+                assert value and all(value.values()), f"{language}.{field} has a gap"
+            else:
+                assert isinstance(value, str) and value, f"{language}.{field} is empty"
 
 
 def test_strings_dataclass_is_frozen() -> None:
