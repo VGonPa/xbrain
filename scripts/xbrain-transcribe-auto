@@ -49,6 +49,8 @@ ENV
   XBRAIN_TRANSCRIBE_WHISPER  path to the whisper wrapper       (default: alongside this file)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
