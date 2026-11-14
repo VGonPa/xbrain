@@ -87,7 +87,7 @@ class RedescribeReport:
     root gone, all) of a selected source's frames un-re-described while it still
     counts as selected (#90 review M4 — the prior name `videos_redescribed`
     claimed a past-tense outcome the field never verified, so a run against a
-    missing media root read as "N vídeos re-descritos … 0 regeneradas",
+    missing media root read as "N videos re-described … 0 regenerated",
     self-contradictory). `frames_described` / `frames_failed` are what actually
     happened, frame-granular — read those for the real story.
     `videos_current` counts sources skipped because they already carry the
@@ -442,36 +442,36 @@ def _redescribe_source(
 def format_redescribe_summary(report: RedescribeReport, *, dry_run: bool = False) -> str:
     """One-line human SUMMARY of a re-description run.
 
-    "vídeos seleccionados" (not "re-descritos"): `videos_selected` counts sources
+    "videos selected" (not "re-described"): `videos_selected` counts sources
     SELECTED for re-captioning, not sources actually finished — with the media
-    root gone, a run would otherwise print the self-contradictory "N vídeos
-    re-descritos … 0 regeneradas" (#90 review M4). `Captions:` carries the real
+    root gone, a run would otherwise print the self-contradictory "N videos
+    re-described … 0 regenerated" (#90 review M4). `Captions:` carries the real
     described/failed story.
 
     `dry_run=True` renders a DIFFERENT, predictive wording (#90 review I3): the
-    real-run string above is past tense ("regeneradas", "fallidas" — things that
+    real-run string above is past tense ("regenerated", "failed" — things that
     HAPPENED), and a `--dry-run` report reusing it verbatim is textually
     indistinguishable from a real run's — plus it lies grammatically, since a
     preview regenerates zero captions. The dry-run string below uses future/
-    conditional wording ("se regenerarían", "fallarían") and spells out, IN the
+    conditional wording ("would regenerate", "would fail") and spells out, IN the
     output itself (not just a docstring the operator never sees), that
-    `Re-propagados` is not a prediction at all — `redescribe_frames`'s own
+    `Re-propagated` is not a prediction at all — `redescribe_frames`'s own
     docstring already says a dry run cannot know whether a caption will
     actually CHANGE, only whether it can be attempted.
     """
     if dry_run:
         return (
-            f"Frames: {report.videos_selected} vídeos seleccionados, "
-            f"{report.videos_current} ya al día. "
-            f"Captions: {report.frames_described} se regenerarían, "
-            f"{report.frames_failed} fallarían. "
-            "Re-propagados: no es una predicción — sólo se sabe corriendo el "
-            "modelo de verdad (sin --dry-run)."
+            f"Frames: {report.videos_selected} videos selected, "
+            f"{report.videos_current} already current. "
+            f"Captions: {report.frames_described} would regenerate, "
+            f"{report.frames_failed} would fail. "
+            "Re-propagated: not a prediction — it is only known by actually running "
+            "the model (without --dry-run)."
         )
     return (
-        f"Frames: {report.videos_selected} vídeos seleccionados, "
-        f"{report.videos_current} ya al día. "
-        f"Captions: {report.frames_described} regeneradas, "
-        f"{report.frames_failed} fallidas. "
-        f"Re-propagados: {report.items_repropagated} items."
+        f"Frames: {report.videos_selected} videos selected, "
+        f"{report.videos_current} already current. "
+        f"Captions: {report.frames_described} regenerated, "
+        f"{report.frames_failed} failed. "
+        f"Re-propagated: {report.items_repropagated} items."
     )

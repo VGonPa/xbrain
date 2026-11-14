@@ -1,6 +1,6 @@
 [project]
 name = "xbrain"
-version = "0.2.0"
+version = "0.2.1"
 description = "XBrain — extract X bookmarks and tweets into an Obsidian wiki"
 requires-python = ">=3.12"
 dependencies = [

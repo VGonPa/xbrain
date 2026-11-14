@@ -140,7 +140,7 @@ generates an Obsidian wiki.
   robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
   6) — its frames are the only evidence, so dropping them left hollow entries. The
   visual layer is off by default — a normal `digest-video` run never touches
-  ffmpeg/vision. Any run appends `Huecos (sin voz ni frames): N` to its summary when
+  ffmpeg/vision. Any run appends `Hollow (no speech, no frames): N` to its summary when
   N > 0 items still end with neither speech nor frames (never a silent drop).
   Recover them with the indivisible `--frames --force --keep-transcript`: each
   item keeps its own stored transcript (re-running the ASR can invent words), the
@@ -299,10 +299,10 @@ generates an Obsidian wiki.
   <title>` — walking `source.blocks` IN AUTHORED ORDER: `ArticleTextBlock` → a body
   paragraph (the baked `\n\n` separator stripped via `removeprefix` so it never leaks
   as a stray blank line), `ArticleImageBlock` → an inline `![[_media/<id>/article/<n>]]`
-  embed (alt + a described image's caption as `> …` lines; failed → `⚠ Imagen no
-  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`, and
+  embed (alt + a described image's caption as `> …` lines; failed → `⚠ Image
+  unavailable`; pending → silent), the SAME photo convention as `_render_media_lines`, and
   `ArticleVideoBlock` → `_article_video_lines`, mirroring the video convention (downloaded →
-  local mp4 embed; failed → a visible `⚠`; **pending → a `🎥 Ver vídeo` link, deliberately NOT
+  local mp4 embed; failed → a visible `⚠`; **pending → a `🎥 Watch video` link (localised), deliberately NOT
   silent**, because no later pass advances an article video — `xbrain media` downloads photos
   — so silence would reproduce the very defect the variant exists to fix).
   `_mirror_item_article_images` copies the bytes into the vault via the shared
@@ -675,7 +675,7 @@ the wrong reason.
 | The assertion | Why it passed anyway |
 |---|---|
 | `assert "NOT fetched" in source` | satisfied by the section **header** `[Links — content NOT fetched]`. The rule sentence it claimed to pin was unprotected — deleting it stayed green. |
-| `assert "1 verdicts escritos" in output` | satisfied verbatim by `"0 de 1 verdicts escritos (1 omitidos: …)"`. The test for *one written* passed on *zero written*. |
+| `assert "1 verdicts written" in output` | satisfied verbatim by `"0 of 1 verdicts written (1 skipped: …)"`. The test for *one written* passed on *zero written*. |
 | `assert stored_ids(tmp_path) == set()` | `tmp_path` was never passed to the function. It asserted that an empty directory is empty. |
 | `assert evidence_text(i, t) == …evidence_surfaces(i, t)` | **both sides came from the same module.** It asserted `evidence.py` against itself — inside the PR written to end this class of test. |
 | `assert "topic signal only" in payload` | already satisfied by the *links* rule; it said nothing about the *bookmark folder* it claimed to pin. |

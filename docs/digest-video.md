@@ -139,16 +139,16 @@ and re-introduces the fabrication risk for every clip in it that isn't.
 # Transcript only (no vision, no ffmpeg-frames) — fast:
 uv run xbrain digest-video --all-pending
 
-# → Vídeos: transcritos 6, sin voz 2, ya digeridos 0, fallidos 0, sin vídeo 1, ...
-#   Dedup: 8 items ← 8 vídeos (8 transcritos este run). Huecos (sin voz ni frames): 2.
+# → Videos: transcribed 6, no speech 2, already digested 0, failed 0, no video 1, ...
+#   Dedup: 8 items ← 8 videos (8 transcribed this run). Hollow (no speech, no frames): 2.
 ```
 
-Read the summary: **transcritos** = had speech (by the transcriber's flag: one
-flagged as speech but with blank text counts here, and also under **Huecos**
-unless `--frames` describes its frames), **sin voz** = silent (no audio
+Read the summary: **transcribed** = had speech (by the transcriber's flag: one
+flagged as speech but with blank text counts here, and also under **Hollow**
+unless `--frames` describes its frames), **no speech** = silent (no audio
 track — GIFs, muted clips; attached as `has_speech=false`, not a failure),
-**fallidos** = a real transcribe failure, **sin vídeo** = the video couldn't be
-fetched (deleted / unavailable), **Huecos** = items that ended the run with
+**failed** = a real transcribe failure, **no video** = the video couldn't be
+fetched (deleted / unavailable), **Hollow** = items that ended the run with
 neither speech nor frames (without `--frames`, every silent one — see
 [hollow items](#finding-and-re-digesting-hollow-items)). Videos are **deduped by
 identity**. On the default path, N bookmarks of the same clip are fetched +
@@ -162,7 +162,7 @@ Add `--frames` for slide-heavy talks and silent clips:
 
 ```bash
 uv run xbrain digest-video --all-pending --frames
-# → ... Visual: 5 con slides, 2 metraje mudo descrito, 4 talking-head (saltados).
+# → ... Visual: 5 with slides, 2 silent footage described, 4 talking-head (skipped).
 ```
 
 `--frames` extracts key frames (ffmpeg scene-detection + interval sampling) and
@@ -174,12 +174,12 @@ on whether the video has speech:
 - A non-slide video **with speech** is a **talking-head** and is skipped — the
   transcript already carries it, so no vision calls are wasted.
 - A non-slide video **without speech** (a screen recording, a robot, an
-  animation, a GIF) is described as **silent footage** (`metraje mudo`), capped
+  animation, a GIF) is described as **silent footage**, capped
   by `[frames].footage_max_frames` (default 6): its frames are the only record
   of what it shows.
 
 The described frames are embedded in the note like downloaded photos. A run
-prints `Huecos (sin voz ni frames): N` when N items still end up with neither
+prints `Hollow (no speech, no frames): N` when N items still end up with neither
 speech nor frames.
 
 ### Finding and re-digesting hollow items
@@ -211,7 +211,7 @@ uv run xbrain digest-video --ids <ids-from-above> --frames --force --keep-transc
 Leave out `--keep-transcript` and the ASR runs again. On music, or on audio
 with no usable speech, it can invent words ("you you"). A non-slide video with
 invented words is skipped as a talking-head, is no longer counted under
-`Huecos`, and no longer matches the `jq` recipe above either, so nothing lists
+`Hollow`, and no longer matches the `jq` recipe above either, so nothing lists
 it again.
 
 Items digested without `--frames`, or before silent footage was described, come
@@ -234,14 +234,14 @@ items have no prior frames and are not exposed to this loss.
 A fetch or ASR failure is different: it attaches nothing and leaves the old
 source, frames, digest and `fetched_at` untouched.
 
-Two cases don't show up under `Huecos`, so run the `jq` recipe again after the
+Two cases don't show up under `Hollow`, so run the `jq` recipe again after the
 re-digest; it is the only complete list:
 
 - A re-digest whose **fetch or transcription fails** attaches nothing. The item
-  keeps its OLD hollow source and is counted under `fallidos`, not `Huecos`.
-- `Huecos` counts only the items **this run attached**. Hollow items already in
-  the store (skipped as `ya digeridos` on a run without `--force`) are not
-  counted, so a summary without `Huecos` says nothing about that backlog.
+  keeps its OLD hollow source and is counted under `failed`, not `Hollow`.
+- `Hollow` counts only the items **this run attached**. Hollow items already in
+  the store (skipped as `already digested` on a run without `--force`) are not
+  counted, so a summary without `Hollow` says nothing about that backlog.
 
 Then build the readable digest and render:
 

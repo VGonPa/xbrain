@@ -527,9 +527,9 @@ class LexicalIndex:
 
     def _expression(self, query: str, limit: int) -> str | None:
         if not query.strip():
-            raise ValueError("la consulta está vacía")
+            raise ValueError("the query is empty")
         if limit <= 0:
-            raise ValueError(f"limit debe ser >= 1, recibido {limit}")
+            raise ValueError(f"limit must be >= 1, got {limit}")
         return match_expression(query)
 
     def _where(
@@ -579,7 +579,7 @@ class LexicalIndex:
             if _is_fts_parse_error(error):
                 return []
             raise IndexIncompatibleError(
-                f"La base del índice no se puede consultar ({error}). {REBUILD_ADVICE}"
+                f"The index database cannot be queried ({error}). {REBUILD_ADVICE}"
             ) from error
         except sqlite3.DatabaseError as error:
             # The REST of the family — `fts5: corruption found reading blob…`, `file is not
@@ -589,7 +589,7 @@ class LexicalIndex:
             # reached the operator as a 68-line traceback naming no command; Plan 02 §11
             # tabulates it as *base corrupta -> error accionable con `index build --force`*.
             raise IndexIncompatibleError(
-                f"La base del índice no se puede consultar ({error}). {REBUILD_ADVICE}"
+                f"The index database cannot be queried ({error}). {REBUILD_ADVICE}"
             ) from error
 
 

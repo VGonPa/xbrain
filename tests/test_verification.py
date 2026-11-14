@@ -471,7 +471,7 @@ def test_apply_verdicts_tallies_every_skip_reason_and_never_crashes_the_write():
     assert store["7"].verification["summary"].verdict == "FAIL"
     assert store["8"].verification == {}
     assert result.summary() == (
-        "1 de 7 verdicts escritos (6 omitidos: 1 bad-target, 1 bad-verdict, "
+        "1 of 7 verdicts written (6 skipped: 1 bad-target, 1 bad-verdict, "
         "1 fingerprint-invalid, 1 fingerprint-missing, 1 item-gone, 1 malformed-record)"
     )
 

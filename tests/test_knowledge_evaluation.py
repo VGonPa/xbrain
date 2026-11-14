@@ -201,7 +201,7 @@ def test_the_report_serialises_to_json_and_markdown(report) -> None:
     payload = json.dumps(report.to_dict(), ensure_ascii=False)
     assert json.loads(payload)["strategy"] == "lexical"
     markdown = render_markdown(report)
-    assert "sin cobertura" in markdown
+    assert "no coverage" in markdown
     assert "expansion" in markdown
 
 
@@ -700,9 +700,9 @@ def test_a_threshold_that_reached_no_bucket_fails_closed_naming_the_count(corpus
     )
     report = evaluate([case], corpus, ks=(10,), threshold=1.0)
     assert len(report.failures) == 1, report.failures
-    assert "0" in report.failures[0] and "medid" in report.failures[0], report.failures[0]
-    assert "sin cobertura" not in report.failures[0], "the sentinel is not a failing value"
-    assert "## Fallos" in render_markdown(report), "the published report must carry it too"
+    assert "0" in report.failures[0] and "measured" in report.failures[0], report.failures[0]
+    assert "no coverage" not in report.failures[0], "the sentinel is not a failing value"
+    assert "## Failures" in render_markdown(report), "the published report must carry it too"
 
 
 def test_a_threshold_that_reached_one_bucket_is_not_reported_as_unapplied(corpus) -> None:
@@ -737,7 +737,7 @@ def test_the_markdown_renders_an_unmeasured_metric_as_words_not_a_number(corpus)
     rendered = render_markdown(evaluate([case], corpus, ks=(1, 10)))
     row = next(line for line in rendered.splitlines() if line.startswith("| exacto |"))
     assert "0.0" not in row, f"a fabricated zero reached the published table: {row}"
-    assert "sin cobertura" in row
+    assert "no coverage" in row
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +857,7 @@ def test_the_markdown_publishes_how_many_cases_retrieved_nothing(corpus) -> None
     )
     rendered = render_markdown(evaluate([case], corpus, ks=(1, 10)))
     row = next(line for line in rendered.splitlines() if line.startswith("| exacto |"))
-    assert "vacíos" in rendered, "the column must be labelled where it is read"
+    assert "| cases | empty |" in rendered, "the column must be labelled where it is read"
     assert row.split("|")[3].strip() == "1", f"the empty-result count is missing from: {row}"
 
 
@@ -1068,9 +1068,9 @@ def test_parse_sweep_accepts_both_syntaxes_and_refuses_a_typo() -> None:
         "target": [800, 1200],
         "overlap": [0, 150],
     }
-    with pytest.raises(ValueError, match="desconocido"):
+    with pytest.raises(ValueError, match="Unknown sweep axis"):
         parse_sweep(["targt=800"])
-    with pytest.raises(ValueError, match="inválido"):
+    with pytest.raises(ValueError, match="Invalid sweep format"):
         parse_sweep(["target"])
 
 
@@ -1127,15 +1127,15 @@ def test_the_sweep_publishes_recall_at_1_and_names_the_criterion_that_decided(co
     assert all(row["recall@1"] is None or 0.0 <= row["recall@1"] <= 1.0 for row in rows)
     text = render_sweep_markdown(report)
     assert "recall@1" in text.splitlines()[2]
-    assert "decidió" in text or "PLANO" in text, text
-    assert "recall@10" in text and "MRR" in text and "menos chunks" in text
+    assert "decided by" in text or "FLAT" in text, text
+    assert "recall@10" in text and "MRR" in text and "fewer chunks" in text
 
 
 def test_a_flat_sweep_says_it_is_flat(corpus) -> None:
     """The negative result, published as one (spec §13.15).
 
     Two combinations that score identically must not be presented as a winner and a loser:
-    the rendering says PLANO and states that the tie-break was the chunk count.
+    the rendering says FLAT and states that the tie-break was the chunk count.
     """
     from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
 
@@ -1145,8 +1145,8 @@ def test_a_flat_sweep_says_it_is_flat(corpus) -> None:
     report = sweep_chunker(cases, corpus, {"min_chars": [40, 41]})
     text = render_sweep_markdown(report)
 
-    assert "PLANO" in text
-    assert "menos chunks" in text
+    assert "FLAT" in text
+    assert "fewer chunks" in text
 
 
 def test_the_sweep_publishes_the_retriever_that_ranked_the_cells(corpus, monkeypatch) -> None:
@@ -1198,12 +1198,12 @@ def test_the_sweep_and_the_report_name_the_retriever_with_the_SAME_sentence(
 
     IT IS RUN ON THE DEGRADED CASE, and that is the whole of the test. Written first on a
     plain `lexical` run, it passed against a sweep line hardcoded back to
-    `f"Recuperador: `{report.strategy}`"` — with nothing degraded the two forms produce the
+    `f"Retriever: `{report.strategy}`"` — with nothing degraded the two forms produce the
     same bytes, so the assertion could not fail for the reason it exists. Only a request that
     could not run separates «names the retriever» from «echoes the strategy field».
 
-    Seen red under exactly that mutation: the ordinary heading carries `solicitada `vector`,
-    sin backend (vector_not_implemented)` and the sweep's line carries nothing.
+    Seen red under exactly that mutation: the ordinary heading carries `requested `vector`,
+    no backend (vector_not_implemented)` and the sweep's line carries nothing.
     """
     from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
 
@@ -1215,11 +1215,11 @@ def test_the_sweep_and_the_report_name_the_retriever_with_the_SAME_sentence(
     heading = render_markdown(plain).splitlines()[0]
     sweep_line = render_sweep_markdown(swept).splitlines()[0]
 
-    clause = heading.removeprefix("# Evaluación de recuperación — ")
+    clause = heading.removeprefix("# Retrieval evaluation — ")
     assert clause != "`lexical`", "the degraded case is what makes the two forms separable"
     assert "vector_not_implemented" in clause
     # The SAME sentence, not two that happen to agree on the undegraded input.
-    assert sweep_line == f"Recuperador: {clause}"
+    assert sweep_line == f"Retriever: {clause}"
 
 
 def test_an_unknown_sweep_strategy_raises_before_any_cell_is_scored(corpus) -> None:
@@ -1358,35 +1358,35 @@ def test_evaluate_closes_the_index_it_built(corpus) -> None:
 def test_a_one_cell_sweep_does_not_report_a_tie_it_could_not_have_measured(corpus) -> None:
     """A SECOND DEVIATION FROM THE SNAPSHOT. `_sweep_verdict` tested `len(distinct) == 1`,
     which is also true of a ONE-ROW table, so `xbrain eval --sweep-chunker target=800` printed
-    «PLANO: todas las combinaciones puntúan igual» — a verdict about a tie over a table with
+    «FLAT: every combination scores the same» — a verdict about a tie over a table with
     nothing to tie against, and one that no input could have made say anything else. That is
     the shape CLAUDE.md rule 2 rejects, inside the instrument that exists so a published
     number can be re-derived honestly.
 
     Seen red against the ported-verbatim version, on the real corpus and on this fixture: one
-    row, `PLANO` printed.
+    row, `FLAT` printed.
     """
     from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
 
     cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
     one = render_sweep_markdown(sweep_chunker(cases, corpus, {"target": [800]}))
 
-    assert "PLANO" not in one, one
-    assert "UNA COMBINACIÓN" in one and "target=800" in one, one
-    # And a real tie still says PLANO, so the deviation narrowed the claim and did not delete it.
+    assert "FLAT" not in one, one
+    assert "ONE COMBINATION" in one and "target=800" in one, one
+    # And a real tie still says FLAT, so the deviation narrowed the claim and did not delete it.
     flat = render_sweep_markdown(sweep_chunker(cases, corpus, {"min_chars": [40, 41]}))
-    assert "PLANO" in flat, flat
+    assert "FLAT" in flat, flat
 
 
 def test_a_sweep_that_measured_nothing_has_no_winner_and_does_not_report_a_tie(corpus) -> None:
     """F2-3 of the final gate on #177. `_sweep_verdict` built `distinct` out of `_number(...)`
-    STRINGS, and `_number(None)` is the constant `"sin cobertura"` — so N rows that could not
+    STRINGS, and `_number(None)` is the constant `"no coverage"` — so N rows that could not
     be scored at all collapsed to ONE distinct value and took the flat branch. Executed there
     with `cases=[]` over two combinations, the report read:
 
-        |  800 | 0 | 56 | sin cobertura | sin cobertura | sin cobertura |
-        | 1600 | 0 | 47 | sin cobertura | sin cobertura | sin cobertura |
-        PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks.
+        |  800 | 0 | 56 | no coverage | no coverage | no coverage |
+        | 1600 | 0 | 47 | no coverage | no coverage | no coverage |
+        FLAT: every combination scores the same; the one producing fewer chunks wins.
 
     The table is honest and the verdict is not: it makes a positive claim about a ranking that
     never happened, over rows where NOTHING was compared. It is declared deviation 3 (the
@@ -1395,7 +1395,7 @@ def test_a_sweep_that_measured_nothing_has_no_winner_and_does_not_report_a_tie(c
 
     A sweep with nothing measured therefore has NO WINNER and says so, and the contrast is
     asserted in the same test: a GENUINE tie — rows that all scored the same REAL number —
-    still reports PLANO and still has a winner, so the repair narrowed the claim instead of
+    still reports FLAT and still has a winner, so the repair narrowed the claim instead of
     deleting it.
     """
     from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
@@ -1406,17 +1406,17 @@ def test_a_sweep_that_measured_nothing_has_no_winner_and_does_not_report_a_tie(c
     text = render_sweep_markdown(nothing)
     assert nothing.winner is None, "an unscored row was published as the winner"
     assert nothing.measured is False
-    assert "PLANO" not in text, text
-    assert "SIN MEDICIÓN" in text, text
+    assert "FLAT" not in text, text
+    assert "NOT MEASURED" in text, text
     payload = nothing.to_dict()
     assert payload["winner"] is None and payload["measured"] is False
-    assert "SIN MEDICIÓN" in payload["verdict"]
+    assert "NOT MEASURED" in payload["verdict"]
 
     # A grid that resolves to no combination at all has no winner either, and says a DIFFERENT
     # thing: nothing was swept, as against swept and unscorable.
     empty = sweep_chunker(cases, corpus, {"target": []})
     assert empty.winner is None and empty.rows == ()
-    assert "SIN COMBINACIONES" in render_sweep_markdown(empty)
+    assert "NO COMBINATIONS" in render_sweep_markdown(empty)
 
     # THE MEASURED FLAT TIE IS PRESERVED. `min_chars` at 40 and 41 cannot change the ranking
     # on this corpus (no fragment sits near the floor), so both rows score the same REAL
@@ -1424,7 +1424,7 @@ def test_a_sweep_that_measured_nothing_has_no_winner_and_does_not_report_a_tie(c
     flat = sweep_chunker(cases, corpus, {"min_chars": [40, 41]})
     assert flat.measured is True and flat.winner is not None
     assert flat.winner.recall is not None
-    assert "PLANO" in render_sweep_markdown(flat)
+    assert "FLAT" in render_sweep_markdown(flat)
 
 
 def test_the_top_row_is_the_winner_only_when_it_actually_scored() -> None:

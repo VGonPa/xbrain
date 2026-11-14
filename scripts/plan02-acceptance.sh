@@ -30,8 +30,8 @@ print('\n'.join(nodes))
 HEAD=$(printf '%s\n' "$SUMMARY" | head -1)
 NODES=$(printf '%s\n' "$SUMMARY" | tail -n +2)
 
-echo "Selección: $SELECTION"
-echo "Criterios · node ids · listón declarado: $HEAD"
+echo "Selection: $SELECTION"
+echo "Criteria · node ids · declared bar: $HEAD"
 echo
 
 # shellcheck disable=SC2086  # the node ids are pytest arguments, one per word, and hold no spaces

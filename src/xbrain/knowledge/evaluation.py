@@ -63,7 +63,7 @@ from xbrain.store import load_store, load_topic_pages
 # case in a bucket could measure (B1). A sentinel rather than a `None` or a zero, so it
 # survives JSON and renders as words in the markdown. `None` is what a single CASE carries;
 # this is what the AGGREGATE carries, because the aggregate is what gets published and read.
-NO_COVERAGE = {"coverage": "sin cobertura"}
+NO_COVERAGE = {"coverage": "no coverage"}
 
 # Surfaces the emitter supports for which the corpus holds NO data (measured 2026-08-31), so
 # the evaluation cannot have cases and does not invent any (spec §8.6.8). Declared, so their
@@ -453,8 +453,8 @@ def evaluate(
                         "provenance": case.provenance,
                         "unsupported_filters": list(blocked),
                         "reason": (
-                            f"la estrategia `{executed}` no puede aplicar {list(blocked)}; "
-                            "puntuar el caso sería fabricar un cero (spec §8.6.8)"
+                            f"strategy `{executed}` cannot apply {list(blocked)}; "
+                            "scoring the case would fabricate a zero (spec §8.6.8)"
                         ),
                     }
                 )
@@ -739,8 +739,8 @@ def _failures(
                 failures.append(f"{label} {name}: {metric} = {value} < {threshold}")
     if not comparisons:
         failures.append(
-            f"el umbral {threshold} no se comparó contra nada: 0 buckets con {metric} "
-            "medido. La puerta no puede pasar sin haber medido (M2)"
+            f"threshold {threshold} was compared against nothing: 0 buckets with {metric} "
+            "measured. The gate cannot pass without having measured (M2)"
         )
     return tuple(failures)
 
@@ -772,8 +772,8 @@ def retriever_label(strategy: str, requested_strategy: str, degraded: Sequence[s
     label = f"`{strategy}`"
     if degraded:
         label += (
-            f" · solicitada `{requested_strategy}`, sin backend "
-            f"({', '.join(degraded)}): las cifras son del recuperador que SÍ corrió"
+            f" · requested `{requested_strategy}`, no backend "
+            f"({', '.join(degraded)}): the figures come from the retriever that DID run"
         )
     return label
 
@@ -781,69 +781,69 @@ def retriever_label(strategy: str, requested_strategy: str, degraded: Sequence[s
 def render_markdown(report: EvaluationReport) -> str:
     """The human report. Publishes failures and gaps, never fabricated zeros (spec §8.6.8)."""
     lines = [
-        "# Evaluación de recuperación — "
+        "# Retrieval evaluation — "
         + retriever_label(report.strategy, report.requested_strategy, report.degraded),
         "",
         f"- Corpus: `{report.corpus['source']}` — {report.corpus['items']} items, "
-        f"{report.corpus['topics']} topics, {report.corpus['surfaces']} superficies, "
-        f"{report.corpus['chunks']} chunks emitidos, "
-        f"{report.corpus.get('chunks_not_indexed', 0)} rechazados por el índice.",
-        f"- Umbral: {report.threshold if report.threshold is not None else 'ninguno (solo informe)'}.",
-        f"- Profundidad: {report.limit} owners por caso (U-6: la lista se materializa hasta"
-        " tener esos owners, y cada `recall@k` sale de su prefijo).",
-        f"- Latencia p50 {report.latency['p50_ms']} ms · p95 {report.latency['p95_ms']} ms.",
+        f"{report.corpus['topics']} topics, {report.corpus['surfaces']} surfaces, "
+        f"{report.corpus['chunks']} chunks emitted, "
+        f"{report.corpus.get('chunks_not_indexed', 0)} rejected by the index.",
+        f"- Threshold: {report.threshold if report.threshold is not None else 'none (report only)'}.",
+        f"- Depth: {report.limit} owners per case (U-6: the list is materialized until it"
+        " holds that many owners, and each `recall@k` comes from its prefix).",
+        f"- Latency p50 {report.latency['p50_ms']} ms · p95 {report.latency['p95_ms']} ms.",
         "",
-        "> Las cifras de arriba son una fotografía del corpus medido, no una constante del",
-        "> producto. Vuelve a derivarlas al ejecutar (CLAUDE.md regla 2).",
+        "> The figures above are a snapshot of the measured corpus, not a constant of the",
+        "> product. Re-derive them when you run it (CLAUDE.md rule 2).",
         "",
-        "> `recall@k` cuenta OWNERS deduplicados; `surface_recall@k` cuenta CHUNKS (m6). Bajo",
-        "> la misma `k` no miden la misma población: la lista se materializa hasta k OWNERS,",
-        "> así que `recall@10` puede formarse con más de diez chunks, mientras que",
-        "> `surface_recall@10` nunca mira más allá del décimo. Compara cada columna con su",
-        "> propio valor en la siguiente ejecución, no una con la otra.",
+        "> `recall@k` counts deduplicated OWNERS; `surface_recall@k` counts CHUNKS (m6). Under",
+        "> the same `k` they do not measure the same population: the list is materialized up to",
+        "> k OWNERS, so `recall@10` may be formed from more than ten chunks, while",
+        "> `surface_recall@10` never looks past the tenth. Compare each column with its own",
+        "> value in the next run, not one with the other.",
         "",
-        "> Una celda `sin cobertura` NO es un cero: ningún caso del bucket pudo medir esa",
-        "> métrica (spec §8.6.8). `measured` en el JSON lleva el denominador de cada media.",
+        "> A `no coverage` cell is NOT a zero: no case in the bucket could measure that",
+        "> metric (spec §8.6.8). `measured` in the JSON carries the denominator of each mean.",
         "",
-        "> `vacíos` cuenta los casos del bucket cuya consulta no recuperó NI UN CHUNK. Un 0,0",
-        "> con `vacíos = casos` no dice que el recuperador ordenase mal: dice que no llegó a",
-        "> ordenar nada. Sobre esos casos `precision@k` sale *no medida*, nunca 0,0 — su",
-        "> numerador es 0 por construcción y repetiría el conjunto vacío (M3).",
+        "> `empty` counts the bucket's cases whose query retrieved NOT A SINGLE CHUNK. A 0.0",
+        "> with `empty = cases` does not say the retriever ranked badly: it says it never got",
+        "> to rank anything. On those cases `precision@k` comes out *not measured*, never 0.0 —",
+        "> its numerator is 0 by construction and would repeat the empty set (M3).",
         "",
     ]
-    lines += _table("Por estrato", report.by_stratum)
-    lines += _table("Por procedencia", report.by_provenance)
+    lines += _table("By stratum", report.by_stratum)
+    lines += _table("By provenance", report.by_provenance)
     lines += [
-        "## Sin cobertura",
+        "## No coverage",
         "",
-        "No se puntúan y **no se reportan como 0,0** (spec §8.6.8): un cero aquí diría que la",
-        "recuperación falló donde nadie preguntó.",
+        "Not scored and **not reported as 0.0** (spec §8.6.8): a zero here would say that",
+        "retrieval failed where nobody asked.",
         "",
-        f"- Estratos sin casos medibles: {', '.join(report.without_coverage['strata']) or 'ninguno'}.",
-        f"- Superficies sin datos en el corpus: {', '.join(report.without_coverage['surfaces'])}.",
+        f"- Strata with no measurable cases: {', '.join(report.without_coverage['strata']) or 'none'}.",
+        f"- Surfaces with no data in the corpus: {', '.join(report.without_coverage['surfaces'])}.",
         "",
     ]
     if report.unmeasured:
         lines += [
-            "### Casos NO medidos (la estrategia no puede aplicar sus filtros)",
+            "### Cases NOT measured (the strategy cannot apply their filters)",
             "",
-            "No puntúan: un 0,0 aquí diría que la recuperación falló, cuando lo que falta es el",
-            "instrumento. Los filtros de fecha, autor, fuente y content kind llegan con el índice",
-            "persistido del Plan 02.",
+            "Not scored: a 0.0 here would say retrieval failed, when what is missing is the",
+            "instrument. The date, author, source and content-kind filters arrive with the",
+            "persisted index of Plan 02.",
             "",
         ]
         lines += [
-            f"- **{entry['id']}** ({', '.join(entry['strata'])}) — filtros sin soporte: "
+            f"- **{entry['id']}** ({', '.join(entry['strata'])}) — unsupported filters: "
             f"{', '.join(entry['unsupported_filters'])}."
             for entry in report.unmeasured
         ]
         lines.append("")
     if report.scenarios:
-        lines += ["## Escenarios archivados (no puntúan)", ""]
+        lines += ["## Archived scenarios (not scored)", ""]
         lines += [f"- **{s.id}** — {s.reason.strip()}" for s in report.scenarios]
         lines.append("")
     if report.failures:
-        lines += ["## Fallos", ""] + [f"- {failure}" for failure in report.failures] + [""]
+        lines += ["## Failures", ""] + [f"- {failure}" for failure in report.failures] + [""]
     return "\n".join(lines)
 
 
@@ -851,12 +851,12 @@ def _table(title: str, buckets: dict[str, Any]) -> list[str]:
     lines = [
         f"## {title}",
         "",
-        "| bucket | casos | vacíos | recall@1 | recall@10 | precision@10 | MRR |",
+        "| bucket | cases | empty | recall@1 | recall@10 | precision@10 | MRR |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for name, values in buckets.items():
         if values == NO_COVERAGE:
-            lines.append(f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — |")
+            lines.append(f"| {name} | — | — | no coverage | no coverage | no coverage | — |")
             continue
         cells = [
             _cell(values, "recall@1"),
@@ -881,7 +881,7 @@ def _cell(values: dict[str, Any], name: str) -> str:
     if value is None:
         return "—"
     if value == NO_COVERAGE:
-        return "sin cobertura"
+        return "no coverage"
     return str(value)
 
 
@@ -1047,12 +1047,11 @@ def parse_sweep(values: Sequence[str]) -> dict[str, list[int]]:
     for value in values:
         for token in value.split():
             if "=" not in token:
-                raise ValueError(f"Formato de barrido inválido: {token!r}. Usa `clave=v1,v2`.")
+                raise ValueError(f"Invalid sweep format: {token!r}. Use `key=v1,v2`.")
             key, raw = token.split("=", 1)
             if key not in {"target", "max_chars", "overlap", "min_chars"}:
                 raise ValueError(
-                    f"Eje de barrido desconocido: {key!r}. "
-                    "Válidos: target, max_chars, overlap, min_chars."
+                    f"Unknown sweep axis: {key!r}. Valid: target, max_chars, overlap, min_chars."
                 )
             grid[key] = [int(part) for part in raw.split(",") if part.strip()]
     return grid
@@ -1213,10 +1212,10 @@ def render_sweep_markdown(report: SweepReport) -> str:
         # FIRST LINE, ahead of the depth and the criterion: the ranking is a statement about a
         # retriever, and a reader who takes the winner out of this table without knowing which
         # one ranked it has the F-2 defect in the artefact Plan 03 is measured against.
-        "Recuperador: "
+        "Retriever: "
         + retriever_label(report.strategy, report.requested_strategy, report.degraded),
-        f"Profundidad: {report.limit} owners por caso (U-6).",
-        f"Criterio: recall@{report.k}, luego MRR, luego menos chunks (S-1).",
+        f"Depth: {report.limit} owners per case (U-6).",
+        f"Criterion: recall@{report.k}, then MRR, then fewer chunks (S-1).",
         f"| target | overlap | chunks | recall@{report.k} | recall@1 | MRR |",
         "|---:|---:|---:|---:|---:|---:|",
     ]
@@ -1244,8 +1243,8 @@ def _sweep_verdict(report: SweepReport) -> str:
     # no table under it is not a result; saying so is cheaper than making a reader notice.
     if not report.rows:
         return (
-            "SIN COMBINACIONES: el barrido no produjo ninguna fila, así que no hay ganador "
-            "(¿un eje sin valores, `target=`?)."
+            "NO COMBINATIONS: the sweep produced no rows, so there is no winner "
+            "(an axis with no values, `target=`?)."
         )
     winner = report.winner
     # ROWS, BUT NOTHING MEASURED (F2-3 of the final gate on #177). `distinct` below is built
@@ -1257,9 +1256,9 @@ def _sweep_verdict(report: SweepReport) -> str:
     # the two now read differently.
     if winner is None:
         return (
-            f"SIN MEDICIÓN: ninguna de las {len(report.rows)} combinaciones pudo puntuarse "
-            f"(recall@{report.k} sin cobertura en todas), así que no hay ganador ni empate: "
-            "el barrido no midió nada."
+            f"NOT MEASURED: none of the {len(report.rows)} combinations could be scored "
+            f"(recall@{report.k} no coverage in all of them), so there is no winner and no tie: "
+            "the sweep measured nothing."
         )
     label = f"target={winner.params.target}, overlap={winner.params.overlap}"
     # A DEVIATION FROM THE SNAPSHOT, and the reason. `len(distinct) == 1` is true for a
@@ -1269,7 +1268,7 @@ def _sweep_verdict(report: SweepReport) -> str:
     # rule 2 rejects, inside the instrument that exists to publish an honest measurement.
     # A single cell is a measurement of one combination and says so.
     if len(report.rows) == 1:
-        return f"UNA COMBINACIÓN: {label}; no hay barrido que comparar."
+        return f"ONE COMBINATION: {label}; there is no sweep to compare."
     return _decided_verdict(report, winner, label)
 
 
@@ -1284,23 +1283,23 @@ def _decided_verdict(report: SweepReport, winner: SweepRow, label: str) -> str:
     # that survives into this set is a partially-unmeasured table, never the empty one.
     distinct = {(_number(r.recall), _number(r.mrr)) for r in report.rows}
     if len(distinct) == 1:
-        return "PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks."
+        return "FLAT: every combination scores the same; the one producing fewer chunks wins."
     tied = [r for r in report.rows[1:] if _number(r.recall) == _number(winner.recall)]
     if not tied:
-        return f"Gana {label}: decidió recall@{report.k} ({_number(winner.recall)})."
+        return f"Winner {label}: decided by recall@{report.k} ({_number(winner.recall)})."
     names = ", ".join(f"{r.params.target}/{r.params.overlap}" for r in tied)
     runner_up = tied[0]
     if _number(runner_up.mrr) != _number(winner.mrr):
         return (
-            f"Gana {label}: empate en recall@{report.k} ({_number(winner.recall)}) con {names}; "
-            f"decidió MRR ({_number(winner.mrr)} frente a {_number(runner_up.mrr)}; "
-            f"recall@1 {_number(winner.recall_at_1)} frente a {_number(runner_up.recall_at_1)})."
+            f"Winner {label}: tie on recall@{report.k} ({_number(winner.recall)}) with {names}; "
+            f"decided by MRR ({_number(winner.mrr)} vs {_number(runner_up.mrr)}; "
+            f"recall@1 {_number(winner.recall_at_1)} vs {_number(runner_up.recall_at_1)})."
         )
     return (
-        f"Gana {label}: empate en recall@{report.k} y en MRR con {names}; "
-        f"decidió menos chunks ({winner.chunks} frente a {runner_up.chunks})."
+        f"Winner {label}: tie on recall@{report.k} and on MRR with {names}; "
+        f"decided by fewer chunks ({winner.chunks} vs {runner_up.chunks})."
     )
 
 
 def _number(value: float | None) -> str:
-    return "sin cobertura" if value is None else f"{value:.4f}"
+    return "no coverage" if value is None else f"{value:.4f}"

@@ -54,23 +54,23 @@ from xbrain.models import Author
 # flag they will ignore; spec §9.3 asks the response to NAME the command that fixes it.
 DEGRADED_TEXT: dict[str, str] = {
     "index_behind_store": (
-        "⚠ El índice va por detrás del store: `items.json`, `vocab.yaml` o `topics.json` "
-        "cambió después de construirlo. La evidencia puede estar obsoleta — actualiza con "
+        "⚠ The index is behind the store: `items.json`, `vocab.yaml` or `topics.json` "
+        "changed after it was built. The evidence may be stale — update it with "
         "`xbrain index update`."
     ),
     "no_embeddings": (
-        "· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases "
-        "exactas, no similitud conceptual."
+        "· Lexical strategy (no embeddings): retrieves proper nouns, numbers and exact "
+        "phrases, not conceptual similarity."
     ),
 }
 
 
 def render_search(response: SearchResponse) -> str:
     """The human rendering of a search (spec §7.6)."""
-    lines: list[str] = [f'"{_label(response.query)}" · estrategia {response.strategy}']
+    lines: list[str] = [f'"{_label(response.query)}" · strategy {response.strategy}']
     lines += _index_lines(response)
     if not response.results:
-        lines.append("Sin resultados. Prueba con menos filtros o términos más distintivos.")
+        lines.append("No results. Try fewer filters or more distinctive terms.")
         return "\n".join(lines)
     for result in response.results:
         lines.append("")
@@ -91,9 +91,9 @@ def _index_lines(response: SearchResponse) -> list[str]:
         # or localizador served beside it, and — since B-k — a row that resolves to no
         # locator at all. One sentence, one remedy.
         lines.append(
-            f"⚠ {response.index.corrupt_chunks_excluded} chunk(s) excluido(s): su fingerprint "
-            "no cuadra con su texto, procedencia, autor o localizador. "
-            "Reconstruye con `xbrain index build --force`."
+            f"⚠ {response.index.corrupt_chunks_excluded} chunk(s) excluded: their fingerprint "
+            "does not match their text, provenance, author or locator. "
+            "Rebuild with `xbrain index build --force`."
         )
     if response.truncated:
         lines.append(_search_truncation(response))
@@ -111,11 +111,11 @@ def _search_truncation(response: SearchResponse) -> str:
     """
     if response.cursor is None:
         return (
-            "⚠ Resultado truncado: la clasificación no se pudo materializar a la profundidad "
-            "que pedía la página, así que puede haber más resultados y no se puede paginar "
-            "hasta ellos — acota la consulta o añade filtros."
+            "⚠ Truncated result: the ranking could not be materialized to the depth the page "
+            "asked for, so there may be more results and no way to page to them — narrow "
+            "the query or add filters."
         )
-    return "⚠ Resultado truncado. Continúa con: " + _search_continuation(response)
+    return "⚠ Truncated result. Continue with: " + _search_continuation(response)
 
 
 def _search_continuation(response: SearchResponse) -> str:
@@ -151,8 +151,8 @@ def _degraded_line(flag: str) -> str:
     if flag.endswith(NOT_IMPLEMENTED_SUFFIX):
         requested = flag[: -len(NOT_IMPLEMENTED_SUFFIX)]
         return (
-            f"⚠ La estrategia `{requested}` no tiene backend todavía: ha respondido "
-            f"`{FALLBACK_STRATEGY}`. Estos resultados NO son de `{requested}`."
+            f"⚠ The `{requested}` strategy has no backend yet: `{FALLBACK_STRATEGY}` "
+            f"answered instead. These results are NOT from `{requested}`."
         )
     return DEGRADED_TEXT.get(flag, f"⚠ {_label(flag)}")
 
@@ -171,7 +171,7 @@ def _result_lines(result: SearchResult) -> list[str]:
             f" [{result.summary.verification_status}]" if result.summary.verification_status else ""
         )
         lines.append(
-            f"   resumen ({result.summary.origin}{verdict}): {_one_line(result.summary.text)}"
+            f"   summary ({result.summary.origin}{verdict}): {_one_line(result.summary.text)}"
         )
     for match in result.matches:
         lines.append(
@@ -187,7 +187,7 @@ def _result_lines(result: SearchResult) -> list[str]:
     if not result.matches:
         # A profile-only candidate. Saying so matters: the profile is a composed string
         # nobody wrote, so there is no excerpt to show and none may be invented (spec §5.1.A).
-        lines.append("   · coincide por el perfil del item; no hay fragmento citable")
+        lines.append("   · matched on the item profile; no citable fragment")
     lines += _verify_lines(result)
     return lines
 
@@ -200,13 +200,13 @@ def _verify_lines(result: SearchResult) -> list[str]:
     """
     if no_underlying_source(result):
         return [
-            "   ⚠ no_underlying_source: la coincidencia es texto derivado y este item no "
-            "conserva ninguna fuente primaria que la sustente."
+            "   ⚠ no_underlying_source: the match is derived text and this item keeps "
+            "no primary source that supports it."
         ]
     if not result.verify_with:
         return []
     surfaces = " ".join(f"--surface {_label(name)}" for name in result.verify_with)
-    return [f"   → verifica con: xbrain get {_label(result.item_id)} {surfaces}"]
+    return [f"   → verify with: xbrain get {_label(result.item_id)} {surfaces}"]
 
 
 def render_get(
@@ -241,10 +241,10 @@ def render_get(
         f" · {item.created_at.date().isoformat()} · {item.source}",
         f"  {_label(item.url)}",
         f"  topics: {_label(', '.join(item.topics)) or '—'}",
-        f"  superficies disponibles: {_label(', '.join(item.available_surfaces)) or '—'}",
+        f"  available surfaces: {_label(', '.join(item.available_surfaces)) or '—'}",
     ]
     for target, verdict in sorted(bundle.verification.items()):
-        lines.append(f"  verificación {_label(target)}: {verdict.verdict}")
+        lines.append(f"  verification {_label(target)}: {verdict.verdict}")
     lines += _failure_lines(bundle)
     for surface in bundle.surfaces:
         lines += [
@@ -267,7 +267,7 @@ def render_get(
     if bundle.truncated:
         lines += [
             "",
-            "⚠ Truncado. Continúa con: " + _continuation(item.item_id, bundle, surfaces, query),
+            "⚠ Truncated. Continue with: " + _continuation(item.item_id, bundle, surfaces, query),
         ]
     return "\n".join(lines)
 
@@ -293,7 +293,7 @@ def _continuation(
 
 
 def _own_author(attribution: Author | None, item_author: Author) -> str:
-    """`autor: @handle (Name)` when the text has an author of its own, else ``.
+    """`author: @handle (Name)` when the text has an author of its own, else ``.
 
     ONE rule for a search match, a whole surface and a chunk (A-1, H3): the text's author is
     named whenever it is not the item's. Spec §3.7.3 — a quoted tweet keeps its own author —
@@ -304,7 +304,7 @@ def _own_author(attribution: Author | None, item_author: Author) -> str:
     """
     if attribution is None or attribution == item_author:
         return ""
-    return f"autor: {_author_label(attribution)}"
+    return f"author: {_author_label(attribution)}"
 
 
 def _author_label(author: Author) -> str:
@@ -316,7 +316,7 @@ def _author_label(author: Author) -> str:
     next to the body that nobody fenced — and an `ESC[2K` in a handle reached the TTY through
     the result line (the round-06 gate, D-3). Population today 0 of 2,404, and the
     population is what X accepts, not what the corpus holds. Three placements — the bundle
-    header, the result line, the `autor:` label of a match, a surface or a chunk — and one
+    header, the result line, the `author:` label of a match, a surface or a chunk — and one
     function, pinned by a test that swaps it for a sentinel and expects the sentinel in all
     three (rule 5).
     """
@@ -339,11 +339,11 @@ def _failure_lines(bundle: EvidenceBundle) -> list[str]:
     lines = []
     for failure in bundle.failures:
         lines.append(
-            f"  ⚠ fetch falló: {failure.kind} {_label(failure.url)} ({failure.failure_reason})"
+            f"  ⚠ fetch failed: {failure.kind} {_label(failure.url)} ({failure.failure_reason})"
         )
     for link in bundle.unfetched_links:
         detail = f" — {_label(link.detail)}" if link.detail else ""
-        lines.append(f"  ⚠ sin cuerpo: {_label(link.url)} ({link.reason}){detail}")
+        lines.append(f"  ⚠ no body: {_label(link.url)} ({link.reason}){detail}")
     return lines
 
 
@@ -369,24 +369,24 @@ def render_inspect(payload: Mapping[str, Any]) -> str:
         lines += [
             f"{_label(item['item_id'])}  {_author_label(author)}",
             f"  {_label(item['url'])}",
-            f"  creado {_label(item['created_at'][:10])} · fuente {_label(item['source'])}"
+            f"  created {_label(item['created_at'][:10])} · source {_label(item['source'])}"
             f" · topics {_label(', '.join(item['topics'])) or '—'}",
-            f"  superficies: {_label(', '.join(item['available_surfaces'])) or '—'}",
+            f"  surfaces: {_label(', '.join(item['available_surfaces'])) or '—'}",
         ]
         for failure in item["failed_sources"]:
             lines.append(
-                f"  ⚠ fetch falló: {_label(failure['kind'])} {_label(failure['url'])}"
+                f"  ⚠ fetch failed: {_label(failure['kind'])} {_label(failure['url'])}"
                 f" ({_label(failure['failure_reason'])})"
             )
         for link in item["unfetched_links"]:
-            lines.append(f"  ⚠ sin cuerpo: {_label(link['url'])} ({_label(link['reason'])})")
+            lines.append(f"  ⚠ no body: {_label(link['url'])} ({_label(link['reason'])})")
     else:
         topic = payload["topic"]
         lines += [
             f"topic:{_label(topic['slug'])} — {_one_line(topic['description']['text'])}",
-            f"  primarios {len(topic['primary_item_ids'])}"
-            f" · secundarios {len(topic['secondary_item_ids'])}"
-            f" · {'DESACTUALIZADO' if topic['stale'] else 'al día'}",
+            f"  primary {len(topic['primary_item_ids'])}"
+            f" · secondary {len(topic['secondary_item_ids'])}"
+            f" · {'STALE' if topic['stale'] else 'up to date'}",
         ]
     for surface in payload.get("surfaces", []):
         lines.append(
@@ -399,14 +399,14 @@ def render_inspect(payload: Mapping[str, Any]) -> str:
 def render_status(report: StatusReport) -> str:
     """`index status` for a human (acceptance 2)."""
     if report.manifest is None:
-        return "\n".join(["Índice: INCOMPLETO o inexistente.", f"  {_label(report.advice)}"])
+        return "\n".join(["Index: INCOMPLETE or missing.", f"  {_label(report.advice)}"])
     manifest = report.manifest
     # The manifest is a file an operator may edit by hand (B1 measured what one can hold),
     # so its strings reach the terminal through the same label as everything else (U-3).
     lines = [
-        f"Índice construido {manifest.built_at.isoformat(timespec='seconds')}",
-        f"  esquema {_label(manifest.schema_version)}"
-        f" · emisor {_label(manifest.surface_version)}"
+        f"Index built {manifest.built_at.isoformat(timespec='seconds')}",
+        f"  schema {_label(manifest.schema_version)}"
+        f" · emitter {_label(manifest.surface_version)}"
         f" · chunker {_label(manifest.chunker_version)} {manifest.chunker_params}",
         # `tokenize` and `connective` are NOT printed, because this tree's `Manifest` does
         # not declare them: 02.6b sealed the manifest without them and left the two to the
@@ -416,22 +416,22 @@ def render_status(report: StatusReport) -> str:
         # the worst kind of wrong on a `status` line, which a reader consults precisely to
         # learn what the index was built with. The line returns with the fields.
         f"  embeddings {manifest.embeddings or '—'}",
-        "  contenidos: "
+        "  contents: "
         + " · ".join(f"{name} {count}" for name, count in sorted(report.counts.items())),
-        "  omitidos: "
+        "  skipped: "
         + " · ".join(f"{name} {count}" for name, count in sorted(manifest.skipped.items())),
     ]
     lines.append(
-        f"  respecto al store: +{report.items_added} nuevos"
-        f" · {report.items_changed} cambiados"
-        f" · -{report.items_removed} borrados"
-        f" · {report.topics_changed} topics con miembros desfasados"
-        f" · señal barata {'DESFASADA' if report.behind else 'al día'}"
+        f"  vs. the store: +{report.items_added} new"
+        f" · {report.items_changed} changed"
+        f" · -{report.items_removed} removed"
+        f" · {report.topics_changed} topics with outdated members"
+        f" · cheap signal {'BEHIND' if report.behind else 'up to date'}"
     )
     if report.incomplete:
         # A manifest exists and the code cannot use it, or the base does not hold what it
         # declares (C-3): said BEFORE the advice, so the header above is not read as health.
-        lines.append("  ⚠ Índice INCOMPLETO o inutilizable: ninguna consulta lo usará.")
+        lines.append("  ⚠ Index INCOMPLETE or unusable: no query will use it.")
     if report.advice:
         # The advice quotes the manifest's own strings (T-1): one line, no controls.
         lines.append(f"  → {_label(report.advice)}")
@@ -443,13 +443,13 @@ def render_build(report: BuildReport) -> str:
     prefix = "[dry-run] " if report.dry_run else ""
     lines = [
         f"{prefix}{report.items_written} items · {report.topics_written} topics"
-        f" · {report.surfaces_written} superficies · {report.chunks_written} chunks"
-        f" · {report.profiles_written} perfiles",
-        "  omitidos: " + " · ".join(f"{k} {v}" for k, v in sorted(report.skipped.items())),
+        f" · {report.surfaces_written} surfaces · {report.chunks_written} chunks"
+        f" · {report.profiles_written} profiles",
+        "  skipped: " + " · ".join(f"{k} {v}" for k, v in sorted(report.skipped.items())),
         f"  {report.duration_seconds:.1f}s",
     ]
     if report.failed:
-        lines.append(f"  ⚠ {len(report.failed)} item(s) fallaron")
+        lines.append(f"  ⚠ {len(report.failed)} item(s) failed")
     return "\n".join(lines)
 
 
@@ -458,16 +458,16 @@ def render_update(report: UpdateReport) -> str:
     prefix = "[dry-run] " if report.dry_run else ""
     return "\n".join(
         [
-            f"{prefix}+{report.items_added} nuevos · {report.items_changed} cambiados"
-            f" · -{report.items_removed} borrados"
-            + (" · topics y perfiles recalculados" if report.topics_rebuilt else "")
+            f"{prefix}+{report.items_added} new · {report.items_changed} changed"
+            f" · -{report.items_removed} removed"
+            + (" · topics and profiles recomputed" if report.topics_rebuilt else "")
             + (
-                f" · {report.topics_refreshed} topics con miembros recalculados"
+                f" · {report.topics_refreshed} topics with recomputed members"
                 if report.topics_refreshed
                 else ""
             ),
             f"  chunks +{report.chunks_inserted} / -{report.chunks_deleted}"
-            f" · perfiles +{report.profiles_inserted} / -{report.profiles_deleted}",
+            f" · profiles +{report.profiles_inserted} / -{report.profiles_deleted}",
             f"  {report.duration_seconds:.1f}s",
         ]
     )

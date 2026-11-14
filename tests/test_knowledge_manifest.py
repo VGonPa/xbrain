@@ -411,7 +411,7 @@ def test_a_document_that_is_not_a_json_object_leaves_by_the_same_door(planted: o
     """
     with pytest.raises(index_schema.IndexIncompatibleError) as caught:
         index_build.Manifest.from_dict(planted)
-    assert "no es un objeto JSON" in str(caught.value)
+    assert "is not a JSON object" in str(caught.value)
     assert index_schema.REBUILD_ADVICE in str(caught.value)
 
 
@@ -438,7 +438,7 @@ def test_a_nested_mapping_must_be_closed_as_well_as_total(
         index_build.Manifest.from_dict(
             _document(**{field_name: {k: 0 for k in declared if k != one}})
         )
-    with pytest.raises(index_schema.IndexIncompatibleError, match="no declaradas"):
+    with pytest.raises(index_schema.IndexIncompatibleError, match="undeclared keys"):
         index_build.Manifest.from_dict(
             _document(**{field_name: {**dict.fromkeys(declared, 0), "vectors": 0}})
         )

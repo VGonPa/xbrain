@@ -91,7 +91,7 @@ rows themselves.
 What a build reports it skipped, on this corpus:
 
 ```
-omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
+skipped: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
 ```
 
 Those are not errors. A decorative image description, a silent video and a link
@@ -102,24 +102,24 @@ rows in front of a scorer.
 
 ```bash
 $ uv run xbrain search "transformer attention" --limit 2
-"transformer attention" · estrategia lexical
-· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases
-  exactas, no similitud conceptual.
+"transformer attention" · strategy lexical
+· Lexical strategy (no embeddings): retrieves proper nouns, numbers and exact
+  phrases, not conceptual similarity.
 
 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
    https://x.com/xiathis/status/2051242195298968041
    topics: llm-foundations, frontier-models
-   resumen (llm): Clase de Stanford que recorre las decisiones de arquitectura…
+   summary (llm): Clase de Stanford que recorre las decisiones de arquitectura…
    · [video_transcript] origin=asr trust=machine_extracted · via lexical
      ly talking about changing here is you know, where the norms go, or you know…
    · [video_transcript] origin=asr trust=machine_extracted · via lexical
      do kind of position dependence and incorporate information from other posi…
    · [video_transcript] origin=asr trust=machine_extracted · via lexical
      hyperparameter. Um I always found this to be very strange when sort of teac…
-   → verifica con: xbrain get 2051242195298968041 --surface video_transcript
+   → verify with: xbrain get 2051242195298968041 --surface video_transcript
 
-[extracto: se omite el resultado 2; una línea de truncado, cuando la hay, se
- imprime bajo la cabecera, encima del resultado 1, no aquí]
+[excerpt: result 2 is omitted; a truncation line, when there is one, is
+ printed under the header, above result 1, not here]
 ```
 
 Three things in that block are the whole point of the layer.
@@ -130,11 +130,11 @@ wrote it, not the author. The trust class is derived from the origin by one
 total table, so a consumer never has to infer it from the surface name.
 
 **The last line is the verification instruction.** When a match lands on a
-summary — text xbrain generated — `verifica con` names the underlying surface
+summary — text xbrain generated — `verify with` names the underlying surface
 that can actually settle the claim. Run that `xbrain get` and you are reading
 the source, not the paraphrase. When no such source exists the line says so —
-`⚠ no_underlying_source: la coincidencia es texto derivado y este item no
-conserva ninguna fuente primaria que la sustente` — instead of pointing you
+`⚠ no_underlying_source: the match is derived text and this item keeps no
+primary source that supports it` — instead of pointing you
 back at the summary.
 
 **`--json` is the same model, and the richer view.** The human view and `--json`
@@ -169,7 +169,7 @@ uv run xbrain search "transformer attention" --limit 1 --json
 rm -rf data/index/
 uv run xbrain get 1880184389218496770     # still works
 uv run xbrain search "transformer"        # refuses, and names the fix
-# → Error: No hay índice en …/data/index. Constrúyelo con `xbrain index build`.
+# → Error: There is no index at …/data/index. Build it with `xbrain index build`.
 ```
 
 That asymmetry is deliberate. `get` serves evidence from the live store, so an
@@ -216,7 +216,7 @@ have to assemble that line yourself — the truncation warning prints the exact
 command to run, flags and all:
 
 ```
-⚠ Truncado. Continúa con: xbrain get <id> --surface external_article --cursor 0:7
+⚠ Truncated. Continue with: xbrain get <id> --surface external_article --cursor 0:7
 ```
 
 `search` paginates the same way, for the same reason: its cursor (`s:<offset>`)

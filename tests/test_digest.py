@@ -437,7 +437,7 @@ def test_fetch_failure_is_recorded_not_fatal(tmp_path: Path):
 
 
 def test_fetch_failure_logs_the_item_and_its_reason(tmp_path: Path, caplog):
-    """A failed download used to surface ONLY as `fallidos 1` in the summary. The
+    """A failed download used to surface ONLY as `failed 1` in the summary. The
     `FetchResult` carried the reason and the batch discarded it. Measured 2026-10-11: a
     487 MB video failed twice in a row, with a log one line long. `fetch-video` on the
     same id finally said why: HTTP 403, an expired signed URL. One record has to name
@@ -1241,7 +1241,7 @@ def test_failed_forced_redigest_keeps_the_old_hollow_source_as_failed(
 ):
     """A `--force --frames` re-digest of a hollow item whose fetch or transcription
     fails attaches nothing: the OLD hollow source stays, and the item is counted
-    under `fallidos` — not under `Huecos`, which counts only what this run
+    under `failed` — not under `Hollow`, which counts only what this run
     attached (docs/digest-video.md, hollow items)."""
     store = _hollow_store(tmp_path)
     old = store["a1"].content.sources[0]
@@ -1265,7 +1265,7 @@ def test_failed_forced_redigest_keeps_the_old_hollow_source_as_failed(
 
 def test_already_stored_hollow_item_is_not_counted_hollow_again(tmp_path: Path):
     """Without `--force` a stored hollow item is `already` and is not re-counted, so
-    `Huecos` never reports the backlog — the documented jq recipe finds that."""
+    `Hollow` never reports the backlog — the documented jq recipe finds that."""
     store = _hollow_store(tmp_path)
     report = digest_videos(
         store,
@@ -1367,8 +1367,8 @@ def test_format_digest_summary_renders_both_visual_segments():
         transcribed=2, visual_slides=1, visual_skipped=1, groups={"amplify_video/1": ["a", "b"]}
     )
     summary = format_digest_summary(report)
-    assert "1 con slides" in summary
-    assert "1 talking-head (saltados)" in summary
+    assert "1 with slides" in summary
+    assert "1 talking-head (skipped)" in summary
 
 
 def test_format_digest_summary_omits_visual_on_non_frames_run():
@@ -1381,9 +1381,9 @@ def test_format_digest_summary_omits_visual_on_non_frames_run():
 # Today's summary line for the reports below, written out literally — never
 # rebuilt with `format_digest_summary`, which is the code under test.
 _BASE_SUMMARY = (
-    "Vídeos: transcritos 1, sin voz 2, ya digeridos 0, fallidos 0, "
-    "sin vídeo 0, desconocidos 0. "
-    "Dedup: 3 items ← 3 vídeos (3 transcritos este run)."
+    "Videos: transcribed 1, no speech 2, already digested 0, failed 0, "
+    "no video 0, unknown 0. "
+    "Dedup: 3 items ← 3 videos (3 transcribed this run)."
 )
 _THREE_GROUPS = {"amplify_video/1": ["a"], "amplify_video/2": ["b"], "amplify_video/3": ["c"]}
 
@@ -1401,7 +1401,8 @@ def test_format_digest_summary_renders_the_full_visual_segment():
         groups=_THREE_GROUPS,
     )
     assert format_digest_summary(report) == (
-        _BASE_SUMMARY + " Visual: 1 con slides, 1 metraje mudo descrito, 1 talking-head (saltados)."
+        _BASE_SUMMARY
+        + " Visual: 1 with slides, 1 silent footage described, 1 talking-head (skipped)."
     )
 
 
@@ -1411,7 +1412,8 @@ def test_format_digest_summary_shows_a_footage_only_visual_segment():
         transcribed=1, no_speech=2, videos_transcribed=3, visual_footage=2, groups=_THREE_GROUPS
     )
     assert format_digest_summary(report) == (
-        _BASE_SUMMARY + " Visual: 0 con slides, 2 metraje mudo descrito, 0 talking-head (saltados)."
+        _BASE_SUMMARY
+        + " Visual: 0 with slides, 2 silent footage described, 0 talking-head (skipped)."
     )
 
 
@@ -1420,7 +1422,7 @@ def test_format_digest_summary_appends_hollow_to_todays_line():
     report = DigestReport(
         transcribed=1, no_speech=2, videos_transcribed=3, hollow=2, groups=_THREE_GROUPS
     )
-    assert format_digest_summary(report) == (_BASE_SUMMARY + " Huecos (sin voz ni frames): 2.")
+    assert format_digest_summary(report) == (_BASE_SUMMARY + " Hollow (no speech, no frames): 2.")
 
 
 def test_format_digest_summary_puts_hollow_after_the_visual_segment():
@@ -1435,8 +1437,8 @@ def test_format_digest_summary_puts_hollow_after_the_visual_segment():
     )
     assert format_digest_summary(report) == (
         _BASE_SUMMARY
-        + " Visual: 1 con slides, 0 metraje mudo descrito, 1 talking-head (saltados)."
-        + " Huecos (sin voz ni frames): 1."
+        + " Visual: 1 with slides, 0 silent footage described, 1 talking-head (skipped)."
+        + " Hollow (no speech, no frames): 1."
     )
 
 
@@ -1474,7 +1476,7 @@ class _TranscriberMustNotRun:
     `keep_transcript` must reuse the stored transcript and never re-run the ASR.
     It raises `AssertionError`, which `_analyze_media` does not catch (it only
     catches `TranscriberFailed`), so a call aborts the run instead of being
-    quietly counted as `fallidos`; `calls` records it as well."""
+    quietly counted as `failed`; `calls` records it as well."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -1946,9 +1948,9 @@ def test_format_digest_summary_names_reused_transcripts():
     parenthesis; without reuse the line is today's (tested above)."""
     report = DigestReport(no_speech=3, videos_transcribed=1, videos_reused=2, groups=_THREE_GROUPS)
     assert format_digest_summary(report) == (
-        "Vídeos: transcritos 0, sin voz 3, ya digeridos 0, fallidos 0, "
-        "sin vídeo 0, desconocidos 0. "
-        "Dedup: 3 items ← 3 vídeos (1 transcritos este run, 2 con transcripción guardada)."
+        "Videos: transcribed 0, no speech 3, already digested 0, failed 0, "
+        "no video 0, unknown 0. "
+        "Dedup: 3 items ← 3 videos (1 transcribed this run, 2 with stored transcript)."
     )
 
 
@@ -2360,7 +2362,7 @@ def test_keep_transcript_accumulates_reused_videos_across_groups(tmp_path: Path)
     )
 
     assert report.videos_reused == 2
-    assert "2 con transcripción guardada" in format_digest_summary(report)
+    assert "2 with stored transcript" in format_digest_summary(report)
 
 
 def test_keep_transcript_keeps_at_most_one_mp4_on_disk(tmp_path: Path):

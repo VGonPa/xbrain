@@ -111,9 +111,9 @@ def resolve_strategy(requested: str) -> tuple[Strategy, tuple[str, ...]]:
     if requested in get_args(Strategy):
         return FALLBACK_STRATEGY, (f"{requested}{NOT_IMPLEMENTED_SUFFIX}",)
     raise ValueError(
-        f"Estrategia desconocida: {requested!r}. "
-        f"Las declaradas son: {', '.join(get_args(Strategy))}; "
-        f"implementadas hoy: {', '.join(sorted(IMPLEMENTED_STRATEGIES))}."
+        f"Unknown strategy: {requested!r}. "
+        f"Declared: {', '.join(get_args(Strategy))}; "
+        f"implemented today: {', '.join(sorted(IMPLEMENTED_STRATEGIES))}."
     )
 
 

@@ -145,7 +145,7 @@ def load_cases(path: Path) -> tuple[GoldenCase, ...]:
     for entry in raw.get("cases") or []:
         case = _case(entry, path)
         if case.id in seen:
-            raise GoldenSetError(f"{path}: id duplicado {case.id!r}")
+            raise GoldenSetError(f"{path}: duplicate id {case.id!r}")
         seen.add(case.id)
         cases.append(case)
     return tuple(cases)
@@ -158,7 +158,7 @@ def load_scenarios(path: Path) -> tuple[GoldenScenario, ...]:
     for entry in raw.get("scenarios") or []:
         missing = {"id", "question", "reason"} - set(entry)
         if missing:
-            raise GoldenSetError(f"{path}: escenario incompleto, falta {sorted(missing)}")
+            raise GoldenSetError(f"{path}: incomplete scenario, missing {sorted(missing)}")
         scenarios.append(
             GoldenScenario(
                 id=str(entry["id"]),
@@ -188,7 +188,7 @@ def resolve_cases(cases: tuple[GoldenCase, ...], store: dict[str, Item]) -> tupl
         ]
         if missing or surface_missing:
             raise GoldenSetError(
-                f"caso {case.id}: id relevante que no existe en el store: "
+                f"case {case.id}: relevant id that does not exist in the store: "
                 f"{sorted(set(missing) | set(surface_missing))}"
             )
     return cases
@@ -196,13 +196,13 @@ def resolve_cases(cases: tuple[GoldenCase, ...], store: dict[str, Item]) -> tupl
 
 def _read(path: Path) -> dict[str, Any]:
     if not path.exists():
-        raise GoldenSetError(f"golden set no encontrado: {path}")
+        raise GoldenSetError(f"golden set not found: {path}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        raise GoldenSetError(f"{path}: la raíz debe ser un mapa")
+        raise GoldenSetError(f"{path}: the root must be a mapping")
     version = str(raw.get("schema_version", ""))
     if version != "1":
-        raise GoldenSetError(f"{path}: schema_version {version!r}, se esperaba '1'")
+        raise GoldenSetError(f"{path}: schema_version {version!r}, expected '1'")
     return raw
 
 
@@ -214,10 +214,10 @@ def _case(entry: dict[str, Any], path: Path) -> GoldenCase:
     nobody can read is how a wrong rejection message survives review.
     """
     _ = path
-    case_id = str(entry.get("id", "<sin id>"))
+    case_id = str(entry.get("id", "<no id>"))
     unknown = set(entry) - _CASE_KEYS
     if unknown:
-        raise GoldenSetError(f"caso {case_id}: claves desconocidas {sorted(unknown)}")
+        raise GoldenSetError(f"case {case_id}: unknown keys {sorted(unknown)}")
 
     items, topics, surfaces = _validate_relevants(entry, case_id)
     return GoldenCase(
@@ -243,11 +243,9 @@ def _validate_query(entry: dict[str, Any], case_id: str) -> str:
     """
     query = str(entry.get("query", "")).strip()
     if not query:
-        raise GoldenSetError(f"caso {case_id}: sin `query`")
+        raise GoldenSetError(f"case {case_id}: no `query`")
     if "<" in query and ">" in query:
-        raise GoldenSetError(
-            f"caso {case_id}: es una plantilla sin rellenar ({query!r}); no es una pregunta"
-        )
+        raise GoldenSetError(f"case {case_id}: is an unfilled template ({query!r}); not a question")
     return query
 
 
@@ -261,7 +259,7 @@ def _validate_provenance(entry: dict[str, Any], case_id: str) -> str:
     provenance = str(entry.get("provenance", ""))
     if provenance not in PROVENANCES:
         raise GoldenSetError(
-            f"caso {case_id}: procedencia {provenance!r}; admitidas {sorted(PROVENANCES)}"
+            f"case {case_id}: provenance {provenance!r}; allowed {sorted(PROVENANCES)}"
         )
     return provenance
 
@@ -276,7 +274,7 @@ def _validate_strata(entry: dict[str, Any], case_id: str) -> tuple[str, ...]:
     unknown = set(strata) - STRATA
     if unknown:
         raise GoldenSetError(
-            f"caso {case_id}: estrato desconocido {sorted(unknown)}; admitidos {sorted(STRATA)}"
+            f"case {case_id}: unknown stratum {sorted(unknown)}; allowed {sorted(STRATA)}"
         )
     return strata
 
@@ -290,8 +288,8 @@ def _validate_relevants(
     surfaces = tuple(_surface(s, case_id) for s in entry.get("relevant_surfaces") or ())
     if not (items or topics or surfaces):
         raise GoldenSetError(
-            f"caso {case_id}: sin conjunto relevante enumerado. Con el conjunto vacío el "
-            "recall@k es 0/0 y no mide nada; archívalo como `scenario` con su razón"
+            f"case {case_id}: no enumerated relevant set. With an empty set "
+            "recall@k is 0/0 and measures nothing; archive it as a `scenario` with its reason"
         )
     return items, topics, surfaces
 
@@ -308,8 +306,8 @@ def _validate_item_ids(entry: dict[str, Any], case_id: str) -> tuple[str, ...]:
     pseudo = [i for i in items if i.startswith("topic:")]
     if pseudo:
         raise GoldenSetError(
-            f"caso {case_id}: pseudo-id de topic en relevant_items {pseudo}; "
-            "migra a relevant_topics + relevant_surfaces"
+            f"case {case_id}: topic pseudo-id in relevant_items {pseudo}; "
+            "migrate to relevant_topics + relevant_surfaces"
         )
     return items
 
@@ -326,15 +324,15 @@ def _validate_expected_text(entry: dict[str, Any], case_id: str) -> str | None:
         return None
     if len(str(expected)) > MAX_EXPECTED_TEXT:
         raise GoldenSetError(
-            f"caso {case_id}: expected_text de {len(str(expected))} chars supera el techo de "
-            f"{MAX_EXPECTED_TEXT}; es un fragmento identificador, no una copia del cuerpo"
+            f"case {case_id}: expected_text of {len(str(expected))} chars exceeds the ceiling of "
+            f"{MAX_EXPECTED_TEXT}; it is an identifying fragment, not a copy of the body"
         )
     return str(expected)
 
 
 def _surface(raw: Any, case_id: str) -> RelevantSurface:
     if not isinstance(raw, dict):
-        raise GoldenSetError(f"caso {case_id}: relevant_surfaces debe ser una lista de mapas")
+        raise GoldenSetError(f"case {case_id}: relevant_surfaces must be a list of mappings")
     try:
         return RelevantSurface(
             owner_type=str(raw["owner_type"]),
@@ -342,7 +340,7 @@ def _surface(raw: Any, case_id: str) -> RelevantSurface:
             surface_type=raw["surface_type"],
         )
     except KeyError as exc:
-        raise GoldenSetError(f"caso {case_id}: superficie relevante sin {exc}") from exc
+        raise GoldenSetError(f"case {case_id}: relevant surface missing {exc}") from exc
 
 
 def _filters(raw: dict[str, Any], case_id: str) -> SearchFilters:
@@ -360,8 +358,8 @@ def _filters(raw: dict[str, Any], case_id: str) -> SearchFilters:
     unknown = set(raw) - set(SearchFilters.model_fields)
     if unknown:
         raise GoldenSetError(
-            f"caso {case_id}: filtro desconocido {sorted(unknown)}; "
-            f"admitidos {sorted(SearchFilters.model_fields)}"
+            f"case {case_id}: unknown filter {sorted(unknown)}; "
+            f"allowed {sorted(SearchFilters.model_fields)}"
         )
     payload = dict(raw)
     for key, end_of_day in (("created_from", False), ("created_to", True)):
@@ -373,7 +371,7 @@ def _filters(raw: dict[str, Any], case_id: str) -> SearchFilters:
     try:
         return SearchFilters(**payload)
     except Exception as exc:  # pydantic validation, re-raised with the case named
-        raise GoldenSetError(f"caso {case_id}: filtros inválidos — {exc}") from exc
+        raise GoldenSetError(f"case {case_id}: invalid filters — {exc}") from exc
 
 
 def _as_datetime(value: Any, *, end_of_day: bool) -> datetime:

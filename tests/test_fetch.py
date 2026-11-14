@@ -480,7 +480,7 @@ def test_firecrawl_extract_returns_error_result_when_opener_raises(monkeypatch):
 
     result = _firecrawl_extract("https://e.com/a", opener=opener)
     assert isinstance(result, FetchFailure)
-    assert "Firecrawl falló" in (result.error or "")
+    assert "Firecrawl failed" in (result.error or "")
 
 
 def test_firecrawl_extract_detects_error_envelope(monkeypatch):
@@ -507,12 +507,12 @@ def test_extract_article_merges_firecrawl_error_when_both_fail():
 
     def firecrawl(url):
         # Firecrawl reachable but returned no text — carries its own evidence.
-        return FetchFailure(error="Firecrawl no devolvió contenido.", attempts=1)
+        return FetchFailure(error="Firecrawl returned no content.", attempts=1)
 
     result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
     assert isinstance(result, FetchFailure)
     assert result.attempts == 2
-    assert "Firecrawl: Firecrawl no devolvió contenido." in (result.error or "")
+    assert "Firecrawl: Firecrawl returned no content." in (result.error or "")
 
 
 # --------------------------------------------------------------------- #19: transient retry
@@ -1228,7 +1228,7 @@ def test_a_firecrawl_transport_error_does_not_count_as_an_attempt():
         return FetchFailure(failure_reason="js_required", error="js", attempts=1)
 
     def firecrawl_down(url):
-        return FetchFailure(error="Firecrawl falló: 503", attempts=1, transport_error=True)
+        return FetchFailure(error="Firecrawl failed: 503", attempts=1, transport_error=True)
 
     result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl_down)
     assert isinstance(result, FetchFailure)
@@ -1257,7 +1257,7 @@ def test_firecrawl_running_and_finding_nothing_DOES_count_as_an_attempt():
         return FetchFailure(failure_reason="js_required", error="js", attempts=1)
 
     def firecrawl_empty(url):
-        return FetchFailure(failure_reason="empty_content", error="sin contenido", attempts=1)
+        return FetchFailure(failure_reason="empty_content", error="no content", attempts=1)
 
     result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl_empty)
     assert isinstance(result, FetchFailure)
