@@ -171,6 +171,15 @@ def items_needing_refetch(store: dict[str, Item]) -> list[Item]:
     ]
 
 
+def _note_body(tweet: dict[str, Any]) -> str | None:
+    """The `note_tweet` long-form body, or None when X sent none (or an empty one)."""
+    # `_dig` coerces a non-dict leaf to {}, so walk to the parent and read the leaf here.
+    note = _dig(tweet, "note_tweet", "note_tweet_results", "result").get("text")
+    if not isinstance(note, str) or not note.strip():
+        return None
+    return note
+
+
 def _tweet_text(tweet: dict[str, Any], legacy: dict[str, Any]) -> str:
     """The tweet's FULL text — the long-form body when X provides one.
 
@@ -183,10 +192,9 @@ def _tweet_text(tweet: dict[str, Any], legacy: dict[str, Any]) -> str:
     An empty long-form body falls back to `full_text`: shipping a truncated tweet is bad,
     shipping an EMPTY one is worse.
     """
-    # `_dig` coerces a non-dict leaf to {}, so walk to the parent and read the leaf here.
-    note = _dig(tweet, "note_tweet", "note_tweet_results", "result").get("text")
+    note = _note_body(tweet)
     full = legacy.get("full_text", "")
-    if not isinstance(note, str) or not note.strip():
+    if note is None:
         return full
     # A long-form body is by definition NOT SHORTER than the truncation of itself. Compare
     # against the PROSE of `full_text` — the truncation carries an appended t.co that is not
@@ -207,10 +215,13 @@ def _tweet_to_item(tweet: dict[str, Any], source: SourceName) -> Item | None:
         return None
     quoted_id = legacy.get("quoted_status_id_str") or _quoted_id(tweet)
     text = _tweet_text(tweet, legacy)
-    if looks_truncated(text, []):
+    if text != _note_body(tweet) and looks_truncated(text, []):
         # N7: the guard is CALLED, not merely defined. A tweet that still arrives truncated
         # means `note_tweet` was absent (X did not give us the body) or the read regressed —
         # and a silent regression here is exactly how 432 items got half a sentence.
+        # A text that IS the long-form body is whole by definition: `looks_truncated` judges
+        # length, and every long-form body is long, so without this check every long post
+        # warned and the warning stopped meaning anything.
         logger.warning(
             "tweet %s arrives TRUNCATED (%d chars, cut mid-word) — the long-form body was "
             "not available; the generator will be handed half a sentence.",
