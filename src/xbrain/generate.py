@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import filecmp
 import logging
+import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import assert_never
+from typing import assert_never, cast
 
 from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
 from xbrain.i18n import Strings, strings_for
+from xbrain.executors.api import quoted_source
 from xbrain.models import (
     ARTICLE_PARAGRAPH_SEP,
+    QUOTED_CONTENT_KINDS,
     ArticleImageBlock,
     ArticleTextBlock,
-    Content,
+    ArticleVideoBlock,
     ContentSourceFailure,
     ContentSourceSuccess,
     FailureReason,
@@ -31,6 +36,8 @@ from xbrain.models import (
     VideoFrame,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
+from xbrain.verification import ALL_TARGETS, VerifyTarget, verdict_is_current
+from xbrain.video_digest import _video_source
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,7 @@ _FAILURE_ES: dict[FailureReason, str] = {
     "dns_error": "dominio no resuelto",
     "js_required": "requiere JavaScript",
     "empty_content": "sin contenido extraíble",
+    "blocked_interstitial": "muro de cookies o login (sin artículo)",
     "unknown_error": "error desconocido",
 }
 
@@ -69,6 +77,81 @@ def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str
     detail = " · ".join(bits) or "no se pudo recuperar"
     date = fetched_at.date().isoformat()
     return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
+
+
+def _blockquote(text: str) -> list[str]:
+    """Markdown-blockquote every line of `text` — the idiom for words that are NOT the
+    note author's. A blank line becomes a bare `>`, so one quote stays one quote instead
+    of breaking into two at the paragraph gap."""
+    return [f"> {line}" if line.strip() else ">" for line in text.split("\n")]
+
+
+def _quoted_failure_source(item: Item) -> ContentSourceFailure | None:
+    """The recorded reason the quoted post could not be read, or None."""
+    if item.content is None:
+        return None
+    for source in item.content.sources:
+        if isinstance(source, ContentSourceFailure) and source.kind in QUOTED_CONTENT_KINDS:
+            return source
+    return None
+
+
+def _quoted_unavailable_reason(reason: FailureReason, strings: Strings) -> str:
+    """The reader-facing wording for WHY the quoted post is missing.
+
+    `not_found` and `forbidden` are different facts about the world — a deleted post and
+    a locked account — and collapsing them into one "unavailable" would throw away the
+    only thing the reader can act on. Everything else (X hydrated nothing, a timeout)
+    honestly says just that: we do not know what was there.
+    """
+    if reason == "not_found":
+        return strings.quoted_unavailable_deleted
+    if reason == "forbidden":
+        return strings.quoted_unavailable_protected
+    return strings.quoted_unavailable_unknown
+
+
+def _quoted_lines(item: Item, strings: Strings) -> list[str]:
+    """Render the quoted post for the HUMAN — who is quoted, and what they said.
+
+    Until now the quoted body reached every LLM surface and never the reader: on a
+    quote-tweet (35% of the corpus) he met a summary ABOUT a post he could not see. And
+    a readable quote fell into the generic `## Content: <url>` branch — a third party's
+    words, with no author, inside a note whose author is the poster. That is exactly the
+    conflation the attribution rule stops for the model, rendered for the reader.
+
+    So: its own heading, NAMING the quoted account, with the body blockquoted. Inline,
+    not collapsed behind `<details>` — the video digest hides raw *evidence* (frames,
+    transcript) but shows the digest itself, and here the quoted post is not evidence
+    for the note, it IS the note's subject. Hiding the thing the summary is about would
+    reproduce the bug in a nicer wrapper.
+
+    The source is selected by `quoted_source` — the SAME helper the api prompt, the
+    enrich worksheet and the judge read — so the reader cannot be shown a different
+    quoted post from the one the model was given.
+    """
+    source = quoted_source(item)
+    if source is not None:
+        author = source.author
+        attribution = f" — @{author.handle} ({author.name})" if author else ""
+        return [
+            f"## {strings.quoted_post_header}{attribution}",
+            "",
+            *_blockquote(source.text),
+            "",
+            f"<{source.url}>",
+            "",
+        ]
+    failure = _quoted_failure_source(item)
+    if failure is None:
+        return []
+    reason = _quoted_unavailable_reason(failure.failure_reason, strings)
+    return [
+        f"## {strings.quoted_post_unavailable}",
+        "",
+        f"> ⚠ {reason} — <{failure.url}>",
+        "",
+    ]
 
 
 def generate(
@@ -132,7 +215,9 @@ def generate(
                 _mirror_item_article_images(item, media_root, vault_media_dir)
             _write_note(items_dir, item, strings, topic_style)
     try:
-        _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+        _write_dashboard(
+            items, output_dir, items_dir, topic_pages or {}, media_root, output_language
+        )
     except Exception:  # noqa: BLE001 - the dashboard is a best-effort secondary artifact
         logger.warning("Dashboard generation failed; item notes were written.", exc_info=True)
 
@@ -143,6 +228,7 @@ def _write_dashboard(
     items_dir: Path,
     topic_pages: dict[str, TopicPage],
     media_root: Path | None,
+    output_language: str,
 ) -> None:
     """Write the self-contained interactive `dashboard.html` from the store.
 
@@ -161,7 +247,7 @@ def _write_dashboard(
     thumbs = collect_thumbnails(items, media_root, id2note)
     now = datetime.now(timezone.utc)
     updated = f"{now:%b} {now.day}, {now.year}".upper()
-    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated)
+    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated, output_language)
     (output_dir / "dashboard.html").write_text(render_dashboard_html(data), encoding="utf-8")
 
 
@@ -220,6 +306,43 @@ def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
     return None
 
 
+# Emoji per badge-worthy verdict (PASS is never badged — the note stays clean).
+_VERDICT_BADGE_EMOJI: dict[str, str] = {"FAIL": "❌", "REVIEW": "⚠️"}
+
+
+def _verdict_badge(item: Item, target: str, strings: Strings) -> str | None:
+    """A localized verification badge line for one `target`, or None (#79).
+
+    Renders a badge ONLY for a CURRENT, consequential verdict:
+    - the item carries a stored `VerificationVerdict` for `target`, AND
+    - its `output_fingerprint` still equals the item's CURRENT output fingerprint — a
+      STALE verdict (the summary/digest/topics was re-generated since it was judged) is
+      silently skipped, so an output fixed after a FAIL never shows a ❌, AND
+    - the verdict is FAIL or REVIEW (a PASS renders no badge, keeping the note clean).
+
+    The leading flag issue is appended when present (`❌ **Verification: FAIL** — <issue>`),
+    with any internal newline collapsed to a space so a multi-line issue can't break out of
+    the single-line `> …` blockquote (mirrors `_slide_embed_lines`' caption handling).
+    A verdict stored under an unknown target is defensively ignored.
+    """
+    if target not in ALL_TARGETS:
+        return None
+    verdict = item.verification.get(target)
+    if verdict is None or verdict.verdict not in _VERDICT_BADGE_EMOJI:
+        return None
+    if not verdict_is_current(item, cast(VerifyTarget, target), strings.language):
+        # STALE — the verdict was reached under a different contract than the one in force
+        # now: the output was re-generated, or the SOURCE the judge read changed (a frame
+        # description landed, an article got fetched), or the RUBRICS were rewritten. It
+        # says nothing about what a reader sees today, so it paints NOTHING. A verdict with
+        # no contract fingerprint at all (stored before #PR-D) is stale by construction.
+        return None
+    label = strings.verify_badge_fail if verdict.verdict == "FAIL" else strings.verify_badge_review
+    issue = next((flag for flag in verdict.flags if flag), None)
+    suffix = f" — {' '.join(issue.splitlines())}" if issue else ""
+    return f"> {_VERDICT_BADGE_EMOJI[verdict.verdict]} **{label}**{suffix}"
+
+
 def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[str]:
     """Summary + topic refs for an enriched item (empty if not enriched).
 
@@ -237,12 +360,18 @@ def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[st
     lines: list[str] = []
     if item.enriched.summary:
         lines += [item.enriched.summary, ""]
+        summary_badge = _verdict_badge(item, "summary", strings)
+        if summary_badge:
+            lines += [summary_badge, ""]
     if item.enriched.topics:
         if topic_style == "hashtag":
             refs = " ".join(f"#{t}" for t in item.enriched.topics)
         else:
             refs = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
         lines += [f"**{strings.topics_label}:** {refs}", ""]
+        topics_badge = _verdict_badge(item, "topics", strings)
+        if topics_badge:
+            lines += [topics_badge, ""]
     return lines
 
 
@@ -326,6 +455,16 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
     generator; the Obsidian embed then renders as a broken image, the right signal.
     Shared by the photo/video block and the `x_video` slide-frame embeds so the
     self-contained-vault mirroring has ONE implementation.
+
+    A destination that already holds the source bytes is left alone. `generate`
+    re-mirrors the WHOLE media tree on every run and the nightly job runs it
+    nightly, so without this the vault sees thousands of no-op rewrites a night.
+    On a cloud-synced vault that is not free: each rewrite is a modification the
+    sync client must reconcile, and iCloud resolves a clash with a not-yet-uploaded
+    version by keeping BOTH — the loser as a `name N.ext` sibling. The x-knowledge
+    vault accumulated 8.41 GB across 50,020 such copies, every one byte-identical
+    to the file beside it. Comparing before writing is far cheaper than the
+    rewrite it replaces.
     """
     if not source.exists():
         logger.warning(
@@ -334,8 +473,83 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
             source,
         )
         return
+    if _already_mirrored(source, destination):
+        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
+
+
+# The BSD/macOS flag marking a cloud file whose bytes are not on disk. Read from
+# the stdlib rather than hardcoded, and behind a `getattr` because Linux does not
+# define it — there, `os.stat_result` carries no `st_flags` at all, `_is_dataless`
+# is always False, and the byte comparison stays the ONLY path, exactly as before
+# this guard existed.
+_SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)
+
+# Granularity for the metadata-only comparison below. One second is not a tuned
+# tolerance measured on one volume: it is the coarsest timestamp resolution POSIX
+# guarantees, and the granularity every archive format preserves. A copy onto a
+# filesystem with a different resolution comes back rounded, so comparing
+# `st_mtime_ns` for equality would call an already-correct mirror stale.
+_MTIME_GRANULARITY_NS = 1_000_000_000
+
+
+def _is_dataless(st: os.stat_result) -> bool:
+    """True when the platform reports `st` as a cloud file with no local bytes.
+
+    Duck-typed on purpose: anything exposing `st_flags` answers, and anything
+    without it (every Linux stat result) answers False.
+    """
+    return bool(getattr(st, "st_flags", 0) & _SF_DATALESS)
+
+
+def _already_mirrored(source: Path, destination: Path) -> bool:
+    """True when `destination` already holds exactly `source`'s bytes.
+
+    `filecmp.cmp(shallow=False)` compares sizes from `stat` first and only then
+    reads, in 8 KB chunks with an early exit on the first differing byte. The
+    naive `source.read_bytes() == destination.read_bytes()` would hold BOTH
+    files in memory at once, and this walk mirrors `MediaVideoDownloaded` as
+    well as photos — one `download-videos` mp4 would be loaded twice over.
+
+    Reading is the DEFAULT, and it is what every platform that can read without
+    consequence does: a same-size destination whose bytes rotted is repaired,
+    which a metadata comparison could never notice.
+
+    The exception is a file the platform reports as `dataless` — a cloud
+    placeholder whose bytes are not on disk. Opening one blocks until the sync
+    daemon fetches them, and when it cannot, it blocks with no timeout: a
+    `generate` run sat there 22 minutes at 0.0% CPU. That is not an iCloud
+    quirk; OneDrive, Dropbox and any FUSE/NFS placeholder behave the same way.
+    So when either side is dataless the answer comes from size + mtime, the
+    metadata the placeholder already carries, and NOTHING is opened.
+
+    That is a real, named trade: on those files a same-size, same-second
+    corruption goes unrepaired. It buys the guarantee that mirroring cannot
+    hang the run, and it is confined to the case where the strong check is
+    impossible — everywhere else, including all of Linux and every
+    materialised file on macOS, the byte comparison is unchanged.
+
+    `filecmp`'s result cache is keyed on both paths AND both stat signatures,
+    so a file that changed gets a new key. It cannot go stale here anyway: a
+    given (source, destination) pair is compared at most once per `generate`
+    run.
+
+    A stat/read failure answers False: mirroring anyway is the safe direction —
+    it costs a redundant copy, never a stale or missing embed.
+    """
+    try:
+        src, dst = source.stat(), destination.stat()
+    except OSError:
+        return False
+    if src.st_size != dst.st_size:
+        return False
+    if _is_dataless(src) or _is_dataless(dst):
+        return src.st_mtime_ns // _MTIME_GRANULARITY_NS == dst.st_mtime_ns // _MTIME_GRANULARITY_NS
+    try:
+        return filecmp.cmp(source, destination, shallow=False)
+    except OSError:
+        return False
 
 
 def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> None:
@@ -423,7 +637,9 @@ def _slide_embed_lines(frames: list[VideoFrame]) -> list[str]:
     return lines
 
 
-def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[str]:
+def _video_digest_lines(
+    source: ContentSourceSuccess, strings: Strings, badge: str | None = None
+) -> list[str]:
     """Render an `x_video` source as a `Video digest` section (#44 PR3 + PR4).
 
     A with-speech transcript renders under a ``## Video digest: <title>`` heading
@@ -434,15 +650,39 @@ def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[
     renders a single silent-video line instead of an empty digest block; a SILENT
     slide deck (no speech, but with frames) still renders the heading + the slides,
     since that is exactly where a screen-only video carries its content.
+
+    `badge` is the caller's staleness-checked verification badge for the digest (#79):
+    when present it sits right under the heading, where a reader meets the digest. It is
+    already gated to a CURRENT FAIL/REVIEW verdict, so it only appears with a real digest.
     """
     has_text = source.has_speech is not False and bool(source.text)
     if not has_text and not source.frames:
         return [f"> {strings.silent_video}", ""]
     heading = source.title or source.url
     lines = [f"## {strings.video_digest_header}: {heading}", ""]
+    if badge:
+        lines += [badge, ""]
+    if not source.digest:
+        # Fallback (no long-form digest yet): the raw transcript + frame embeds
+        # render inline, exactly as before — so this render change is safe to ship
+        # before any digest exists (an empty `digest` is the default).
+        if has_text:
+            lines += [source.text, ""]
+        lines += _slide_embed_lines(source.frames)
+        return lines
+    # With a digest, it is the readable headline of the section; the raw transcript
+    # + frame slides are demoted into a collapsible `<details>` below — the evidence
+    # stays in the note without the 40-frame wall of noise up top. Blank lines around
+    # the inner content let Obsidian render the markdown/embeds inside the HTML block.
+    lines += [source.digest, ""]
+    evidence: list[str] = []
     if has_text:
-        lines += [source.text, ""]
-    lines += _slide_embed_lines(source.frames)
+        evidence += [source.text, ""]
+    evidence += _slide_embed_lines(source.frames)
+    if evidence:
+        lines += ["<details>", f"<summary>{strings.video_evidence_header}</summary>", ""]
+        lines += evidence
+        lines += ["</details>", ""]
     return lines
 
 
@@ -480,6 +720,36 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
     return []
 
 
+def _article_video_lines(block: ArticleVideoBlock) -> list[str]:
+    """Render one inline Article VIDEO block — embed or clickable stream link.
+
+    Mirrors the video convention in `_render_media_lines` so an article-embedded
+    clip reads the same as a tweet's: a downloaded video embeds its local mp4, a
+    failed one leaves a visible ⚠ line, and a still-pending one surfaces the
+    playable stream as a link rather than vanishing. `alt` (when X carried any)
+    becomes a `> …` caption, one `>` per physical line.
+
+    Pending is NOT silent here, unlike a pending image: an article video has no
+    later pass that advances it (`xbrain media` downloads photos), so staying
+    silent would reproduce exactly the defect this block exists to fix — the
+    video invisible in the note.
+    """
+    entry = block.media
+    caption = [f"> {line}" for line in block.alt.splitlines()] if block.alt else []
+    if isinstance(entry, MediaVideoDownloaded):
+        return [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]", *caption]
+    if isinstance(entry, MediaVideoFailed):
+        reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
+        return [f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>", *caption]
+    if isinstance(entry, MediaVideoPending):
+        return [f"> 🎥 [Ver vídeo]({entry.url}) (pendiente de descarga)", *caption]
+    logger.warning(
+        "Article video carries an unexpected %s media variant; skipping its embed.",
+        type(entry).__name__,
+    )
+    return []
+
+
 def _article_caption_lines(
     block: ArticleImageBlock, entry: MediaPhotoDownloaded | MediaPhotoDescribed
 ) -> list[str]:
@@ -511,22 +781,30 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
     """
     body: list[str] = []
     for block in source.blocks:
+        # Dispatch on EVERY variant explicitly, with `assert_never` closing it:
+        # an `else` catch-all would have quietly routed the new video block into
+        # the image renderer and produced wrong output instead of a type error.
         if isinstance(block, ArticleTextBlock):
             text = block.text.removeprefix(ARTICLE_PARAGRAPH_SEP)
             if text:
                 body += [text, ""]
+            continue
+        if isinstance(block, ArticleImageBlock):
+            media_lines = _article_image_lines(block)
+        elif isinstance(block, ArticleVideoBlock):
+            media_lines = _article_video_lines(block)
         else:
-            image_lines = _article_image_lines(block)
-            if image_lines:
-                body += image_lines
-                body.append("")
+            assert_never(block)
+        if media_lines:
+            body += media_lines
+            body.append("")
     if not body:
         return []
     heading = source.title or source.url
     return [f"## {strings.content_header}: {heading}", "", *body]
 
 
-def _content_lines(content: Content, strings: Strings) -> list[str]:
+def _content_lines(item: Item, strings: Strings) -> list[str]:
     """Rendered article bodies + broken-link evidence for a fetched item.
 
     Switches on the `ContentSource` variant: the success variant is
@@ -540,24 +818,53 @@ def _content_lines(content: Content, strings: Strings) -> list[str]:
     rather than a plain text block (#39 PR5), while an `x_article` with
     empty `blocks` (trafilatura fallback) keeps the plain `source.text`
     block — byte-unchanged.
+
+    Takes the whole `item` (not just its `content`) so the digest verification badge
+    (#79) can be resolved for the item's canonical `x_video` source — the one
+    `verification._output_for(item, "digest")` fingerprints — and only that source.
+    Returns `[]` when the item has no content.
     """
+    content = item.content
+    if content is None:
+        return []
+    digest_source = _video_source(item)
     lines: list[str] = []
     for source in content.sources:
+        # The quoted post has its OWN attributed section under the tweet (`_quoted_lines`).
+        # It must never fall through to the generic `## Content: <url>` branch, which would
+        # print a third party's words with no author inside a note whose author is the
+        # poster — and would print them twice.
+        if source.kind in QUOTED_CONTENT_KINDS:
+            continue
         if isinstance(source, ContentSourceSuccess):
-            if source.kind == "x_video":
-                lines += _video_digest_lines(source, strings)
-            elif source.kind == "x_article" and source.blocks:
-                # Structured Article (#39): render the ordered text+image blocks
-                # as a blogpost. An `x_article` with EMPTY blocks (trafilatura
-                # fallback, or a pre-#39 record) falls through to the plain
-                # `source.text` path below — byte-unchanged, no regression.
-                lines += _article_blocks_lines(source, strings)
-            else:
-                heading = source.title or source.url
-                lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
+            lines += _success_source_lines(item, source, digest_source, strings)
         elif source.kind in ("external_article", "x_article"):
             lines += [_broken_link_line(source, content.fetched_at), ""]
     return lines
+
+
+def _success_source_lines(
+    item: Item,
+    source: ContentSourceSuccess,
+    digest_source: ContentSourceSuccess | None,
+    strings: Strings,
+) -> list[str]:
+    """Render one successfully-fetched source as its own kind of block.
+
+    An `x_video` becomes a `Video digest` section (#44); an `x_article` carrying
+    structured `blocks` becomes an ordered blogpost (#39 PR5), while one with EMPTY
+    blocks (trafilatura fallback, or a pre-#39 record) keeps the plain `source.text`
+    block — byte-unchanged. Everything else falls back to that plain block.
+    """
+    if source.kind == "x_video":
+        # Badge only the canonical digest source (the one whose digest is
+        # fingerprinted); a second x_video source, if any, is never mis-badged.
+        badge = _verdict_badge(item, "digest", strings) if source is digest_source else None
+        return _video_digest_lines(source, strings, badge)
+    if source.kind == "x_article" and source.blocks:
+        return _article_blocks_lines(source, strings)
+    heading = source.title or source.url
+    return [f"## {strings.content_header}: {heading}", "", source.text, ""]
 
 
 def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
@@ -574,13 +881,18 @@ def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
     if media_lines:
         lines += media_lines
         lines.append("")
+    # The quoted post sits directly under the tweet + its media, exactly where X puts the
+    # quote card — the same natural-read-order argument the media block makes above. It
+    # is the SUBJECT of a quote-tweet's summary, so burying it below `## Enlaces` and the
+    # permalink (where `_content_lines` renders) would leave the reader meeting the
+    # summary long before the thing it is about.
+    lines += _quoted_lines(item, strings)
     if item.links:
         lines.append("## Enlaces")
         lines += [f"- <{link.url}>" for link in item.links]
         lines.append("")
     lines += [f"[Ver tweet original]({item.url})", ""]
-    if item.content:
-        lines += _content_lines(item.content, strings)
+    lines += _content_lines(item, strings)
     return "\n".join(lines).rstrip()
 
 

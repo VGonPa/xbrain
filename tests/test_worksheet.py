@@ -175,9 +175,19 @@ def test_export_worksheet_omits_image_descriptions_when_no_described_photos(tmp_
     assert data["items"][0]["image_descriptions"] == []
 
 
-def _video_item(item_id: str, *, text: str, has_speech: bool = True) -> Item:
-    """An item carrying an `x_video` transcript content source (#44)."""
-    from xbrain.models import Content, ContentSourceSuccess
+def _video_item(
+    item_id: str,
+    *,
+    text: str,
+    has_speech: bool = True,
+    frame_descs: tuple[str, ...] = (),
+) -> Item:
+    """An item carrying an `x_video` transcript + key-frame content source (#44).
+
+    `frame_descs` populate the `x_video` `frames` list (slides/screens shown in the
+    video), a different field from the `MediaPhotoDescribed` photos on `item.media`.
+    """
+    from xbrain.models import Content, ContentSourceSuccess, VideoFrame
 
     return Item(
         id=item_id,
@@ -195,6 +205,14 @@ def _video_item(item_id: str, *, text: str, has_speech: bool = True) -> Item:
                     url="https://x.com/v",
                     text=text,
                     has_speech=has_speech,
+                    frames=[
+                        VideoFrame(
+                            timestamp=float(i),
+                            local_path=f"{item_id}/frames/{i}.png",
+                            description=d,
+                        )
+                        for i, d in enumerate(frame_descs)
+                    ],
                 )
             ],
         ),
@@ -224,16 +242,240 @@ def test_export_worksheet_omits_no_speech_video_transcript(tmp_path):
     assert data["items"][0]["video_transcript"] is None
 
 
-def test_export_worksheet_truncates_an_over_cap_video_transcript(tmp_path):
-    """A 72-min-talk-scale transcript is capped in the worksheet's `video_transcript`
-    field (same `TRANSCRIPT_CHAR_LIMIT` as the `api` prompt) so the manual/claude-code
-    track sees identical, bounded input and one long talk can't bloat the worksheet."""
+def test_export_worksheet_carries_the_full_video_transcript(tmp_path):
+    """The worksheet carries the FULL transcript — unlike the `api` prompt, which is
+    truncated to `TRANSCRIPT_CHAR_LIMIT`. The worksheet is judged by a full-context
+    agent (not a bounded per-item model call), so it reads the whole talk and its
+    summary/topics are not front-biased to the first ~13 min. The two engines
+    legitimately diverge on input size (see `worksheet._video_transcript`)."""
     from xbrain.rubrics import TRANSCRIPT_CHAR_LIMIT
 
-    long_text = "word " * TRANSCRIPT_CHAR_LIMIT  # >> the cap
+    long_text = "word " * TRANSCRIPT_CHAR_LIMIT  # >> the api cap
     path = tmp_path / "ws.json"
     export_worksheet([_video_item("1", text=long_text)], VOCAB, path, "manual", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     transcript = data["items"][0]["video_transcript"]
-    assert "transcript truncated" in transcript
-    assert len(transcript) < len(long_text)
+    assert transcript == long_text  # full, untruncated
+    assert "transcript truncated" not in transcript
+
+
+def test_export_worksheet_includes_video_frame_descriptions(tmp_path):
+    """Key-frame descriptions surface under `video_frame_descriptions` so the
+    manual/claude-code enrich track sees what the video SHOWS (slides/screens),
+    mirroring the api path's `Video frames` section."""
+    path = tmp_path / "ws.json"
+    export_worksheet(
+        [
+            _video_item(
+                "1",
+                text="a talk",
+                frame_descs=("A title slide: 'Scaling'.", "A chart of loss curves."),
+            )
+        ],
+        VOCAB,
+        path,
+        "manual",
+        "English",
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["video_frame_descriptions"] == [
+        "A title slide: 'Scaling'.",
+        "A chart of loss curves.",
+    ]
+
+
+def test_export_worksheet_frame_descriptions_present_when_no_speech(tmp_path):
+    """A mute slide/screen-share video (has_speech=False) contributes its frame
+    descriptions even with no transcript — the whole point of feeding frames."""
+    path = tmp_path / "ws.json"
+    export_worksheet(
+        [
+            _video_item(
+                "1",
+                text="",
+                has_speech=False,
+                frame_descs=("A slide: Postgres vs DynamoDB latency.",),
+            )
+        ],
+        VOCAB,
+        path,
+        "manual",
+        "English",
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entry = data["items"][0]
+    assert entry["video_frame_descriptions"] == ["A slide: Postgres vs DynamoDB latency."]
+    assert entry["video_transcript"] is None  # no speech → no transcript
+
+
+def test_export_worksheet_omits_video_frame_descriptions_when_none(tmp_path):
+    """A video without described frames exports a clean empty list, not a missing key."""
+    path = tmp_path / "ws.json"
+    export_worksheet([_video_item("1", text="a talk")], VOCAB, path, "manual", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["video_frame_descriptions"] == []
+
+
+def test_export_worksheet_notes_unfetched_links(tmp_path):
+    """A linking item with no fetched content carries an explicit guardrail note,
+    so the enrich agent never guesses the linked content from the URL/domain."""
+    path = tmp_path / "ws.json"
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    from xbrain.executors.api import unfetched_links_note
+
+    note = data["items"][0]["unfetched_links_note"]
+    assert note is not None
+    assert note == unfetched_links_note(_item("1"))  # the SHARED note, verbatim
+
+
+def test_export_worksheet_no_unfetched_note_when_article_fetched(tmp_path):
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _item("1")
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://arxiv.org/abs/1",
+                title="Paper",
+                text="the fetched body",
+            )
+        ],
+    )
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["unfetched_links_note"] is None
+
+
+def test_export_worksheet_no_unfetched_note_without_links(tmp_path):
+    item = _item("1")
+    item.links = []
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["unfetched_links_note"] is None
+
+
+def _exported(item, tmp_path) -> dict:
+    """Export one item and return its worksheet entry."""
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    return json.loads(path.read_text(encoding="utf-8"))["items"][0]
+
+
+def _with_sources(item, *sources):
+    from xbrain.models import Content
+
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=list(sources)
+    )
+    return item
+
+
+def _success(kind: str, text: str, **extra):
+    from xbrain.models import ContentSourceSuccess
+
+    return ContentSourceSuccess(kind=kind, url="https://x.com/a/status/1", text=text, **extra)
+
+
+def test_export_worksheet_thread_text_is_a_thread_not_an_article(tmp_path):
+    """F1: a thread's own text must NOT be exported as the fetched `article` — the
+    enrich agent would read the poster's own words as a downloaded linked page."""
+    item = _with_sources(_item("1"), _success("thread", "1/ my thread\n\n2/ about agents"))
+    entry = _exported(item, tmp_path)
+    assert entry["article"] is None
+    assert entry["thread"] == "1/ my thread\n\n2/ about agents"
+    # …and the link nobody fetched is still flagged.
+    assert entry["unfetched_links_note"] is not None
+
+
+def test_export_worksheet_partial_fetch_notes_the_missing_link(tmp_path):
+    """F5: 2 links, 1 fetched — the article is exported AND the note states the counts."""
+    from xbrain.models import Link
+
+    item = _item("1")
+    item.links = [
+        Link(url="https://arxiv.org/abs/1", domain="arxiv.org"),
+        Link(url="https://t.co/x", domain="time.com"),
+    ]
+    _with_sources(item, _success("external_article", "the fetched body", title="Paper"))
+    entry = _exported(item, tmp_path)
+    assert entry["article"] == "the fetched body"
+    assert "1 of 2" in entry["unfetched_links_note"]
+
+
+def test_export_worksheet_marks_an_unfetched_quoted_post(tmp_path):
+    """F3: the quoted post is never fetched — the worksheet says so, so the agent
+    does not invent the shared content the summary rubric asks it to describe."""
+    item = _item("1")
+    item.quoted_id = "999"
+    from xbrain.executors.api import QUOTED_CONTENT_UNFETCHED_NOTE
+
+    entry = _exported(item, tmp_path)
+    assert entry["quoted_content_note"] == QUOTED_CONTENT_UNFETCHED_NOTE
+
+
+def test_export_worksheet_no_quoted_note_without_a_quote(tmp_path):
+    assert _exported(_item("1"), tmp_path)["quoted_content_note"] is None
+
+
+def test_export_worksheet_carries_author_display_name(tmp_path):
+    """The summary rubric admits the author metadata as evidence for WHO POSTED, and the
+    judge's `_source_text` holds `@handle (Display Name)` since #86. Shipping the handle
+    alone leaves the generator de-abbreviating `@lexfridman` into a name it never saw while
+    the judge validates against the display name it DID see — the two sides disagreeing
+    about what evidence exists. 221 of 235 video authors have a name that differs from the
+    handle, so this is the common case.
+    """
+    path = tmp_path / "ws.json"
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["author"] == "a"
+    assert entry["author_name"] == "A"
+
+
+def test_export_worksheet_summary_rubric_carries_the_evidence_contract(tmp_path):
+    """The exported worksheet IS the enrich model's prompt. Assert one canary per rule, so
+    a swapped or gutted rubric reds here instead of silently shipping the OLD rule that
+    produced 307 ungrounded names."""
+    path = tmp_path / "ws.json"
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
+    rubric = json.loads(path.read_text(encoding="utf-8"))["rubrics"]["summary"].lower()
+    assert "neutral descriptor" in rubric, "lost the never-name-an-unnamed-entity rule"
+    assert "verbatim" in rubric, "lost the quote-verbatim rule"
+    assert "sharpen" in rubric, "lost the do-not-sharpen rule"
+    assert "domain" in rubric, "lost the URL/domain-is-not-a-name rule"
+
+
+def test_export_worksheet_carries_the_fetched_article_title(tmp_path):
+    """The summary rubric declares "the fetched article body AND ITS TITLE" as evidence.
+
+    The api prompt ships the title (`Linked article ({src.title …})`) and the judge's
+    `_source_text` ships it — but the worksheet track, the one that actually runs, shipped
+    the body only. So the rubric named a surface the running generator was never handed:
+    a promise the code did not keep. Measured cost: 8 summaries were flagged as ungrounded
+    for names that appear in the article's title — one of them "Financial Times", the case
+    we had both been citing as the canonical hallucination. It was grounded all along.
+    """
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _item("1")
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://ft.com/x",
+                title="Financial Times: the compute race",
+                text="A long article body.",
+            )
+        ],
+    )
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["article_title"] == "Financial Times: the compute race"
+    assert entry["article"] == "A long article body."

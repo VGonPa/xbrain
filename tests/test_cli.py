@@ -1,14 +1,63 @@
 # tests/test_cli.py
+import json
+import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from xbrain.cli import app
-from xbrain.models import Author, Item, Link
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Link,
+    VideoFrame,
+)
 from xbrain.store import save_store
+from xbrain.verification import VerdictWriteResult
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Rich panel/box-drawing chrome (Unicode block U+2500–U+257F): ╭ ╮ ╰ ╯ ─ │ etc.
+_BOX_RE = re.compile("[─-╿]")
+
+
+def _plain_output(output: str) -> str:
+    """Normalize CliRunner output for substring assertions on Rich/Typer error boxes.
+
+    When color is enabled (as in CI, but not in pytest's captured output), Rich styles
+    each flag with the leading dash in its own ANSI span (``-`` + ``-apply``), so the
+    literal ``--apply`` never appears contiguously; the narrow box also wraps the message
+    onto several lines, with box borders (``│``) landing between words. Stripping the ANSI
+    escapes rejoins the split flag, dropping the box-drawing chrome and collapsing
+    whitespace rejoins words wrapped across lines — making the assertion fully
+    terminal-width independent.
+    """
+    return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
+
+
+def _write_tally(output: str) -> str:
+    """The verdict-write tally the CLI echoed, without its ` → <path>` suffix — for EQUALITY
+    assertions against `VerdictWriteResult(...).summary()`, the very builder the CLI echoes.
+
+    A substring check is UNSAFE on this line. The success rendering (`1 verdicts escritos`) is a
+    literal substring of the failure rendering (`0 de 1 verdicts escritos (1 omitidos:
+    fingerprint-missing)`), so `assert "1 verdicts escritos" in output` is satisfied verbatim by
+    the message saying the exact opposite — zero written, one skipped. Comparing the whole line
+    to the builder's own output pins the test to the source of truth by reference, instead of to
+    a phrase a contradictory message also contains.
+    """
+    for line in _ANSI_RE.sub("", output).splitlines():
+        if "verdicts escritos" in line:
+            return line.split("→")[0].strip()
+    raise AssertionError(f"no verdict-write tally was echoed in: {output!r}")
 
 
 def _setup_repo(tmp_path: Path, monkeypatch) -> Path:
@@ -1976,6 +2025,57 @@ def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, m
     assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id is None
 
 
+def test_extract_empty_capture_fails_loud_and_freezes_the_cursor(tmp_path: Path, monkeypatch):
+    """Capturing NOTHING must never read as "0 nuevos items" with exit 0.
+
+    The X operation rename (30-ago-2026) made every response fall through the
+    capture filter. The run reported success, the cursor kept its old value, and
+    four posts stayed out of the store for 18 days with no signal anywhere.
+    """
+    from xbrain.extract.extractor import OperationNotCaptured
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _nothing_captured(*_a, **_k):
+        raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline/UserTweets")
+
+    _mock_browser(monkeypatch, _nothing_captured)
+
+    result = runner.invoke(app, ["extract", "--source", "tweets"])
+
+    assert result.exit_code == 1, result.output
+    assert "0 respuestas" in result.output
+    assert "0 nuevos items" not in result.output
+    assert load_store(tmp_path / "data" / "items.json") == {}
+    # The cursor must be untouched: advancing it would make the next run look
+    # fresh and bury the breakage under a second false negative.
+    assert load_state(tmp_path / "data" / "state.json").own_tweets.last_seen_id is None
+
+
+def test_extract_one_broken_source_still_saves_the_healthy_one(tmp_path: Path, monkeypatch):
+    """A rename hits ONE operation, so `--source all` must not lose the other."""
+    from xbrain.extract.extractor import OperationNotCaptured
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _by_source(_context, source, *_a, **_k):
+        if source == "own_tweet":
+            raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline")
+        return [_linked_item("100")]
+
+    _mock_browser(monkeypatch, _by_source)
+
+    result = runner.invoke(app, ["extract", "--source", "all"])
+
+    assert result.exit_code == 1, result.output
+    state = load_state(tmp_path / "data" / "state.json")
+    assert list(load_store(tmp_path / "data" / "items.json")) == ["100"]
+    assert state.bookmarks.last_seen_id == "100"
+    assert state.own_tweets.last_seen_id is None
+
+
 # ------------------------------------------------------ list-videos / fetch-video
 
 
@@ -2474,14 +2574,21 @@ def _setup_repo_with_vision(tmp_path: Path, monkeypatch, command: str = "vlm-des
 
 
 def _write_slide_png(path: Path) -> None:
-    """A high-edge (text/line) image so the REAL `classify_visual` reads 'slides'."""
+    """A high-edge (text/line) image so the REAL `classify_visual` reads 'slides'.
+
+    Content varies by the frame index in the filename (a big filled bar in a
+    distinct vertical band) so DISTINCT frames get distinct perceptual hashes and
+    survive dedup — two identically-drawn frames would (correctly) collapse to one.
+    """
     from PIL import Image, ImageDraw
 
+    idx = int("".join(c for c in path.stem if c.isdigit()) or "0")
     img = Image.new("RGB", (640, 360), "white")
     draw = ImageDraw.Draw(img)
     for y in range(40, 320, 24):
         draw.line([(40, y), (600, y)], fill="black", width=3)
-    draw.rectangle([300, 200, 560, 330], outline="black", width=4)
+    band = 30 + (idx % 5) * 60
+    draw.rectangle([120, band, 560, band + 50], fill="black")
     img.save(path)
 
 
@@ -2497,20 +2604,27 @@ def _write_photo_png(path: Path) -> None:
     img.convert("RGB").save(path)
 
 
-def _wire_frames(monkeypatch, *, describe_calls: list | None = None, writer=_write_slide_png):
+def _wire_frames(
+    monkeypatch,
+    *,
+    describe_calls: list | None = None,
+    writer=_write_slide_png,
+    n_frames: int = 2,
+):
     """Mock ffmpeg extraction (real PNGs) + the external vision subprocess.
 
     `writer` paints each fake frame — `_write_slide_png` (default, high-edge →
     'slides') or `_write_photo_png` (low-edge → 'talking_head'). The REAL
     `classify_visual` runs on the produced images, so the CLI's slide-vs-
-    talking-head decision is exercised end-to-end."""
+    talking-head decision is exercised end-to-end. `n_frames` is how many RAW
+    frames the fake extraction returns (enough to exceed a configured cap)."""
     from xbrain.video_frames import KeyFrame
 
     def _fake_extract(path, **_kwargs):
         frames_dir = Path(path).parent / "xbrain-frames-fake"
         frames_dir.mkdir(parents=True, exist_ok=True)
         frames = []
-        for index in range(2):
+        for index in range(n_frames):
             frame_path = frames_dir / f"frame-{index:05d}.png"
             writer(frame_path)
             frames.append(KeyFrame(timestamp=float(index * 10), path=frame_path))
@@ -2576,7 +2690,7 @@ def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
     _wire_frames(monkeypatch)  # extract → slide frames; real classify_visual runs
     seen: list = []
 
-    def _capture(path, *, command, model):
+    def _capture(path, *, command, model, language=None):
         seen.append(model)
         return "slide"
 
@@ -2590,15 +2704,12 @@ def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
 
 def test_digest_video_vision_model_without_frames_errors(tmp_path: Path, monkeypatch):
     """`--vision-model` without `--frames` is a hard error, not a silent no-op."""
-    import re
-
     _setup_repo_with_vision(tmp_path, monkeypatch)
     save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["digest-video", "--ids", "42", "--vision-model", "opus"])
     assert result.exit_code == 2  # click usage error (BadParameter), robust across widths
-    # Strip ANSI + collapse Rich's width-dependent wrapping before matching the message.
-    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
-    assert "--frames" in plain
+    # Normalize ANSI flag-styling + Rich's width-dependent wrapping before matching.
+    assert "--frames" in _plain_output(result.output)
 
 
 def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatch):
@@ -2614,7 +2725,7 @@ def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatc
     _wire_frames(monkeypatch)
     seen: list = []
 
-    def _capture(path, *, command, model):
+    def _capture(path, *, command, model, language=None):
         seen.append(model)
         return "slide"
 
@@ -2687,3 +2798,2192 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
     assert "## Video digest" in note  # the transcript digest still renders
     assert "_media/42/frames" not in note  # but NO slide embed
     assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()
+
+
+def _summary_line(output: str) -> str:
+    """The `digest-video` summary line the CLI echoed — for EQUALITY assertions, so a
+    count is pinned where it sits (`Visual: 0 con slides` is not `Visual: 10 con …`)."""
+    for line in _ANSI_RE.sub("", output).splitlines():
+        if line.startswith("Vídeos:"):
+            return line
+    raise AssertionError(f"no digest-video summary was echoed in: {output!r}")
+
+
+_BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
+
+
+@pytest.mark.parametrize(
+    ("writer", "transcript", "frames_toml", "kept", "summary", "cap_log"),
+    [
+        pytest.param(
+            _write_photo_png,
+            _silent_transcript,
+            _BUDGETS + "dedupe = false\n",
+            2,
+            "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+            "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
+            (
+                "INFO",
+                "digest-video: capped 5 distinct frames to footage_max_frames=2 — raise "
+                "[frames].footage_max_frames to describe them all",
+            ),
+            id="silent-footage-capped-by-footage_max_frames",
+        ),
+        pytest.param(
+            _write_slide_png,
+            _speech_transcript,
+            _BUDGETS + "dedupe = false\n",
+            4,
+            "Vídeos: transcritos 1, sin voz 0, ya digeridos 0, fallidos 0, sin vídeo 0, "
+            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+            "Visual: 1 con slides, 0 metraje mudo descrito, 0 talking-head (saltados).",
+            (
+                "WARNING",
+                "digest-video: capped 5 distinct frames to max_frames=4 — raise "
+                "[frames].max_frames to describe them all",
+            ),
+            id="slides-capped-by-max_frames",
+        ),
+        pytest.param(
+            _write_photo_png,
+            _silent_transcript,
+            _BUDGETS,  # dedupe left at its default (on)
+            1,
+            "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+            "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
+            None,  # one distinct frame is under the cap: nothing was dropped to warn about
+            id="silent-footage-deduped-before-the-cap",
+        ),
+    ],
+)
+def test_digest_video_frames_caps_footage_and_slides_with_their_own_budget(
+    tmp_path: Path, monkeypatch, caplog, writer, transcript, frames_toml, kept, summary, cap_log
+):
+    """The CLI-built visual config gives each reducer its OWN `[frames]` budget.
+
+    Five raw frames, `max_frames = 4`, `footage_max_frames = 2`: a silent non-slide
+    video keeps (and pays vision for) exactly 2 — the footage cap — while a slide
+    talk keeps 4 — the slide cap. Were `footage_max_frames` unbound, the silent
+    video would describe all 5; were the two swapped, the slide talk would keep 2.
+    The third case leaves dedupe on: the five identical camera frames collapse to
+    ONE before the cap, so the footage reducer honours `[frames].dedupe` too.
+    A capped run's log names the setting that capped it, so an operator who
+    wants more frames raises the knob that governs THAT video — at WARNING for a
+    slide deck that lost slides, at INFO for footage, whose trim is intended. The
+    capture runs at INFO so the footage record is really seen.
+    """
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + frames_toml, encoding="utf-8")
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, transcript())
+    describe_calls: list = []
+    _wire_frames(monkeypatch, describe_calls=describe_calls, writer=writer, n_frames=5)
+
+    with caplog.at_level(logging.INFO, logger="xbrain.video_frames"):
+        result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    assert result.exit_code == 0, result.output
+    frames = load_store(items_path)["42"].content.sources[0].frames
+    assert len(frames) == kept
+    assert len(describe_calls) == kept  # the cap is a VISION budget, not just storage
+    assert [frame.local_path for frame in frames] == [f"42/frames/{i}.png" for i in range(kept)]
+    assert _summary_line(result.output) == summary
+    capped = [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.name == "xbrain.video_frames" and "distinct frames to" in r.getMessage()
+    ]
+    assert capped == ([cap_log] if cap_log else [])
+
+
+def test_digest_video_frames_help_states_the_footage_rule():
+    """The `--frames` help is the operator's contract. It must say that a talking-
+    head is skipped only WITH speech and that a silent non-slide video is described
+    as footage under `[frames].footage_max_frames` — the old text promised an
+    unconditional skip. Read from the option itself, not from a rendered page."""
+    from typer.main import get_command
+
+    command = get_command(app).commands["digest-video"]
+    help_text = next(param.help for param in command.params if param.name == "frames")
+    assert "los talking-head se saltan (se registra)" not in help_text
+    assert help_text.endswith(
+        "Las slides se describen; un talking-head CON voz se salta (el transcript ya lo "
+        "cubre; se registra); un vídeo mudo sin slides se describe como metraje, con "
+        "tope `\\[frames].footage_max_frames`."
+    )
+
+
+# ------------------------------------------------------ digest-video --keep-transcript
+
+
+def _hollow_video_item(item_id: str = "42") -> Item:
+    """A video item already carrying a hollow `x_video` source (no words, no
+    frames): what `--frames --force --keep-transcript` exists to recover."""
+    item = _video_item(item_id, url=_AMPLIFY_URL_1)
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(kind="x_video", url=_AMPLIFY_URL_1, text="", has_speech=False)
+        ],
+    )
+    return item
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        pytest.param(
+            ["--force", "--keep-transcript"],
+            "--keep-transcript requires --frames (it only re-runs the visual layer)",
+            id="without-frames",
+        ),
+        pytest.param(
+            ["--frames", "--keep-transcript"],
+            "--keep-transcript requires --force (it re-digests already-digested videos)",
+            id="without-force",
+        ),
+    ],
+)
+def test_digest_video_keep_transcript_needs_frames_and_force(
+    tmp_path: Path, monkeypatch, flags, message
+):
+    """`--keep-transcript` only means something on a forced visual re-digest.
+    Anywhere else it is a usage error: nothing is transcribed or written."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _hollow_video_item()}, items_path)
+    before = items_path.read_bytes()
+    calls: list = []
+    _wire_digest(monkeypatch, _silent_transcript(), calls=calls)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", *flags])
+    assert result.exit_code == 2  # click usage error (BadParameter)
+    assert message in _plain_output(result.output)
+    assert calls == []
+    assert items_path.read_bytes() == before
+
+
+def test_digest_video_keep_transcript_recovers_a_hollow_item_without_the_asr(
+    tmp_path: Path, monkeypatch
+):
+    """The hollow-recovery run end to end: the ASR never runs, the silent
+    non-slide video gets its frame as footage (two identical camera frames
+    dedupe to one), and the summary says so."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _hollow_video_item()}, items_path)
+    before = items_path.read_bytes()
+    calls: list = []
+
+    def _asr_must_not_run(path):
+        raise AssertionError(f"the ASR ran on {path} under --keep-transcript")
+
+    _wire_digest(monkeypatch, _asr_must_not_run, calls=calls)
+    _wire_frames(monkeypatch, writer=_write_photo_png)
+
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "42", "--frames", "--force", "--keep-transcript"]
+    )
+    assert calls == []
+    assert result.exit_code == 0, result.output
+    snapshots = list((tmp_path / "data" / "snapshots").glob("*-pre-digest-video"))
+    assert len(snapshots) == 1
+    assert (snapshots[0] / "items.json").read_bytes() == before
+    source = load_store(items_path)["42"].content.sources[0]
+    assert (source.text, source.has_speech) == ("", False)
+    assert [(f.local_path, f.description) for f in source.frames] == [
+        ("42/frames/0.png", "slide frame-00000")
+    ]
+    assert _summary_line(result.output) == (
+        "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+        "desconocidos 0. Dedup: 1 items ← 1 vídeos "
+        "(0 transcritos este run, 1 con transcripción guardada). "
+        "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados)."
+    )
+
+
+def test_digest_video_keep_transcript_gives_a_pending_sibling_its_own_transcript(
+    tmp_path: Path, monkeypatch
+):
+    """Item 7 (never digested) and item 42 (stored hollow) bookmark the same video,
+    and 7 is listed first. The ASR runs once, for 7 only: its invented words stay
+    on 7, and 42 keeps its empty transcript and gets its frame."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _video_item("7", url=_AMPLIFY_URL_2), "42": _hollow_video_item()}, items_path)
+    calls: list = []
+    _wire_digest(monkeypatch, _speech_transcript("you you"), calls=calls)
+    _wire_frames(monkeypatch, writer=_write_photo_png)
+
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "7,42", "--frames", "--force", "--keep-transcript"]
+    )
+    assert result.exit_code == 0, result.output
+    assert [Path(call).name for call in calls] == ["7.mp4"]
+    store = load_store(items_path)
+    pending = store["7"].content.sources[0]
+    hollow = store["42"].content.sources[0]
+    assert (pending.text, pending.has_speech, pending.frames) == ("you you", True, [])
+    assert (hollow.text, hollow.has_speech) == ("", False)
+    assert [(f.local_path, f.description) for f in hollow.frames] == [
+        ("42/frames/0.png", "slide frame-00000")
+    ]
+    assert _summary_line(result.output) == (
+        "Vídeos: transcritos 1, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+        "desconocidos 0. Dedup: 2 items ← 1 vídeos "
+        "(1 transcritos este run, 1 con transcripción guardada). "
+        "Visual: 0 con slides, 1 metraje mudo descrito, 1 talking-head (saltados)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        pytest.param(
+            "keep_transcript",
+            "Con --frames --force: rehace la capa visual y reutiliza la transcripción "
+            "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
+            "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
+            id="keep-transcript",
+        ),
+        pytest.param(
+            "force",
+            "Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
+            "con --keep-transcript.",
+            id="force",
+        ),
+    ],
+)
+def test_digest_video_keep_transcript_help_names_the_recovery_use(option: str, expected: str):
+    """The help of `--keep-transcript` and of `--force` is the operator's contract,
+    read from the option itself: neither may claim what the other undoes."""
+    from typer.main import get_command
+
+    command = get_command(app).commands["digest-video"]
+    help_text = next((param.help for param in command.params if param.name == option), None)
+    assert help_text == expected
+
+
+def test_frames_render_the_rubric_in_the_output_language(tmp_path: Path, monkeypatch):
+    """The frame rubric renders in the WIKI's language (`[output].language`).
+    `digest-video --language` is the AUDIO language handed to the transcriber;
+    wiring that one here would render the rubric in the language of the SPEECH,
+    which is a different thing that happens to look right in the common case."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8") + '[output]\nlanguage = "Spanish"\n', encoding="utf-8"
+    )
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+    _wire_digest(monkeypatch, _speech_transcript("the talk"))
+    _wire_frames(monkeypatch)
+    seen: list = []
+
+    def _capture(path, *, command, model, language):
+        seen.append(language)
+        return "slide"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
+    # --language English is the AUDIO language and must NOT reach the rubric.
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "42", "--frames", "--language", "English"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen and set(seen) == {"Spanish"}
+
+
+def _verify_video_item(item_id: str = "7") -> Item:
+    """An enriched item with an x_video source — the shape `verify` audits."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="watch this",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="claude-code",
+            summary="The talk moved €150M in revenue.",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/v",
+                    title="A talk",
+                    text="the full transcript body about agents and revenue",
+                    has_speech=True,
+                    frames=[
+                        VideoFrame(
+                            timestamp=0.0, local_path="7/frames/0.png", description="A chart."
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+
+
+def _write_fail_report(tmp_path: Path) -> None:
+    """Seed a verify-report.json with one FAIL record (as PR-1's aggregate writes it)."""
+    report = {
+        "total": 1,
+        "counts": {"PASS": 0, "REVIEW": 0, "FAIL": 1},
+        "records": [
+            {
+                "item_id": "7",
+                "target": "summary",
+                "verdict": "FAIL",
+                "faithfulness": "FAIL",
+                "adherence": "PASS",
+                "divergent": False,
+                "n_judges": 3,
+                "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+            }
+        ],
+    }
+    (tmp_path / "data" / "verify-report.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_verify_audit_exports_consequential_worksheet(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    ws = tmp_path / "data" / "verify-audit-worksheet.json"
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    assert data["items"][0]["item_id"] == "7"
+    assert data["items"][0]["output"] == "The talk moved €150M in revenue."
+    assert "transcript body about agents" in data["items"][0]["source"]
+    assert data["items"][0]["current_verdict"] == "FAIL"
+    assert "CONFIRM" in data["audit_rubric"]
+
+
+def test_verify_audit_apply_revokes_and_flips_report(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+
+    ws = tmp_path / "data" / "audit.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.9,
+                                "reason": "stated verbatim in the transcript",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert report["records"][0]["verdict"] == "PASS"
+    assert report["records"][0]["audited"] is True
+    assert report["counts"] == {"PASS": 1, "REVIEW": 0, "FAIL": 0}
+    assert report["audit_log"]["matched"] == 1
+    md = (tmp_path / "data" / "verify-report.md").read_text(encoding="utf-8")
+    assert "## Audit" in md and "FAIL → PASS" in md
+
+
+def test_verify_audit_low_confidence_revoke_keeps_fail(tmp_path: Path, monkeypatch):
+    """A REVOKE below the confidence gate is not applied — the record stays FAIL."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    ws = tmp_path / "data" / "audit.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.4,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert report["records"][0]["verdict"] == "FAIL"
+
+
+def test_verify_audit_rejects_multiple_apply(tmp_path: Path, monkeypatch):
+    """The audit is a single independent auditor — more than one --apply is rejected."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    a = tmp_path / "data" / "a.json"
+    b = tmp_path / "data" / "b.json"
+    for p in (a, b):
+        p.write_text(json.dumps({"audits": []}), encoding="utf-8")
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(a), "--apply", str(b)])
+    assert result.exit_code != 0
+    assert "único auditor" in result.output
+
+
+def _write_revoke_audit_ws(path: Path) -> None:
+    """A single-flag audit worksheet that validly revokes the seeded FAIL to PASS."""
+    path.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.9,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_verify_audit_apply_refuses_second_run_on_audited_report(tmp_path: Path, monkeypatch):
+    """BUG 2: a second --audit --apply on an already-audited report is refused (it would
+    let N single-revoke runs bypass the mass-revocation guard); --force overrides."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    ws = tmp_path / "data" / "audit.json"
+    _write_revoke_audit_ws(ws)
+
+    first = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert second.exit_code != 0
+    assert "ya contiene un audit" in second.output
+
+    forced = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--force"])
+    assert forced.exit_code == 0, forced.output
+
+
+def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    (tmp_path / "data" / "verify-report.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "records": [
+                    {"item_id": "7", "target": "summary", "verdict": "PASS", "divergent": False}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "consecuentes" in result.output
+    assert not (tmp_path / "data" / "verify-audit-worksheet.json").exists()
+
+
+# ----------------------------------------- verify --write-verdicts (#79 staleness badge)
+
+
+def _write_judge_worksheet(tmp_path: Path, verdict: str = "FAIL") -> Path:
+    """A filled single-judge worksheet the `verify --apply` path aggregates."""
+    ws = tmp_path / "data" / "ws.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "judgments": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "verdict": verdict,
+                        "faithfulness": "FAIL" if verdict == "FAIL" else "PASS",
+                        "adherence": "PASS",
+                        "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}]
+                        if verdict == "FAIL"
+                        else [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ws
+
+
+def _export_summary_worksheet(tmp_path: Path) -> Path:
+    """Run the REAL `verify` summary export (stamps each entry's judged fingerprint) and
+    return the worksheet path — the faithful input to `--write-verdicts`."""
+    result = runner.invoke(app, ["verify", "--target", "summary"])
+    assert result.exit_code == 0, result.output
+    return tmp_path / "data" / "verify-worksheet.json"
+
+
+def _fill_summary_judgment(ws: Path, verdict: str = "FAIL") -> None:
+    """Inject one judge's judgment into an exported worksheet, PRESERVING its `items` block
+    (which carries the export-time fingerprints)."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": "7",
+            "target": "summary",
+            "verdict": verdict,
+            "faithfulness": "FAIL" if verdict == "FAIL" else "PASS",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}]
+            if verdict == "FAIL"
+            else [],
+        }
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_verify_apply_write_verdicts_persists_verdict_and_snapshots(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    # The verdict is persisted onto the item, keyed by target, with a fingerprint.
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    verification = stored["7"]["verification"]
+    assert verification["summary"]["verdict"] == "FAIL"
+    assert len(verification["summary"]["output_fingerprint"]) == 64
+    # The write path snapshots data/ first (mutates items.json).
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
+
+
+def test_verify_write_verdicts_binds_to_judged_output_not_live_store(tmp_path: Path, monkeypatch):
+    """#79 headline at the CLI: the summary is regenerated BETWEEN export/judge and
+    `--write-verdicts`; the stored fingerprint must be the JUDGED one ("A"), never a recompute
+    of the live store ("B") — so `generate` on "B" later finds a mismatch and shows no badge."""
+    import hashlib
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    judged, regenerated = "A - the judged summary.", "B - regenerated before the write."
+    item = _verify_video_item("7")
+    item.enriched.summary = judged
+    save_store({"7": item}, items_path)
+    ws = _export_summary_worksheet(tmp_path)  # stamps fp of the judged summary
+    _fill_summary_judgment(ws)
+
+    # Regenerate the summary AFTER export/judge, BEFORE the write.
+    item.enriched.summary = regenerated
+    save_store({"7": item}, items_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    fp = json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"]["summary"][
+        "output_fingerprint"
+    ]
+    assert fp == hashlib.sha256(judged.encode("utf-8")).hexdigest()  # the JUDGED output
+    assert fp != hashlib.sha256(regenerated.encode("utf-8")).hexdigest()  # never the live one
+
+
+def test_verify_apply_default_is_report_only_and_does_not_write(tmp_path: Path, monkeypatch):
+    """The default apply path (no --write-verdicts) honours PR-1's report-only contract."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    before = items_path.read_bytes()
+    ws = _write_judge_worksheet(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before  # items.json untouched
+    assert (tmp_path / "data" / "verify-report.json").exists()  # report still written
+
+
+def test_verify_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["verify", "--write-verdicts"])
+    assert result.exit_code != 0
+    # Assert the code-controlled BadParameter message, normalized so the check survives
+    # Rich's ANSI flag-styling and 80-col box wrapping (see _plain_output).
+    assert "--write-verdicts requires --apply" in _plain_output(result.output)
+
+
+# ------------------------- verify --audit --apply --write-verdicts (the AUDITED verdict wins)
+# The pre-audit verdicts were the ONLY ones that could reach the store — precisely the set the
+# independent auditor overturns (our corpus run REVOKED 2 of them). These pin that the merged,
+# post-audit verdict is what lands, still bound to the fingerprint stamped at judge-export.
+
+
+def _aggregate_judged_report(tmp_path: Path, verdict: str = "FAIL") -> None:
+    """Run the REAL judge flow: export the worksheet (stamping the judged fingerprint), fill one
+    judge's verdict, and aggregate it into `verify-report.json` — what the audit stage reads back.
+    """
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws, verdict)
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+
+
+def _export_audit_worksheet(tmp_path: Path) -> Path:
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    return tmp_path / "data" / "verify-audit-worksheet.json"
+
+
+def _fill_audit(ws: Path, flags: list[dict], reverdict: str = "PASS") -> None:
+    """Fill the auditor's `audits` block, PRESERVING the `items` block (it carries the judged
+    fingerprints threaded from the judge export)."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["audits"] = [{"item_id": "7", "target": "summary", "reverdict": reverdict, "flags": flags}]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
+_REVOKED_FLAG = {
+    "claim": "€150M in revenue",
+    "issue": "unsupported",
+    "axis": "faithfulness",
+    "audit": "REVOKE",
+    "confidence": 0.9,
+    "reason": "stated verbatim in the transcript — the judge hallucinated the flag",
+}
+_CONFIRMED_FLAG = {
+    "claim": "€150M in revenue",
+    "issue": "unsupported",
+    "axis": "faithfulness",
+    "audit": "CONFIRM",
+    "confidence": 0.95,
+    "reason": "no such figure anywhere in the source",
+}
+_AUDITOR_ADDED_FLAG = {
+    "claim": "agents replace junior devs",
+    "issue": "hallucinated-claim",
+    "axis": "faithfulness",
+    "audit": "CONFIRM",
+    "confidence": 0.9,
+    "reason": "blind spot the judges missed — absent from the transcript",
+}
+
+
+def _stored_verdict(items_path: Path) -> dict:
+    return json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"]["summary"]
+
+
+def test_verify_audit_write_verdicts_persists_the_revoked_verdict_not_the_prejudged_fail(
+    tmp_path: Path, monkeypatch
+):
+    """THE feature: a FAIL the independent auditor REVOKED lands in the store as the LOWERED
+    verdict — never as the pre-audit FAIL that would badge the note with an overturned ❌."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)  # judges → FAIL
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_REVOKED_FLAG], reverdict="PASS")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    verdict = _stored_verdict(items_path)
+    assert verdict["verdict"] == "PASS"  # the AUDITED verdict, not the pre-audit FAIL
+    assert verdict["faithfulness"] == "PASS"
+    assert verdict["flags"] == []  # the revoked flag is gone with it
+    # Same safety envelope as the plain write path: auto-snapshot + an echoed tally.
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
+    # EQUALITY against the builder: `"1 verdicts escritos"` is a substring of the failure
+    # rendering `"0 de 1 verdicts escritos (1 omitidos: …)"`, so `in` would pass on a run
+    # that wrote NOTHING. See `_write_tally`.
+    assert _write_tally(result.output) == VerdictWriteResult(written=1, skipped=[]).summary()
+
+
+def test_verify_audit_write_verdicts_persists_confirmed_fail_with_auditor_added_flags(
+    tmp_path: Path, monkeypatch
+):
+    """A CONFIRMED FAIL lands as FAIL — with the auditor's blind-spot flag the judges missed,
+    so the badge surfaces the audited evidence, not just the judges'."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    # The auditor tries to clear the record (reverdict PASS) but CONFIRMS the flag and adds one:
+    # the invariants hold — a confirmed faithfulness flag keeps the FAIL.
+    _fill_audit(ws, [_CONFIRMED_FLAG, _AUDITOR_ADDED_FLAG], reverdict="PASS")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    verdict = _stored_verdict(items_path)
+    assert verdict["verdict"] == "FAIL"
+    assert verdict["faithfulness"] == "FAIL"
+    assert verdict["flags"] == ["unsupported", "hallucinated-claim"]  # confirmed + auditor-added
+
+
+def test_verify_audit_write_verdicts_binds_to_the_judged_output_not_the_live_store(
+    tmp_path: Path, monkeypatch
+):
+    """Fingerprint integrity across the LONGER audit window: the summary is regenerated after the
+    judges ran, so the live store no longer holds the judged text. The persisted fingerprint must
+    still be the one stamped at JUDGE-export ("A") — never a recompute at audit-export or at write
+    ("B") — so `generate` sees a mismatch and paints NO badge on the regenerated output."""
+    import hashlib
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    judged, regenerated = "A - the judged summary.", "B - regenerated after the judges."
+    item = _verify_video_item("7")
+    item.enriched.summary = judged
+    save_store({"7": item}, items_path)
+    _aggregate_judged_report(tmp_path)  # stamps fp(A) through the report record
+
+    item.enriched.summary = regenerated  # the output changes BEFORE the audit export + write
+    save_store({"7": item}, items_path)
+
+    ws = _export_audit_worksheet(tmp_path)
+    assert json.loads(ws.read_text(encoding="utf-8"))["items"][0]["output"] == regenerated
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    fp = _stored_verdict(items_path)["output_fingerprint"]
+    assert fp == hashlib.sha256(judged.encode("utf-8")).hexdigest()  # the JUDGED output
+    assert fp != hashlib.sha256(regenerated.encode("utf-8")).hexdigest()  # never the live one
+
+
+def test_verify_audit_write_verdicts_skips_a_record_with_no_judged_fingerprint(
+    tmp_path: Path, monkeypatch
+):
+    """A record whose judged fingerprint is missing (a legacy report, written before the stamp)
+    is SKIPPED and reported — never written with a guessed/recomputed hash."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _write_fail_report(tmp_path)  # a report whose record carries NO output_fingerprint
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    assert json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"] == {}
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=0, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )  # 0 written, and skipped for exactly that reason
+
+
+def test_verify_audit_write_verdicts_skips_a_record_with_a_malformed_fingerprint(
+    tmp_path: Path, monkeypatch
+):
+    """A hand-edited/garbage fingerprint is not trusted: the record is skipped, not written."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    report_path = tmp_path / "data" / "verify-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["records"][0]["output_fingerprint"] = "nope"  # tampered
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"] == {}
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=0, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )  # 0 written, and skipped for exactly that reason
+
+
+def test_verify_audit_apply_default_stays_report_only(tmp_path: Path, monkeypatch):
+    """The audit write is OPT-IN: a plain `--audit --apply` still never touches the store."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_REVOKED_FLAG])
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before  # items.json untouched
+    assert not (tmp_path / "data" / "snapshots").exists()
+
+
+def test_verify_audit_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch):
+    """`--write-verdicts` remains meaningless on a bare export — including the audit export."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["verify", "--audit", "--write-verdicts"])
+    assert result.exit_code != 0
+    assert "--write-verdicts requires --apply" in _plain_output(result.output)
+
+
+# ------------------------------------- the audited write cannot LIE (review findings B1/B2/B3/B5)
+# The write persists a verdict bound to a TEXT. Each of these pins a way the persisted pair
+# (verdict, fingerprint) could still be false while the command exits 0.
+
+
+def test_verify_audit_force_with_write_verdicts_is_rejected(tmp_path: Path, monkeypatch):
+    """B1: `--force` exists to BYPASS the mass-revocation guard. Combined with the new write it
+    launders FAILs into the store: each forced run re-renders the report with the merged records,
+    so the FAIL set SHRINKS and `_mass_revocation_tripped` (which needs ≥2 FAILs) never trips —
+    N single-revoke runs clear every FAIL, and a stored PASS renders no badge. The two flags must
+    not combine at all.
+
+    Staged as the real attack: a CONFIRMED FAIL is first persisted honestly (the note now badges
+    ❌), and the forced re-audit then tries to REVOKE it into a PASS — which would erase the badge.
+    What must survive is the FAIL already in `items.json`."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)  # judges → FAIL
+    honest = _export_audit_worksheet(tmp_path)
+    _fill_audit(honest, [_CONFIRMED_FLAG], reverdict="FAIL")
+    first = runner.invoke(app, ["verify", "--audit", "--apply", str(honest), "--write-verdicts"])
+    assert first.exit_code == 0, first.output
+    assert _stored_verdict(items_path)["verdict"] == "FAIL"  # the note badges ❌
+    before = items_path.read_bytes()
+
+    # The report is now `audited`, so a second audit needs --force — the escape this closes.
+    _fill_audit(honest, [_REVOKED_FLAG], reverdict="PASS")
+    result = runner.invoke(
+        app, ["verify", "--audit", "--apply", str(honest), "--write-verdicts", "--force"]
+    )
+    assert result.exit_code != 0
+    assert "--write-verdicts cannot be combined with --force" in _plain_output(result.output)
+    assert _stored_verdict(items_path)["verdict"] == "FAIL"  # the ❌ survives the laundering run
+    assert items_path.read_bytes() == before  # nothing at all was rewritten
+
+
+def test_verify_audit_force_without_write_verdicts_still_re_audits_report_only(
+    tmp_path: Path, monkeypatch
+):
+    """B1 regression: the forced re-audit stays available — it is only the STORE write that
+    `--force` may not reach. The report (a human-read artifact) is still re-rendered."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _aggregate_judged_report(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_REVOKED_FLAG], reverdict="PASS")
+    assert runner.invoke(app, ["verify", "--audit", "--apply", str(ws)]).exit_code == 0
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--force"])
+    assert result.exit_code == 0, result.output  # the already-audited report is re-audited
+    records = json.loads((tmp_path / "data" / "verify-report.json").read_text())["records"]
+    assert records[0]["verdict"] == "PASS"
+
+
+def test_verify_audit_write_verdicts_never_takes_a_fingerprint_the_record_lacks(
+    tmp_path: Path, monkeypatch
+):
+    """B2: the audit worksheet must never SUPPLY a fingerprint the merged record never carried.
+
+    The reachable sequence: report v1 is stamped fp(A) → the audit worksheet is exported carrying
+    fp(A) → the summary is REGENERATED to B → the judges are re-aggregated from a pre-#79 judge
+    worksheet (no `items` block), so report v2's records are UNSTAMPED → the v1 audit worksheet is
+    applied with --write-verdicts. A UNION of the two sources lets the worksheet introduce fp(A),
+    binding the v2 verdict (about text B) to text A — which `generate` would then badge as current
+    if the output ever returns to A. The record is the authority: no stamp on it, no write."""
+    import hashlib
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    judged_a, regenerated_b = "A - the text v1 judged.", "B - regenerated before the v2 judges."
+    item = _verify_video_item("7")
+    item.enriched.summary = judged_a
+    save_store({"7": item}, items_path)
+
+    _aggregate_judged_report(tmp_path)  # report v1: records stamped fp(A)
+    ws_audit = _export_audit_worksheet(tmp_path)  # the worksheet carries fp(A)
+
+    item.enriched.summary = regenerated_b  # the output changes
+    save_store({"7": item}, items_path)
+
+    legacy_ws = _write_judge_worksheet(tmp_path)  # a pre-#79 worksheet: NO `items` block
+    assert "items" not in json.loads(legacy_ws.read_text(encoding="utf-8"))
+    assert runner.invoke(app, ["verify", "--apply", str(legacy_ws)]).exit_code == 0
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert "output_fingerprint" not in report["records"][0]  # report v2 is UNSTAMPED
+
+    _fill_audit(ws_audit, [_CONFIRMED_FLAG], reverdict="FAIL")
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws_audit), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"]
+    fp_a = hashlib.sha256(judged_a.encode("utf-8")).hexdigest()
+    assert stored.get("summary", {}).get("output_fingerprint") != fp_a  # the worksheet's stamp
+    assert stored == {}  # nothing written: the record carried no judged fingerprint
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=0, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )  # 0 written, and skipped for exactly that reason
+
+
+def test_verify_audit_apply_write_verdicts_refuses_a_worksheet_with_no_audits_key(
+    tmp_path: Path, monkeypatch
+):
+    """B3: a file with NO `audits` key (e.g. a JUDGE worksheet fed to the audit path by mistake)
+    means every record passes through merge_audit untouched — so the write would persist the
+    UN-AUDITED aggregate under the audit banner, the exact set this path exists to keep out of
+    the store. ABSENT is not EMPTY: it must raise, not exit 0 with `0/0 aplicados`."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)  # a FAIL nobody audited
+    judge_ws = _write_judge_worksheet(tmp_path)  # has `judgments`, no `audits`
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(judge_ws), "--write-verdicts"])
+    assert result.exit_code != 0
+    # The specific diagnosis, not the bare word "audits" — which half the audit-path messages
+    # (including ones reporting the OPPOSITE) also contain.
+    assert "has no `audits` key" in _plain_output(result.output)
+    assert items_path.read_bytes() == before  # the un-audited aggregate never reaches the store
+
+
+def test_verify_audit_write_verdicts_refuses_when_no_audit_matched_a_consequential_record(
+    tmp_path: Path, monkeypatch
+):
+    """B3 (second half): an `audits` block that matches NOTHING while consequential (FAIL /
+    divergent) records exist is an audit that never happened — persisting its output would
+    persist the pre-audit verdicts. The report-only run stays allowed; the WRITE is refused."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)  # a FAIL that must be audited
+    ws = _export_audit_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["audits"] = []  # present but empty — the auditor judged nothing
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code != 0
+    assert items_path.read_bytes() == before  # the pre-audit FAIL never lands as itself
+    assert runner.invoke(app, ["verify", "--audit", "--apply", str(ws)]).exit_code == 0  # report ok
+
+
+def test_verify_audit_write_verdicts_leaves_the_report_unaudited_when_the_store_write_fails(
+    tmp_path: Path, monkeypatch
+):
+    """B5: the report must not be marked `audited` before the store write succeeds. If the write
+    dies (disk full, permissions) after the report was rewritten, the retry hits the
+    already-audited guard, whose only escape is --force — which B1 now forbids with
+    --write-verdicts. That deadlocks recovery. The store is written FIRST."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    def _boom(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr("xbrain.cli.save_store", _boom)
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code != 0
+
+    # Restore just the write (monkeypatch.undo would also revert _setup_repo's chdir).
+    monkeypatch.setattr("xbrain.cli.save_store", save_store)
+    records = json.loads((tmp_path / "data" / "verify-report.json").read_text())["records"]
+    assert not records[0].get("audited")  # the report still describes the PRE-audit state
+    # …so the retry is accepted WITHOUT --force (which --write-verdicts may not use).
+    retry = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert retry.exit_code == 0, retry.output
+    assert _stored_verdict(items_path)["verdict"] == "FAIL"
+
+
+# --------------------------------- both arms of the audit-write fingerprint source must survive
+# `_audit_write_fingerprints` reads the judged fingerprint from the merged RECORDS (authority)
+# and cross-checks it against the applied audit worksheet. Mutation testing showed BOTH sources
+# are load-bearing, for opposite reasons — and that dropping either survived the suite. These
+# pin one arm each, so a future "simplification" of the combine turns red.
+
+
+def _judged_report_fail_and_clean_pass(tmp_path: Path) -> None:
+    """The REAL judge flow over TWO items: `7` → FAIL (consequential), `8` → PASS (clean)."""
+    ws = _export_summary_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": "7",
+            "target": "summary",
+            "verdict": "FAIL",
+            "faithfulness": "FAIL",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+        },
+        {
+            "item_id": "8",
+            "target": "summary",
+            "verdict": "PASS",
+            "faithfulness": "PASS",
+            "adherence": "PASS",
+            "flags": [],
+        },
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+
+
+def _seed_fail_and_clean_pass(tmp_path: Path) -> Path:
+    items_path = tmp_path / "data" / "items.json"
+    clean = _verify_video_item("8")
+    clean.enriched.summary = "A clean, faithful summary of the talk."
+    save_store({"7": _verify_video_item("7"), "8": clean}, items_path)
+    _judged_report_fail_and_clean_pass(tmp_path)
+    return items_path
+
+
+def test_verify_audit_write_verdicts_persists_the_clean_pass_the_auditor_never_saw(
+    tmp_path: Path, monkeypatch
+):
+    """The audit worksheet only carries the CONSEQUENTIAL (FAIL/divergent) records — a clean PASS
+    is never exported to the auditor. Its judged fingerprint therefore reaches the write ONLY via
+    the report RECORD. Source the fingerprints from the worksheet alone and every clean PASS is
+    silently skipped as `fingerprint-missing`: no error, the verdicts just never land. Every other
+    audit CLI test uses a single FAIL item, so this path was unexercised."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _seed_fail_and_clean_pass(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+
+    # Only the FAIL is consequential, so only item 7 rides in the worksheet the auditor fills.
+    assert {e["item_id"] for e in json.loads(ws.read_text(encoding="utf-8"))["items"]} == {"7"}
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    assert stored["7"]["verification"]["summary"]["verdict"] == "FAIL"  # the audited FAIL
+    assert stored["8"]["verification"]["summary"]["verdict"] == "PASS"  # the UNAUDITED clean PASS
+    assert _write_tally(result.output) == VerdictWriteResult(written=2, skipped=[]).summary()
+
+
+def test_verify_audit_write_verdicts_drops_a_record_whose_worksheet_stamp_was_tampered(
+    tmp_path: Path, monkeypatch
+):
+    """The other arm: the worksheet stamp is the TAMPER cross-check. Hand-edit it to a different
+    well-formed hash and the two sources disagree — the key is dropped fail-safe and the record is
+    skipped, never resolved by precedence. Without the cross-check the record's own fingerprint
+    would simply win and the record would be written anyway.
+
+    The clean PASS (absent from the worksheet, so nothing to disagree with) still lands — proving
+    the drop is targeted at the tampered key, not a blanket failure."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _seed_fail_and_clean_pass(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["items"][0]["output_fingerprint"] = "b" * 64  # well-formed, but NOT the judged hash
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    assert stored["7"]["verification"] == {}  # the tampered stamp was NOT trusted
+    assert stored["8"]["verification"]["summary"]["verdict"] == "PASS"  # untouched key still lands
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=1, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )
+
+
+# ---------------------------------------------- fetch --retry-failed (PR-I: repair the evidence)
+# The exposed set is items whose linked content is missing but whose summary describes it anyway.
+# `--force` would repair them, but re-fetches EVERY link in the store (400 in the real corpus),
+# re-downloading what already worked. This targets only the failures a retry can actually repair.
+
+
+def _item_with_failed_link(item_id: str, reason: str, attempts: int = 1) -> Item:
+    item = _verify_video_item(item_id)
+    item.links = [Link(url=f"https://example.com/{item_id}", domain="example.com")]
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url=f"https://example.com/{item_id}",
+                failure_reason=reason,
+                attempts=attempts,
+            )
+        ],
+    )
+    return item
+
+
+def test_fetch_retry_failed_dry_run_reports_the_plan_and_never_touches_the_store(
+    tmp_path: Path, monkeypatch
+):
+    """The dry run is the whole safety story: it must classify without mutating a byte."""
+    _setup_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {
+            "7": _item_with_failed_link("7", "unknown_error"),  # transient → retryable
+            "8": _item_with_failed_link("8", "js_required"),  # blocked on the key
+            "9": _item_with_failed_link("9", "not_found"),  # terminal
+        },
+        items_path,
+    )
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["fetch", "--retry-failed", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+
+    assert "Reintentables: 1 items" in out  # only the transient one
+    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in out
+    # It must say WHERE it looked: the key already existed on this machine once,
+    # stored by the `firecrawl` CLI, and a message naming only the env var sent
+    # the operator hunting for a key they already had.
+    assert "$FIRECRAWL_API_KEY" in out
+    assert "credentials.json" in out
+    assert "Terminales" in out and "1 items" in out
+    assert items_path.read_bytes() == before  # not a byte touched
+    assert not (tmp_path / "data" / "snapshots").exists()
+
+
+def test_fetch_retry_failed_without_the_key_does_not_replay_the_identical_failure(
+    tmp_path: Path, monkeypatch
+):
+    """A js_required failure at attempts=1 is recoverable ONLY with the JS extractor. Without
+    the key, re-fetching it runs the same extractor and reproduces the same failure — that is
+    not a repair, it is load on someone's server. It must be reported as BLOCKED, not retried."""
+    _setup_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"8": _item_with_failed_link("8", "js_required")}, items_path)
+
+    calls: list[str] = []
+    monkeypatch.setattr("xbrain.cli.retry_failed", lambda *a, **k: calls.append("ran") or 0)
+
+    result = runner.invoke(app, ["fetch", "--retry-failed"])
+    assert result.exit_code == 0, result.output
+    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in _plain_output(result.output)
+    assert calls == []  # the fetch never ran — nothing to gain, so nothing was requested
+
+
+def test_fetch_retry_failed_rejects_force(tmp_path: Path, monkeypatch):
+    """`--force` re-fetches everything including what already succeeded; `--retry-failed` is the
+    targeted opposite. Combining them silently means `--force` — so it is refused."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {"7": _item_with_failed_link("7", "unknown_error")}, tmp_path / "data" / "items.json"
+    )
+    result = runner.invoke(app, ["fetch", "--retry-failed", "--force"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in _plain_output(result.output)
+
+
+def test_fetch_dry_run_requires_retry_failed(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {"7": _item_with_failed_link("7", "unknown_error")}, tmp_path / "data" / "items.json"
+    )
+    result = runner.invoke(app, ["fetch", "--dry-run"])
+    assert result.exit_code != 0
+    assert "--dry-run requires --retry-failed" in _plain_output(result.output)
+
+
+# ------------------------------ the mass-revocation guard cannot be split across runs (B1, e2e)
+# The reviewer's original repro: 3 confirmed FAILs, ONE revoke per run. `_mass_revocation_tripped`
+# needs >=2 FAILs dropping AND >50% of them (DEFAULT_MASS_REVOCATION_MAX), so a single revoke never
+# trips it — and each `--audit --apply` re-renders the report from the MERGED records, shrinking
+# the FAIL set. Three forced runs therefore cleared all three FAILs and exited 0 every time.
+
+
+def _three_judged_fails(tmp_path: Path) -> Path:
+    """Items 7/8/9, all judged FAIL by the real judge flow → a report with three FAILs."""
+    items_path = tmp_path / "data" / "items.json"
+    save_store({i: _verify_video_item(i) for i in ("7", "8", "9")}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": i,
+            "target": "summary",
+            "verdict": "FAIL",
+            "faithfulness": "FAIL",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+        }
+        for i in ("7", "8", "9")
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    assert runner.invoke(app, ["verify", "--apply", str(ws)]).exit_code == 0
+    return items_path
+
+
+def _fill_audits(ws: Path, decisions: dict[str, dict]) -> None:
+    """`{item_id: flag}` → the auditor's `audits` block, preserving the judged `items` stamps."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["audits"] = [
+        {
+            "item_id": i,
+            "target": "summary",
+            "reverdict": "PASS" if flag["audit"] == "REVOKE" else "FAIL",
+            "flags": [flag],
+        }
+        for i, flag in decisions.items()
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _stored_verdicts(items_path: Path) -> dict[str, str]:
+    store = json.loads(items_path.read_text(encoding="utf-8"))
+    return {
+        i: store[i]["verification"]["summary"]["verdict"]
+        for i in ("7", "8", "9")
+        if store[i]["verification"]
+    }
+
+
+def test_three_forced_runs_cannot_wash_three_confirmed_fails_into_the_store(
+    tmp_path: Path, monkeypatch
+):
+    """THE B1 exploit, end to end. Three FAILs are honestly persisted (three notes badge ❌); an
+    attacker then revokes ONE per forced run. Before the fix each run exited 0 and the store went
+    FAIL,FAIL,FAIL → PASS,PASS,PASS with the guard never tripping — three notes silently lost
+    their ❌. Every forced write is now rejected, and all three FAILs survive all three runs."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _three_judged_fails(tmp_path)
+
+    # An honest audit CONFIRMS all three → the store holds three FAILs (three ❌ badges).
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audits(ws, {i: _CONFIRMED_FLAG for i in ("7", "8", "9")})
+    first = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert first.exit_code == 0, first.output
+    assert _stored_verdicts(items_path) == {"7": "FAIL", "8": "FAIL", "9": "FAIL"}
+
+    # Now the laundering loop: one REVOKE per forced run, exactly as the reviewer ran it.
+    for target_item in ("7", "8", "9"):
+        _fill_audits(ws, {target_item: _REVOKED_FLAG})
+        result = runner.invoke(
+            app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts", "--force"]
+        )
+        assert result.exit_code != 0, f"run on {target_item} was accepted: {result.output}"
+        assert "--write-verdicts cannot be combined with --force" in _plain_output(result.output)
+
+    assert _stored_verdicts(items_path) == {"7": "FAIL", "8": "FAIL", "9": "FAIL"}  # all ❌ survive
+
+
+def test_re_aggregating_the_judges_restores_the_full_fail_set_so_the_wash_cannot_accumulate(
+    tmp_path: Path, monkeypatch
+):
+    """Closing B1 by banning `--force` is only sufficient if the OTHER route to a second audit —
+    re-aggregating the judges (`verify --apply`), which is explicitly still allowed — cannot
+    accumulate revocations either.
+
+    It cannot, and this pins why: re-aggregation rebuilds the report from the JUDGES, so the FAIL
+    set is restored to all three every time (it never shrinks, which is what the forced path
+    exploited). The write then persists that whole merged set, so the previous run's PASS is
+    overwritten back to FAIL. The store never holds more than the ONE verdict the current auditor
+    actually revoked — the revocations do not compound across runs."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _three_judged_fails(tmp_path)
+
+    for target_item in ("7", "8", "9"):
+        _three_judged_fails(tmp_path)  # re-aggregate the judges: the report is 3 FAILs again
+        ws = _export_audit_worksheet(tmp_path)
+        assert len(json.loads(ws.read_text(encoding="utf-8"))["items"]) == 3  # never shrank
+        _fill_audits(ws, {target_item: _REVOKED_FLAG})  # revoke exactly one — never trips the guard
+        result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+        assert result.exit_code == 0, result.output  # this path stays open, by design
+
+        # Only the freshly-revoked one is PASS; the other two are back to FAIL.
+        assert _stored_verdicts(items_path) == {
+            i: ("PASS" if i == target_item else "FAIL") for i in ("7", "8", "9")
+        }
+
+
+def test_fetch_revalidate_is_report_only_until_write(tmp_path: Path, monkeypatch):
+    """`--revalidate` demotes walls ALREADY persisted as successes — invisible to --retry-failed,
+    which selects failures. Measured: 28 of the real corpus's 189 fetched "articles" are walls or
+    page chrome. The dry run must classify without mutating a byte."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    wall = _verify_video_item("7")
+    wall.links = [Link(url="https://youtu.be/x", domain="youtu.be")]
+    wall.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://youtu.be/x",
+                title="A talk",
+                text="Información Prensa Derechos de autor Contactar Creadores Publicidad "
+                "Desarrolladores Términos Privacidad Política y seguridad",
+            )
+        ],
+    )
+    save_store({"7": wall}, items_path)
+    before = items_path.read_bytes()
+
+    # REPORT-ONLY by default: this rewrites recorded evidence, so it must not act unasked.
+    result = runner.invoke(app, ["fetch", "--revalidate"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    assert "Cuerpos que NO son artículos: 1 items" in out
+    assert "youtu.be" in out  # the DOMAIN is reported, not just a count
+    assert items_path.read_bytes() == before  # not a byte touched without --write
+
+    # --write applies the demotion, so the guardrail starts firing on that item.
+    result = runner.invoke(app, ["fetch", "--revalidate", "--write"])
+    assert result.exit_code == 0, result.output
+    stored = json.loads(items_path.read_text(encoding="utf-8"))["7"]["content"]["sources"][0]
+    assert stored["outcome"] == "failure"
+    assert stored["failure_reason"] == "blocked_interstitial"
+
+
+# ---------------------------------------------------------------- PR-D: the contract fingerprint
+
+
+def test_verify_write_verdicts_stores_the_contract_it_was_judged_under(tmp_path: Path, monkeypatch):
+    """The verdict binds to the whole judging contract — the output, the source the judge
+    read, and the rubrics it applied — not just to the output text."""
+    from xbrain.store import load_store
+    from xbrain.verification import contract_fingerprint
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    item = _verify_video_item("7")
+    save_store({"7": item}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = load_store(items_path)["7"].verification["summary"]
+    assert stored.contract_fingerprint == contract_fingerprint(item, "summary", "English")
+
+
+def test_verify_reports_how_many_verdicts_the_contract_change_invalidated(
+    tmp_path: Path, monkeypatch
+):
+    """The number IS the point: it says how much of the stored verification a contract
+    change has retired. A verdict stored under the old contract (no contract fingerprint)
+    is counted, never silently kept alive."""
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import fingerprint_output
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    item = _verify_video_item("7")
+    item.verification["summary"] = VerificationVerdict(
+        verdict="FAIL",
+        faithfulness="FAIL",
+        output_fingerprint=fingerprint_output(item, "summary"),
+        verified_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        flags=["unsupported"],
+    )  # judged under the OLD contract: no contract fingerprint
+    save_store({"7": item}, items_path)
+
+    result = runner.invoke(app, ["verify"])
+    assert result.exit_code == 0, result.output
+    assert "OBSOLETOS" in result.stdout
+    assert "1 de 1" in result.stdout
+
+
+def test_verify_refuses_to_write_a_verdict_from_a_pre_contract_worksheet(
+    tmp_path: Path, monkeypatch
+):
+    """A worksheet judged before the contract stamp existed cannot say WHAT its verdict was
+    judged against. It is skipped (`contract-missing`), never written with a guessed
+    contract — the exact lie this closes."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
+
+    # Strip the contract stamp: this is what a worksheet exported by the old code looks like.
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    for entry in data["items"]:
+        entry.pop("contract_fingerprint", None)
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+    assert "contract-missing" in result.stdout
+    assert "summary" not in load_store(items_path)["7"].verification  # nothing written
+
+
+# ------------------------------------------------------------ redescribe-frames (#90 Task 9)
+
+
+def _video_item_with_frames(
+    item_id: str,
+    data_dir: Path,
+    *,
+    contract: str = "",
+    source: str = "bookmark",
+    topic: str | None = None,
+    url: str = _AMPLIFY_URL_1,
+) -> Item:
+    """A stored `x_video` source with two described frames, PNGs written to disk.
+
+    Reuses `_video_item` and `_write_slide_png` so the fixture matches what
+    `digest-video --frames` really persists. `source`/`topic` let callers build
+    the ENGINE's own population (`redescribe.stale_video_sources`) scoped the
+    same way `--source`/`--topic` narrow `redescribe-frames` (#90 review I2) —
+    unlike the plain `_video_item` (no `content`/frames), which the engine never
+    selects at all.
+    """
+    frames = []
+    for index in range(2):
+        local_path = f"{item_id}/frames/{index}.png"
+        image = data_dir / "media" / local_path
+        image.parent.mkdir(parents=True, exist_ok=True)
+        _write_slide_png(image)
+        frames.append(
+            VideoFrame(timestamp=float(index * 10), local_path=local_path, description="vieja")
+        )
+    item = _video_item(item_id, url=url, source=source)
+    if topic is not None:
+        item.enriched = Enrichment(
+            enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            executor="manual",
+            primary_topic=topic,
+        )
+    item.content = Content(
+        fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_video",
+                url=url,
+                text="transcripción",
+                frames=frames,
+                caption_contract=contract,
+            )
+        ],
+    )
+    return item
+
+
+def test_redescribe_frames_snapshots_before_writing(tmp_path: Path, monkeypatch):
+    """Destructive: it rewrites items.json, so it must snapshot first."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 0, result.output
+    snapshots = list((data_dir / "snapshots").iterdir())
+    assert any("pre-redescribe-frames" in p.name for p in snapshots)
+    source = load_store(data_dir / "items.json")["42"].content.sources[0]
+    assert [f.description for f in source.frames] == ["nueva", "nueva"]
+
+
+def test_redescribe_frames_dry_run_takes_no_snapshot_and_writes_nothing(
+    tmp_path: Path, monkeypatch
+):
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert not (data_dir / "snapshots").exists()
+    source = load_store(data_dir / "items.json")["42"].content.sources[0]
+    assert [f.description for f in source.frames] == ["vieja", "vieja"]
+
+
+def test_redescribe_frames_dry_run_needs_no_vision_command(tmp_path: Path, monkeypatch):
+    """FINDING B: `--dry-run` must preview a run WITHOUT `[vision].command` being
+    configured at all. The plan's original command builds the real `describe_fn`
+    EAGERLY, above the dry-run branch — so an operator running the documented
+    free preview before setting up `[vision].command` gets an operator error
+    instead of the size of the backfill, contradicting the command's own
+    docstring promise that `--dry-run` costs nothing. `_setup_repo` (not
+    `_setup_repo_with_vision`) deliberately leaves no `[vision]` section."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)  # NO [vision].command configured anywhere
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+
+    result = runner.invoke(app, ["redescribe-frames", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert not (data_dir / "snapshots").exists()
+    # The preview still reports real counts (it stats the frame files, it just
+    # never calls the vision model) — not a silent "0 vídeos" placeholder. The
+    # wording is PREDICTIVE ("se regenerarían"), not past-tense ("regeneradas")
+    # — #90 review I3: a dry run must not claim, in the past tense, work it
+    # never did.
+    assert "2 se regenerarían" in result.output
+    assert "--dry-run: no se ha tocado el store." in result.output
+    source = load_store(data_dir / "items.json")["42"].content.sources[0]
+    assert [f.description for f in source.frames] == ["vieja", "vieja"]  # untouched
+
+
+def test_redescribe_frames_dry_run_calling_the_model_would_blow_up():
+    """FINDING B, the regression guard itself: the sentinel `describe_fn` used for
+    `--dry-run` must RAISE if ever called — proving dry-run truly calls no model,
+    not merely that this particular run happened not to need one."""
+    import pytest
+
+    from xbrain.cli import _dry_run_describe_fn
+
+    with pytest.raises(Exception):
+        _dry_run_describe_fn(Path("/tmp/whatever.png"))
+
+
+def test_redescribe_frames_on_a_current_corpus_writes_nothing(tmp_path: Path, monkeypatch):
+    """Idempotency at the CLI level: a corpus already at the contract is a no-op —
+    no snapshot, no save, and the vision model is never called. This is what makes
+    re-running the backfill safe and free."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {"42": _video_item_with_frames("42", data_dir, contract=FRAME_CAPTION_CONTRACT)},
+        data_dir / "items.json",
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        "xbrain.cli.describe_image", lambda path, **kwargs: calls.append(path) or "nueva"
+    )
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert not (data_dir / "snapshots").exists()
+
+
+def test_redescribe_frames_warns_about_unknown_ids(tmp_path: Path, monkeypatch):
+    """FINDING C: `stale_video_sources` silently drops any `--ids` value absent
+    from the store (`{i: store[i] for i in item_ids if i in store}`), so
+    `--ids 999` today reports zero videos and the operator cannot tell "no such
+    item" from "already at the contract". This must warn by name instead of
+    vanishing — but stay a warning: the known-good id in the same list must
+    still be processed, and the exit code must stay 0."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--ids", "42,999"])
+
+    assert result.exit_code == 0, result.output
+    assert "999" in result.output
+    source = load_store(data_dir / "items.json")["42"].content.sources[0]
+    assert [f.description for f in source.frames] == ["nueva", "nueva"]  # 42 still processed
+
+
+def test_resolve_redescribe_ids_returns_none_for_the_whole_backfill():
+    """No selector means "every stale video", NOT an error — unlike `digest-video`,
+    which fetches from X and must be pointed at something. This one is offline and
+    idempotent, so the corpus-wide repair is the sensible default."""
+    from xbrain.cli import _resolve_redescribe_ids
+
+    assert _resolve_redescribe_ids({}, None, None, "all", None) is None
+
+
+def test_resolve_redescribe_ids_dedupes_and_applies_the_limit():
+    from xbrain.cli import _resolve_redescribe_ids
+
+    assert _resolve_redescribe_ids({}, "7, 8 ,7,9", None, "all", 2) == ["7", "8"]
+
+
+def test_resolve_redescribe_ids_limit_alone_caps_the_whole_corpus(tmp_path: Path):
+    """FINDING A: `--limit` with no `--ids`/`--topic` must still cap the
+    corpus-wide selection. The plan's original `_resolve_redescribe_ids` returns
+    `None` ("every stale video") the instant `--ids`/`--topic` are both absent,
+    silently ignoring `--limit` — the obvious way to test the waters before a
+    multi-thousand-frame backfill would describe the ENTIRE corpus instead.
+
+    Uses `_video_item_with_frames` (the ENGINE's own population — a frame-
+    bearing `x_video` source), not the plain `_video_item`: #90 review I2 moved
+    the selection off the `list_video_entries` media catalog, so a store built
+    from `_video_item` alone (no `content`) is no longer selected at all.
+    """
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {
+        "1": _video_item_with_frames("1", tmp_path),
+        "2": _video_item_with_frames("2", tmp_path),
+    }
+    result = _resolve_redescribe_ids(store, None, None, "all", 1)
+    assert result is not None  # NOT the "whole corpus" sentinel
+    assert len(result) == 1
+
+
+def test_resolve_redescribe_ids_source_alone_filters_the_whole_corpus(tmp_path: Path):
+    """FINDING A: `--source` with no `--ids`/`--topic` must still scope the
+    corpus-wide selection to that source — the plan's original version returns
+    `None` here too, silently including every source's videos regardless of
+    `--source bookmarks`. See the `--limit` sibling above for why this uses
+    `_video_item_with_frames`, not `_video_item`."""
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {
+        "1": _video_item_with_frames("1", tmp_path, source="bookmark"),
+        "2": _video_item_with_frames("2", tmp_path, source="own_tweet"),
+    }
+    result = _resolve_redescribe_ids(store, None, None, "bookmarks", None)
+    assert result == ["1"]
+
+
+def test_resolve_redescribe_ids_limit_selects_from_the_stale_set_not_the_catalog(
+    tmp_path: Path,
+):
+    """I2, the actual reported bug: item `1` already at the current contract,
+    item `2` stale — `--limit 1` must select the STALE item (`2`), not
+    whichever item happens to sort first in the (staleness-blind)
+    `list_video_entries` catalog. The old implementation truncated the whole
+    catalog to 1 BEFORE checking staleness, so `--limit 1` here selected item
+    `1` (first in store order), the engine found nothing stale in it, and a
+    staged backfill run against `--limit 1` never advanced — identically on
+    every repeat."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {
+        "1": _video_item_with_frames("1", tmp_path, contract=FRAME_CAPTION_CONTRACT),
+        "2": _video_item_with_frames("2", tmp_path, contract=""),
+    }
+    result = _resolve_redescribe_ids(store, None, None, "all", 1)
+    assert result == ["2"]
+
+
+def test_resolve_redescribe_ids_force_widens_the_selection_to_every_frame_source(
+    tmp_path: Path,
+):
+    """`--force` must reach the SELECTION, not just the engine's re-caption
+    decision: with `force=True`, "stale" means every frame-bearing source, so
+    an already-current item is selectable too (#90 review I2's closing note)."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {"1": _video_item_with_frames("1", tmp_path, contract=FRAME_CAPTION_CONTRACT)}
+    assert _resolve_redescribe_ids(store, None, None, "all", 1, force=False) == []
+    assert _resolve_redescribe_ids(store, None, None, "all", 1, force=True) == ["1"]
+
+
+def test_resolve_redescribe_ids_topic_filters_the_stale_set(tmp_path: Path):
+    """`--topic` scopes the engine's own stale population, mirroring `--source`
+    above."""
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {
+        "1": _video_item_with_frames("1", tmp_path, topic="ai"),
+        "2": _video_item_with_frames("2", tmp_path, topic="climate"),
+    }
+    result = _resolve_redescribe_ids(store, None, "ai", "all", None)
+    assert result == ["1"]
+
+
+# ---------------------------------------------------------------------------
+# #90 review I1 + M2: a mid-run abort must persist the completed work, take a
+# snapshot, print the summary, AND still exit non-zero.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_persists_partial_work_on_a_mid_run_abort(tmp_path: Path, monkeypatch):
+    """Measured by the reviewer: item `1` fully re-described, item `2` then
+    raises `VisionNotFound` (the vision command vanished mid-run). Before the
+    fix: exit 1, the store UNCHANGED, no snapshot, no summary — every
+    already-paid-for vision call on item `1` discarded. After the fix: item
+    `1`'s new captions are on disk, a snapshot exists, the summary printed, and
+    the run still exits non-zero with the original error."""
+    from xbrain.store import load_store
+    from xbrain.vision import VisionNotFound
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {
+            "1": _video_item_with_frames("1", data_dir),
+            "2": _video_item_with_frames("2", data_dir),
+        },
+        data_dir / "items.json",
+    )
+
+    def _describe(path, **kwargs):
+        if "2/frames" in str(path):
+            raise VisionNotFound("vision command vanished")
+        return "nueva"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _describe)
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "Error: vision command vanished" in result.output
+    # The completed work landed — NOT discarded just because item 2 blew up.
+    snapshots = list((data_dir / "snapshots").iterdir())
+    assert any("pre-redescribe-frames" in p.name for p in snapshots)
+    reloaded = load_store(data_dir / "items.json")
+    assert [f.description for f in reloaded["1"].content.sources[0].frames] == [
+        "nueva",
+        "nueva",
+    ]
+    # Item 2 never got as far as being re-described — its old captions stand.
+    assert [f.description for f in reloaded["2"].content.sources[0].frames] == [
+        "vieja",
+        "vieja",
+    ]
+    # The summary still prints, reflecting what actually landed.
+    assert "2 regeneradas" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 re-review item 4: a failure INSIDE the `finally` (the snapshot/save
+# step) must never replace an in-flight original error, or swallow the
+# always-prints-the-summary promise.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_save_failure_during_abort_surfaces_both_errors(
+    tmp_path: Path, monkeypatch
+):
+    """Measured by the re-reviewer: with `save_store` raising `OSError("DISK
+    FULL")` while a `VisionNotFound` is already propagating, Python's default
+    `finally` semantics would let the save failure REPLACE the original error
+    — the operator would see only "Error: DISK FULL during save" and never
+    learn the vision command vanished. Both must surface: the ORIGINAL cause
+    (why the run aborted) stays the one `_handle_cli_errors` reports and exits
+    on, and the save failure is reported alongside it, not silently dropped.
+    The summary must also still print — it is now echoed FIRST in the
+    `finally`, before the snapshot/save step that just blew up."""
+    from xbrain.vision import VisionNotFound
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {
+            "1": _video_item_with_frames("1", data_dir),
+            "2": _video_item_with_frames("2", data_dir),
+        },
+        data_dir / "items.json",
+    )
+
+    def _describe(path, **kwargs):
+        if "2/frames" in str(path):
+            raise VisionNotFound("vision command vanished")
+        return "nueva"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _describe)
+    monkeypatch.setattr(
+        "xbrain.cli.save_store",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("DISK FULL")),
+    )
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    # The ORIGINAL cause is still what's reported and exited on — NOT the
+    # save failure that happened afterward while unwinding it.
+    assert "Error: vision command vanished" in result.output
+    # ...but the save failure must ALSO be visible, not silently dropped.
+    assert "DISK FULL" in result.output
+    # The summary — reflecting item 1's completed work — still printed.
+    assert "2 regeneradas" in result.output
+
+
+def test_redescribe_frames_save_failure_on_a_clean_run_propagates(tmp_path: Path, monkeypatch):
+    """The other half of item 4: with NOTHING already in flight, a
+    `save_store` failure IS the error — it must propagate normally, exactly
+    as it did before this fix, rather than being swallowed just because it
+    happens inside a `finally`."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+    monkeypatch.setattr(
+        "xbrain.cli.save_store",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("DISK FULL")),
+    )
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "Error: DISK FULL" in result.output
+    # The summary still printed even though the save blew up right after.
+    assert "2 regeneradas" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 review I3 (CLI level): dry-run vs. real-run output must be unmistakable.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_dry_run_output_is_unmistakably_different_from_real(
+    tmp_path: Path, monkeypatch
+):
+    """A dry run and a real run over the IDENTICAL selection must never print
+    textually indistinguishable summaries — before this fix they did, modulo
+    the leading `Snapshot created: …` line on the real run."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    dry = runner.invoke(app, ["redescribe-frames", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+
+    # Reset the store back to its pre-dry-run state (the dry run must not have
+    # touched it, but re-save to be explicit and independent of that guarantee).
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    real = runner.invoke(app, ["redescribe-frames"])
+    assert real.exit_code == 0, real.output
+
+    assert dry.output != real.output
+    assert "--dry-run: no se ha tocado el store." in dry.output
+    assert "--dry-run" not in real.output
+    assert "se regenerarían" in dry.output
+    assert "regeneradas" in real.output
+    assert "predic" in dry.output.lower()  # the Re-propagados caveat
+    source = load_store(data_dir / "items.json")["42"].content.sources[0]
+    assert [f.description for f in source.frames] == ["nueva", "nueva"]
+
+
+# ---------------------------------------------------------------------------
+# #90 review I4: four CLI wirings that were executed but wholly unasserted.
+# Each test below is written to catch EXACTLY the listed mutation.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_ids_narrows_which_item_is_touched(tmp_path: Path, monkeypatch):
+    """PIN for `item_ids=selected` → `item_ids=None`: a TWO-item store where
+    `--ids` selects only one. If the resolved selection never reached the
+    engine (`item_ids=None`), BOTH items would be re-described."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {
+            "1": _video_item_with_frames("1", data_dir),
+            "2": _video_item_with_frames("2", data_dir),
+        },
+        data_dir / "items.json",
+    )
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--ids", "1"])
+
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(data_dir / "items.json")
+    assert [f.description for f in reloaded["1"].content.sources[0].frames] == [
+        "nueva",
+        "nueva",
+    ]
+    # The UNSELECTED item must be left completely untouched.
+    assert [f.description for f in reloaded["2"].content.sources[0].frames] == [
+        "vieja",
+        "vieja",
+    ]
+
+
+def test_redescribe_frames_force_flag_reaches_the_engine(tmp_path: Path, monkeypatch):
+    """PIN for `force=force` → `force=False`: an already-current source must be
+    RE-described when `--force` is passed — if the flag never reached the
+    engine, this would be a silent no-op (matching
+    `test_redescribe_frames_on_a_current_corpus_writes_nothing` WITHOUT
+    `--force`)."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {"42": _video_item_with_frames("42", data_dir, contract=FRAME_CAPTION_CONTRACT)},
+        data_dir / "items.json",
+    )
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--force"])
+
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(data_dir / "items.json")
+    assert [f.description for f in reloaded["42"].content.sources[0].frames] == [
+        "nueva",
+        "nueva",
+    ]
+
+
+def test_redescribe_frames_vision_model_override_reaches_the_command(tmp_path: Path, monkeypatch):
+    """PIN for `_build_describe_frame_fn(cfg, vision_model)` →
+    `(cfg, None)`: `--vision-model NAME` must reach `describe_image` as the
+    `model` kwarg — mirrors `test_digest_video_vision_model_override`."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)  # [vision].command set, model unset
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    seen: list = []
+
+    def _capture(path, *, command, model, language=None):
+        seen.append(model)
+        return "nueva"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
+
+    result = runner.invoke(app, ["redescribe-frames", "--vision-model", "opus"])
+
+    assert result.exit_code == 0, result.output
+    assert seen and set(seen) == {"opus"}
+
+
+def test_redescribe_frames_snapshot_content_predates_the_new_captions(tmp_path: Path, monkeypatch):
+    """PIN for `_auto_snapshot(...)` / `save_store(...)` order swapped: the
+    prior test (`test_redescribe_frames_snapshots_before_writing`) only checked
+    that a snapshot exists and the live store has new captions — satisfied even
+    if the snapshot were taken AFTER the write (or not copied correctly).
+    Actually reading the snapshot's OWN `items.json` and asserting it holds the
+    OLD captions is what pins "before", not just "exists"."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+    assert result.exit_code == 0, result.output
+
+    snapshots_dir = data_dir / "snapshots"
+    (snapshot_dir,) = [p for p in snapshots_dir.iterdir() if "pre-redescribe-frames" in p.name]
+    snapshotted = load_store(snapshot_dir / "items.json")
+    assert [f.description for f in snapshotted["42"].content.sources[0].frames] == [
+        "vieja",
+        "vieja",
+    ]
+    # The LIVE store, meanwhile, has the new captions.
+    live = load_store(data_dir / "items.json")
+    assert [f.description for f in live["42"].content.sources[0].frames] == ["nueva", "nueva"]
+
+
+# ---------------------------------------------------------------------------
+# #90 review M1: the circuit breaker must blame the right subsystem at the
+# CLI level too.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_total_failure_from_missing_media_blames_data_media(
+    tmp_path: Path, monkeypatch
+):
+    """Measured: every PNG deleted plus a perfectly healthy `describe_fn` must
+    NOT tell the operator to check `[vision].command`/the vision model."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    for png in (data_dir / "media" / "42" / "frames").glob("*.png"):
+        png.unlink()
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "data/media" in result.output
+    assert "[vision]" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 review M4: `--vision-model` with `--dry-run` must be a hard error, not a
+# silent no-op — matching `test_digest_video_vision_model_without_frames_errors`.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_vision_model_with_dry_run_errors(tmp_path: Path, monkeypatch):
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+
+    result = runner.invoke(app, ["redescribe-frames", "--dry-run", "--vision-model", "opus"])
+
+    assert result.exit_code == 2  # click usage error (BadParameter)
+    assert "--dry-run" in _plain_output(result.output)
+
+
+# ---------------------------------------------------------------------------
+# #90 review M5: an unknown `--topic`, and a whitespace-only `--ids`, must warn
+# — the same asymmetry the unknown-`--ids` warning was added to remove.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_unknown_topic_warns(tmp_path: Path, monkeypatch):
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--topic", "no-such-topic"])
+
+    assert result.exit_code == 0, result.output
+    assert "no-such-topic" in result.output
+    assert "0 vídeos seleccionados" in result.output
+
+
+def test_redescribe_frames_whitespace_only_ids_warns(tmp_path: Path, monkeypatch):
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--ids", "   "])
+
+    assert result.exit_code == 0, result.output
+    assert "aviso" in result.output
+    assert "0 vídeos seleccionados" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 review M7: the vision guard must name WHICH operation failed.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_missing_vision_command_names_the_operation(tmp_path: Path, monkeypatch):
+    """Companion to `test_digest_video_frames_requires_vision_command`: unlike
+    that test (which only checks `"vision" in output.lower()` — satisfied by
+    the literal config key `[vision]`, not by the human-readable prose), this
+    asserts the OPERATION NAME itself is in the message."""
+    _setup_repo(tmp_path, monkeypatch)  # no [vision] section
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "redescribe-frames" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 PR2 re-review M3 + M6: two defects the whole-branch fix wave reinstated
+# and re-fixed, pinned by NOTHING — a future edit could re-break either one
+# and the suite would stay green. Both must assert on the RENDERED --help
+# output (via CliRunner), never on the source string: `[vision]` looks like a
+# valid Rich markup tag, so rich's markup parser silently EATS `[vision]` and
+# everything up to the next `]` at render time — a source-text `assert
+# "[vision]" in <docstring>` would stay green even after the escaping
+# backslash is deleted, because the backslash lives in the source either way.
+# Only rendering reproduces the actual eaten-markup failure mode.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_help_renders_vision_config_key_literally():
+    """M3: `redescribe-frames --help` must show `[vision].command` literally.
+
+    Unescaped, Rich's markup parser treats `[vision]` as a (bogus) style tag,
+    strips it, and renders `.command` on its own — the operator loses the one
+    clue telling them which config section to set."""
+    result = runner.invoke(app, ["redescribe-frames", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "[vision].command" in _plain_output(result.output)
+
+
+def test_digest_video_help_renders_vision_config_keys_literally():
+    """M3, the sibling surface: `digest-video --help` mentions `[vision]` twice
+    — once in `--frames`'s help (`[vision].command`) and once in
+    `--vision-model`'s (`[vision].model`) — and both must survive rendering."""
+    result = runner.invoke(app, ["digest-video", "--help"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    assert "[vision].command" in out
+    assert "[vision].model" in out
+
+
+def test_redescribe_frames_limit_help_says_items_not_videos():
+    """M6: one bookmark can carry two frame-bearing `x_video` sources, so
+    `--limit` capping ITEMS is a materially different promise than capping
+    videos — the rendered help for `--limit` (and only `--limit`; the
+    docstring body legitimately says "vídeos" elsewhere) must say "items"."""
+    result = runner.invoke(app, ["redescribe-frames", "--help"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    # Isolate the --limit row itself (up to the next option flag) so a "vídeos"
+    # elsewhere in the help text (the command docstring says "vídeos" freely)
+    # can't satisfy this assertion by accident.
+    match = re.search(r"--limit\b.*?(?=--force\b)", out)
+    assert match, out
+    limit_help = match.group(0)
+    assert "items" in limit_help
+    assert "vídeos" not in limit_help

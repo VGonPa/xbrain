@@ -6,8 +6,8 @@ an `x_video` content source, via: ephemeral fetch (reusing PR1's `fetch_videos`)
 behaviours are exercised here with INJECTED fakes (no real network, no real
 subprocess, no real downloads):
 
-- **Dedup by video identity** — N bookmarks of the same video fetch + transcribe
-  ONCE; every referencing item gets the same transcript source.
+- **Dedup by video identity** — on the default path N bookmarks of the same
+  video fetch + transcribe ONCE; `keep_transcript` splits them by stored source.
 - **Idempotency** — an item already carrying an `x_video` source is skipped
   unless `--force`.
 - **No-speech** — a `has_speech=False` transcript is attached (empty text +
@@ -19,6 +19,7 @@ subprocess, no real downloads):
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,7 +35,10 @@ from xbrain.digest import (
     group_items_by_video,
 )
 from xbrain.models import (
+    FRAME_CAPTION_CONTRACT,
     Author,
+    Content,
+    ContentSourceFailure,
     ContentSourceSuccess,
     Item,
     MediaVideoPending,
@@ -432,6 +436,28 @@ def test_fetch_failure_is_recorded_not_fatal(tmp_path: Path):
     assert store["b1"].content.sources[0].kind == "x_video"
 
 
+def test_fetch_failure_logs_the_item_and_its_reason(tmp_path: Path, caplog):
+    """A failed download used to surface ONLY as `fallidos 1` in the summary. The
+    `FetchResult` carried the reason and the batch discarded it. Measured 2026-10-11: a
+    487 MB video failed twice in a row, with a log one line long. `fetch-video` on the
+    same id finally said why: HTTP 403, an expired signed URL. One record has to name
+    the item AND the reason. Two separate mentions somewhere in the log prove nothing."""
+    import logging
+
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    with caplog.at_level(logging.WARNING, logger="xbrain.digest"):
+        digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(fail_ids={"a1"}),
+            transcribe_fn=lambda _p: _speech(),
+            temp_root=tmp_path,
+        )
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("a1" in m and "http_5xx" in m and "boom" in m for m in messages), messages
+
+
 def test_temp_video_discarded_after_transcription(tmp_path: Path):
     """No video bytes persist: the fetched mp4 exists AT transcribe time, and the
     whole temp dir is gone after the run (ephemeral, one-at-a-time)."""
@@ -539,14 +565,29 @@ class _FakeVisual:
     `extract_fn` writes its frame files INTO the fetched video's parent (the
     ephemeral temp dir) — mirroring the real ffmpeg path — so the outer cleanup
     reclaims them. Records the calls so tests can assert extract/describe ran (or
-    did NOT, on the non-frames / talking-head paths)."""
+    did NOT, on the non-frames / talking-head paths).
 
-    def __init__(self, *, classification: str = "slides", n_frames: int = 2, describe=None):
+    The two reducers keep the FIRST `slides_keep` / `footage_keep` frames (`None`
+    = keep all) and record which one ran in `reduce_calls`, so a test can tell the
+    slide budget from the footage budget by the frames that come out."""
+
+    def __init__(
+        self,
+        *,
+        classification: str = "slides",
+        n_frames: int = 2,
+        describe=None,
+        slides_keep: int | None = None,
+        footage_keep: int | None = None,
+    ):
         self.classification = classification
         self.n_frames = n_frames
         self._describe = describe or (lambda path: f"description of {Path(path).name}")
+        self.slides_keep = slides_keep
+        self.footage_keep = footage_keep
         self.extract_calls: list[Path] = []
         self.describe_calls: list[Path] = []
+        self.reduce_calls: list[str] = []
         self.classify_calls = 0
 
     def extract(self, path: Path) -> list[KeyFrame]:
@@ -562,12 +603,22 @@ class _FakeVisual:
         self.describe_calls.append(Path(path))
         return self._describe(path)
 
+    def reduce_slides(self, frames: list[KeyFrame]) -> list[KeyFrame]:
+        self.reduce_calls.append("slides")
+        return frames if self.slides_keep is None else frames[: self.slides_keep]
+
+    def reduce_footage(self, frames: list[KeyFrame]) -> list[KeyFrame]:
+        self.reduce_calls.append("footage")
+        return frames if self.footage_keep is None else frames[: self.footage_keep]
+
     def config(self, media_root: Path) -> VisualConfig:
         return VisualConfig(
             media_root=media_root,
             extract_fn=self.extract,
             describe_fn=self.describe,
             classify_fn=self.classify,
+            reduce_fn=self.reduce_slides,
+            footage_reduce_fn=self.reduce_footage,
         )
 
 
@@ -866,6 +917,390 @@ def test_silent_slide_deck_keeps_frames(tmp_path: Path):
     assert report.visual_slides == 1
 
 
+# ------------------------------------------------------------ silent footage (non-slide, no speech)
+
+
+def _digest_messages(caplog) -> list[str]:
+    """The fully-formatted messages `xbrain.digest` logged — compared whole, never
+    searched for a fragment."""
+    return [r.getMessage() for r in caplog.records if r.name == "xbrain.digest"]
+
+
+def test_silent_non_slide_video_describes_its_frames_as_footage(tmp_path: Path, caplog):
+    """A SILENT video the classifier calls `talking_head` is not a talking head: with
+    no speech the frames are the only evidence, so they are kept, described and
+    embedded as `footage` — never attached as a hollow empty source."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    media_root = tmp_path / "media"
+    visual = _FakeVisual(classification="talking_head", n_frames=3, footage_keep=2)
+
+    with caplog.at_level(logging.INFO, logger="xbrain.digest"):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _silence(),
+            temp_root=tmp_path,
+            visual=visual.config(media_root),
+        )
+    src = store["a1"].content.sources[0]
+    assert src.kind == "x_video"
+    assert src.has_speech is False
+    assert src.text == ""
+    assert [(f.timestamp, f.local_path, f.description) for f in src.frames] == [
+        (0.0, "a1/frames/0.png", "description of frame-00000.png"),
+        (10.0, "a1/frames/1.png", "description of frame-00001.png"),
+    ]
+    assert src.caption_contract == FRAME_CAPTION_CONTRACT
+    assert sorted(p.name for p in (media_root / "a1" / "frames").iterdir()) == ["0.png", "1.png"]
+    assert [p.name for p in visual.describe_calls] == ["frame-00000.png", "frame-00001.png"]
+    assert (report.no_speech, report.visual_footage) == (1, 1)
+    assert (report.visual_slides, report.visual_skipped, report.hollow) == (0, 0, 0)
+    assert (
+        "digest-video: silent non-slide video — describing 2 frame(s) as footage for item a1"
+        in _digest_messages(caplog)
+    )
+    assert "digest-video: visual layer skipped (talking-head) for item a1" not in (
+        _digest_messages(caplog)
+    )
+
+
+def test_footage_is_capped_by_the_footage_reducer_not_the_slide_reducer(tmp_path: Path):
+    """Footage has its own, smaller budget: the slide reducer would keep 3 of 4
+    frames, the footage reducer keeps 1 — exactly 1 frame is described + attached,
+    and the slide reducer never runs."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="talking_head", n_frames=4, slides_keep=3, footage_keep=1)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == ["a1/frames/0.png"]
+    assert visual.reduce_calls == ["footage"]
+    assert len(visual.describe_calls) == 1
+    assert report.visual_footage == 1
+
+
+@pytest.mark.parametrize(
+    ("classification", "transcript"),
+    [
+        pytest.param("slides", _speech(), id="slides"),
+        pytest.param("talking_head", _silence(), id="footage"),
+    ],
+)
+def test_default_reducers_describe_every_extracted_frame(
+    tmp_path: Path, classification: str, transcript: Transcript
+):
+    """A `VisualConfig` built without reducers keeps every frame on BOTH kept paths
+    — the budgets are the CLI's to bind, never a hidden default cap."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    fake = _FakeVisual(classification=classification, n_frames=3)
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=fake.extract,
+        describe_fn=fake.describe,
+        classify_fn=fake.classify,
+    )
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: transcript,
+        temp_root=tmp_path,
+        visual=visual,
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == [
+        "a1/frames/0.png",
+        "a1/frames/1.png",
+        "a1/frames/2.png",
+    ]
+
+
+def test_talking_head_with_speech_still_skips_the_visual_layer(tmp_path: Path):
+    """With speech the transcript carries the content, so a `talking_head` video keeps
+    today's skip: no reducer, no vision call, no frame files, counted as a skipped
+    talking-head — and neither as footage nor as hollow."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    media_root = tmp_path / "media"
+    visual = _FakeVisual(classification="talking_head", n_frames=3, footage_keep=2)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech("an interview"),
+        temp_root=tmp_path,
+        visual=visual.config(media_root),
+    )
+    src = store["a1"].content.sources[0]
+    assert (src.text, src.has_speech, src.frames, src.caption_contract) == (
+        "an interview",
+        True,
+        [],
+        "",
+    )
+    assert visual.describe_calls == []
+    assert visual.reduce_calls == []
+    assert not (media_root / "a1" / "frames").exists()
+    assert (report.transcribed, report.visual_skipped) == (1, 1)
+    assert (report.visual_footage, report.visual_slides, report.hollow) == (0, 0, 0)
+
+
+def test_silent_footage_vision_failure_is_skipped_and_counted_hollow(tmp_path: Path, caplog):
+    """A `VisionFailed` while describing footage drops the visual layer exactly like
+    the slides path (`skipped`, warned) — and the item, now silent AND frameless, is
+    counted as hollow rather than as described footage."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+
+    def _boom(_path):
+        raise VisionFailed("model crashed")
+
+    visual = _FakeVisual(classification="talking_head", n_frames=2, describe=_boom)
+    with caplog.at_level(logging.INFO, logger="xbrain.digest"):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _silence(),
+            temp_root=tmp_path,
+            visual=visual.config(tmp_path / "media"),
+        )
+    src = store["a1"].content.sources[0]
+    assert (src.has_speech, src.frames, src.caption_contract) == (False, [], "")
+    assert (report.no_speech, report.hollow) == (1, 1)
+    assert (report.visual_footage, report.visual_slides, report.visual_skipped) == (0, 0, 0)
+    assert "digest-video: visual layer failed for item a1: model crashed" in (
+        _digest_messages(caplog)
+    )
+
+
+def _extraction_fails(_path: Path) -> list[KeyFrame]:
+    raise FrameExtractionFailed("Invalid data")
+
+
+@pytest.mark.parametrize(
+    ("extract", "classification"),
+    [
+        pytest.param(_extraction_fails, "talking_head", id="extraction-failed"),
+        pytest.param(lambda _p: [], "talking_head", id="zero-frames"),
+        pytest.param(None, "unreadable", id="all-unreadable"),
+    ],
+)
+def test_silent_video_non_content_drops_stay_skipped_and_hollow(
+    tmp_path: Path, extract, classification
+):
+    """Extraction failure, zero frames and all-unreadable frames stay `skipped` even
+    for a silent video — the footage path never describes what could not be read —
+    and each leaves the item hollow."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification=classification, n_frames=2)
+    config = visual.config(tmp_path / "media")
+    if extract is not None:
+        config = replace(config, extract_fn=extract)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=config,
+    )
+    assert store["a1"].content.sources[0].frames == []
+    assert visual.describe_calls == []
+    assert visual.reduce_calls == []
+    assert (report.no_speech, report.hollow) == (1, 1)
+    assert (report.visual_footage, report.visual_slides, report.visual_skipped) == (0, 0, 0)
+
+
+def test_silent_video_on_a_non_frames_run_is_counted_hollow_per_item(tmp_path: Path):
+    """Without `--frames` a silent video is attached with no text and no frames — a
+    hollow entry, counted per ITEM (two bookmarks of one video = 2), so the run
+    summary never hides it."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    report = digest_videos(
+        store,
+        ["a1", "a2"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert (report.no_speech, report.videos_transcribed, report.hollow) == (2, 1, 2)
+    assert (report.visual_footage, report.visual_slides, report.visual_skipped) == (0, 0, 0)
+
+
+def test_speaking_video_on_a_non_frames_run_is_not_hollow(tmp_path: Path):
+    """A frameless video WITH speech is not hollow — its transcript is the content."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert (report.transcribed, report.hollow) == (1, 0)
+
+
+# `transcribe._derive_has_speech` trusts an explicit `has_speech` and infers it from a
+# non-empty segment list, so the ASR can hand back `has_speech=True` with no words:
+# `{"text": "", "has_speech": true}`, or `{"segments": [{"text": " "}]}` (text
+# backfilled to ""). Every consumer (generate, video_digest, worksheet, the api
+# executor) reads such a source as having NO transcript, so the digest must too.
+_BLANK_SPEECH = [
+    pytest.param("", id="empty-text"),
+    pytest.param("   ", id="whitespace-text"),
+]
+
+
+def _blank_speech(text: str) -> Transcript:
+    return Transcript(text=text, segments=[Segment(0.0, 1.0, " ")], language="en", has_speech=True)
+
+
+@pytest.mark.parametrize("text", _BLANK_SPEECH)
+def test_blank_transcript_flagged_as_speech_describes_its_frames_as_footage(
+    tmp_path: Path, text: str
+):
+    """`has_speech=True` with blank text carries no words, so a non-slide verdict is
+    footage — frames described + attached — not a talking-head skip that would
+    leave a frameless, wordless (hollow) source."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _blank_speech(text),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    src = store["a1"].content.sources[0]
+    assert [(f.timestamp, f.local_path) for f in src.frames] == [
+        (0.0, "a1/frames/0.png"),
+        (10.0, "a1/frames/1.png"),
+    ]
+    assert visual.reduce_calls == ["footage"]
+    assert (report.visual_footage, report.visual_skipped, report.hollow) == (1, 0, 0)
+    # The transcript counters keep reading the raw flag — only the gate changed.
+    assert (report.transcribed, report.no_speech) == (1, 0)
+
+
+@pytest.mark.parametrize("text", _BLANK_SPEECH)
+def test_blank_transcript_flagged_as_speech_is_hollow_on_a_non_frames_run(
+    tmp_path: Path, text: str
+):
+    """Without `--frames` the same blank-but-flagged transcript attaches a source
+    with no words and no frames — counted as hollow, never silent."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _blank_speech(text),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert store["a1"].content.sources[0].frames == []
+    assert report.hollow == 1
+    assert (report.transcribed, report.no_speech) == (1, 0)
+
+
+def _hollow_store(tmp_path: Path) -> dict[str, Item]:
+    """One item already carrying a hollow source (silent, frameless), from a prior
+    non-`--frames` run."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    first = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert first.hollow == 1
+    return store
+
+
+def _transcription_fails(_path: Path) -> Transcript:
+    raise TranscriberFailed("garbage output")
+
+
+@pytest.mark.parametrize(
+    ("fetch_fn", "transcribe_fn"),
+    [
+        pytest.param(_FakeFetch(fail_ids={"a1"}), lambda _p: _silence(), id="fetch-failed"),
+        pytest.param(_FakeFetch(), _transcription_fails, id="transcription-failed"),
+    ],
+)
+def test_failed_forced_redigest_keeps_the_old_hollow_source_as_failed(
+    tmp_path: Path, fetch_fn, transcribe_fn
+):
+    """A `--force --frames` re-digest of a hollow item whose fetch or transcription
+    fails attaches nothing: the OLD hollow source stays, and the item is counted
+    under `fallidos` — not under `Huecos`, which counts only what this run
+    attached (docs/digest-video.md, hollow items)."""
+    store = _hollow_store(tmp_path)
+    old = store["a1"].content.sources[0]
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        fetch_fn=fetch_fn,
+        transcribe_fn=transcribe_fn,
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    # Identity, not equality: a re-attached silent transcript compares EQUAL to the
+    # old hollow source, so only `is` proves nothing was attached.
+    assert len(store["a1"].content.sources) == 1
+    assert store["a1"].content.sources[0] is old
+    assert visual.describe_calls == []
+    assert (report.failed, report.hollow, report.visual_footage) == (1, 0, 0)
+
+
+def test_already_stored_hollow_item_is_not_counted_hollow_again(tmp_path: Path):
+    """Without `--force` a stored hollow item is `already` and is not re-counted, so
+    `Huecos` never reports the backlog — the documented jq recipe finds that."""
+    store = _hollow_store(tmp_path)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert (report.already, report.hollow, report.videos_transcribed) == (1, 0, 0)
+
+
+def test_silent_slide_deck_uses_the_slide_reducer_not_the_footage_one(tmp_path: Path):
+    """A silent SLIDE deck keeps today's path: the slide reducer (keeps 2) decides the
+    set, the footage reducer (keeps 1) never runs, and it counts as slides — not as
+    footage, not as hollow."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="slides", n_frames=3, slides_keep=2, footage_keep=1)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == [
+        "a1/frames/0.png",
+        "a1/frames/1.png",
+    ]
+    assert visual.reduce_calls == ["slides"]
+    assert (report.no_speech, report.visual_slides) == (1, 1)
+    assert (report.visual_footage, report.visual_skipped, report.hollow) == (0, 0, 0)
+
+
 def test_redigest_with_fewer_slides_clears_stale_frame_files(tmp_path: Path):
     """A `--force` re-digest that yields FEWER slides must not leave stale
     higher-index PNGs orphaned on disk: `<id>/frames/` is cleared before the new
@@ -941,3 +1376,1145 @@ def test_format_digest_summary_omits_visual_on_non_frames_run():
     Visual segment — the summary is byte-unchanged from the PR2/PR3 shape."""
     report = DigestReport(transcribed=1, groups={"amplify_video/1": ["a"]})
     assert "Visual:" not in format_digest_summary(report)
+
+
+# Today's summary line for the reports below, written out literally — never
+# rebuilt with `format_digest_summary`, which is the code under test.
+_BASE_SUMMARY = (
+    "Vídeos: transcritos 1, sin voz 2, ya digeridos 0, fallidos 0, "
+    "sin vídeo 0, desconocidos 0. "
+    "Dedup: 3 items ← 3 vídeos (3 transcritos este run)."
+)
+_THREE_GROUPS = {"amplify_video/1": ["a"], "amplify_video/2": ["b"], "amplify_video/3": ["c"]}
+
+
+def test_format_digest_summary_renders_the_full_visual_segment():
+    """Slides, silent footage and talking-head skips each get their own count, in
+    that order, as one exact segment right after the Dedup sentence."""
+    report = DigestReport(
+        transcribed=1,
+        no_speech=2,
+        videos_transcribed=3,
+        visual_slides=1,
+        visual_footage=1,
+        visual_skipped=1,
+        groups=_THREE_GROUPS,
+    )
+    assert format_digest_summary(report) == (
+        _BASE_SUMMARY + " Visual: 1 con slides, 1 metraje mudo descrito, 1 talking-head (saltados)."
+    )
+
+
+def test_format_digest_summary_shows_a_footage_only_visual_segment():
+    """A run whose only visual work was silent footage still prints the segment."""
+    report = DigestReport(
+        transcribed=1, no_speech=2, videos_transcribed=3, visual_footage=2, groups=_THREE_GROUPS
+    )
+    assert format_digest_summary(report) == (
+        _BASE_SUMMARY + " Visual: 0 con slides, 2 metraje mudo descrito, 0 talking-head (saltados)."
+    )
+
+
+def test_format_digest_summary_appends_hollow_to_todays_line():
+    """With no visual work, hollow items add exactly one sentence to today's line."""
+    report = DigestReport(
+        transcribed=1, no_speech=2, videos_transcribed=3, hollow=2, groups=_THREE_GROUPS
+    )
+    assert format_digest_summary(report) == (_BASE_SUMMARY + " Huecos (sin voz ni frames): 2.")
+
+
+def test_format_digest_summary_puts_hollow_after_the_visual_segment():
+    report = DigestReport(
+        transcribed=1,
+        no_speech=2,
+        videos_transcribed=3,
+        visual_slides=1,
+        visual_skipped=1,
+        hollow=1,
+        groups=_THREE_GROUPS,
+    )
+    assert format_digest_summary(report) == (
+        _BASE_SUMMARY
+        + " Visual: 1 con slides, 0 metraje mudo descrito, 1 talking-head (saltados)."
+        + " Huecos (sin voz ni frames): 1."
+    )
+
+
+def test_format_digest_summary_is_todays_line_without_hollow_or_visual_work():
+    report = DigestReport(transcribed=1, no_speech=2, videos_transcribed=3, groups=_THREE_GROUPS)
+    assert format_digest_summary(report) == _BASE_SUMMARY
+
+
+def test_digest_stamps_the_caption_contract_when_frames_were_described():
+    """A `--frames` run produces captions under the CURRENT contract, so it must
+    say so — otherwise `redescribe-frames` re-captions frames that are already
+    fresh, at full cost."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT, VideoFrame
+
+    store = {"1": _item("1", _VIDEO_A_URL_1)}
+    frames = {"1": [VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description="d")]}
+    attach_transcript(store, ["1"], _speech(), frames_by_item=frames)
+    source = store["1"].content.sources[-1]
+    assert source.caption_contract == FRAME_CAPTION_CONTRACT
+
+
+def test_digest_leaves_the_contract_empty_when_no_frames_were_described():
+    """An audio-only digest describes nothing, so it must claim no contract."""
+    store = {"1": _item("1", _VIDEO_A_URL_1)}
+    attach_transcript(store, ["1"], _speech())
+    assert store["1"].content.sources[-1].caption_contract == ""
+
+
+# ------------------------------------------------------------ keep_transcript (frames-only re-digest)
+
+
+class _TranscriberMustNotRun:
+    """A transcriber that fails the test the moment it runs.
+
+    `keep_transcript` must reuse the stored transcript and never re-run the ASR.
+    It raises `AssertionError`, which `_analyze_media` does not catch (it only
+    catches `TranscriberFailed`), so a call aborts the run instead of being
+    quietly counted as `fallidos`; `calls` records it as well."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, path: Path) -> Transcript:
+        self.calls.append(Path(path).name)
+        raise AssertionError(f"the transcriber ran on {Path(path).name} under keep_transcript")
+
+
+def _stored_speech_store(tmp_path: Path, transcript: Transcript) -> dict[str, Item]:
+    """One item already carrying a with-speech `x_video` source, from a prior
+    non-`--frames` run."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: transcript,
+        temp_root=tmp_path,
+        visual=None,
+    )
+    source = store["a1"].content.sources[0]
+    assert (source.text, source.has_speech) == (transcript.text, True)
+    return store
+
+
+def test_keep_transcript_redigests_a_stored_hollow_item_without_the_asr(tmp_path: Path):
+    """The hollow-recovery run: the stored silent transcript is reused (the ASR
+    never runs), the mp4 is still fetched because the frames need it, and the
+    silent non-slide video comes back with its frames as footage — no longer
+    hollow."""
+    store = _hollow_store(tmp_path)
+    fetch = _FakeFetch()
+    transcriber = _TranscriberMustNotRun()
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert transcriber.calls == []
+    assert fetch.fetched_ids == ["a1"]
+    assert len(store["a1"].content.sources) == 1
+    source = store["a1"].content.sources[0]
+    assert source.kind == "x_video"
+    assert [(f.local_path, f.description) for f in source.frames] == [
+        ("a1/frames/0.png", "description of frame-00000.png"),
+        ("a1/frames/1.png", "description of frame-00001.png"),
+    ]
+    assert source.has_speech is False
+    assert source.text == ""
+    assert (report.no_speech, report.visual_footage, report.hollow) == (1, 1, 0)
+    assert report.videos_transcribed == 0
+    assert report.videos_reused == 1
+
+
+def test_keep_transcript_keeps_stored_speech_and_skips_a_talking_head(tmp_path: Path):
+    """A stored transcript WITH speech is kept exactly (text, flag, language,
+    title) and still decides the visual layer: a talking head is skipped, so no
+    frames and no vision call."""
+    stored = replace(_speech("hello world"), title="The talk")
+    store = _stored_speech_store(tmp_path, stored)
+    transcriber = _TranscriberMustNotRun()
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert transcriber.calls == []
+    source = store["a1"].content.sources[0]
+    assert source.frames == []
+    assert (source.text, source.has_speech, source.language, source.title) == (
+        "hello world",
+        True,
+        "en",
+        "The talk",
+    )
+    assert visual.describe_calls == []
+    assert (report.transcribed, report.visual_skipped, report.visual_footage, report.hollow) == (
+        1,
+        1,
+        0,
+        0,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_sources",
+    [
+        pytest.param(None, id="no-content"),
+        pytest.param(
+            [ContentSourceSuccess(kind="external_article", url="https://ex.com/a", text="body")],
+            id="article-only",
+        ),
+        pytest.param(
+            [
+                ContentSourceFailure(
+                    kind="x_video", url=_VIDEO_A_URL_1, failure_reason="unknown_error"
+                )
+            ],
+            id="failed-x-video",
+        ),
+    ],
+)
+def test_keep_transcript_transcribes_when_no_transcript_is_stored(tmp_path: Path, stored_sources):
+    """With no stored `x_video` success source there is nothing to keep, so the
+    ASR runs once, as on a normal run."""
+    item = _item("a1", _VIDEO_A_URL_1)
+    if stored_sources is not None:
+        item.content = Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=stored_sources
+        )
+    store = {"a1": item}
+    calls: list[str] = []
+
+    def _transcribe(path: Path) -> Transcript:
+        calls.append(Path(path).name)
+        return _speech("fresh words")
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_transcribe,
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head").config(tmp_path / "media"),
+    )
+    assert calls == ["a1.mp4"]
+    video_sources = [s for s in store["a1"].content.sources if s.kind == "x_video"]
+    assert [(s.outcome, s.text) for s in video_sources] == [("success", "fresh words")]
+    assert (report.transcribed, report.visual_skipped) == (1, 1)
+
+
+# A whisper hallucination stored in the real corpus (item 2095233745167282602).
+_STORED_HALLUCINATION = Transcript(text="you you", has_speech=True)
+
+
+@pytest.mark.parametrize(
+    ("keep_transcript", "text", "has_speech", "frame_paths", "counts"),
+    [
+        # Re-transcribing invents a quote: the words skip the frames as a talking
+        # head, and the item is no longer counted hollow — nothing flags it again.
+        pytest.param(False, "you you", True, [], (1, 0, 1, 0), id="re-transcribed"),
+        pytest.param(
+            True,
+            "",
+            False,
+            ["a1/frames/0.png", "a1/frames/1.png"],
+            (0, 1, 0, 0),
+            id="kept-transcript",
+        ),
+    ],
+)
+def test_keep_transcript_blocks_an_asr_hallucination_on_a_hollow_item(
+    tmp_path: Path, keep_transcript, text, has_speech, frame_paths, counts
+):
+    """Regression pin for the whisper-on-music hazard on a stored hollow item.
+    `counts` is (transcribed, visual_footage, visual_skipped, hollow)."""
+    store = _hollow_store(tmp_path)
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=keep_transcript,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _STORED_HALLUCINATION,
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    source = store["a1"].content.sources[0]
+    assert (source.text, source.has_speech) == (text, has_speech)
+    assert [f.local_path for f in source.frames] == frame_paths
+    assert (
+        report.transcribed,
+        report.visual_footage,
+        report.visual_skipped,
+        report.hollow,
+    ) == counts
+
+
+def _hollow_pair_store(tmp_path: Path) -> dict[str, Item]:
+    """`a1` already carries a hollow source; `p1` bookmarks the SAME video
+    (another signed URL for `amplify_video/1500`) and was never digested."""
+    store = _hollow_store(tmp_path)
+    store["p1"] = _item("p1", _VIDEO_A_URL_2)
+    return store
+
+
+@pytest.mark.parametrize(
+    "order", [["p1", "a1"], ["a1", "p1"]], ids=["undigested-first", "hollow-first"]
+)
+def test_keep_transcript_never_retranscribes_a_stored_member_of_the_video(
+    tmp_path: Path, order: list[str]
+):
+    """One video, two items: `a1` has a stored hollow transcript, `p1` has none.
+    Whatever the id order, the stored member is never re-transcribed and no
+    transcript moves between the two: the ASR runs once, for `p1` only, its
+    invented words land on `p1` alone, and `a1` keeps its empty transcript and
+    gets frames."""
+    store = _hollow_pair_store(tmp_path)
+    fetch = _FakeFetch()
+    calls: list[str] = []
+
+    def _transcribe(path: Path) -> Transcript:
+        calls.append(Path(path).name)
+        return _STORED_HALLUCINATION
+
+    report = digest_videos(
+        store,
+        order,
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=_transcribe,
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=2).config(tmp_path / "media"),
+    )
+    hollow = store["a1"].content.sources[0]
+    pending = store["p1"].content.sources[0]
+    assert calls == ["p1.mp4"]
+    assert sorted(fetch.fetched_ids) == ["a1", "p1"]
+    assert (hollow.text, hollow.has_speech) == ("", False)
+    assert [f.local_path for f in hollow.frames] == ["a1/frames/0.png", "a1/frames/1.png"]
+    assert (pending.text, pending.has_speech, pending.frames) == ("you you", True, [])
+    assert (report.videos_transcribed, report.videos_reused) == (1, 1)
+    assert (
+        report.transcribed,
+        report.no_speech,
+        report.visual_footage,
+        report.visual_skipped,
+        report.hollow,
+    ) == (1, 1, 1, 1, 0)
+
+
+@pytest.mark.parametrize(
+    "order", [["a1", "a2"], ["a2", "a1"]], ids=["speech-first", "silent-first"]
+)
+def test_keep_transcript_keeps_each_items_own_stored_transcript(tmp_path: Path, order: list[str]):
+    """Two items of one video stored DIFFERENT transcripts. Each keeps its own,
+    byte for byte, and its own visual verdict: the speaking one is a skipped
+    talking head, the silent one gets its frames as footage."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    for item_id, transcript in (("a1", _speech("hello world")), ("a2", _silence())):
+        digest_videos(
+            store,
+            [item_id],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p, t=transcript: t,
+            temp_root=tmp_path,
+            visual=None,
+        )
+    fetch = _FakeFetch()
+    transcriber = _TranscriberMustNotRun()
+
+    report = digest_videos(
+        store,
+        order,
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=2).config(tmp_path / "media"),
+    )
+    speaking = store["a1"].content.sources[0]
+    silent = store["a2"].content.sources[0]
+    assert transcriber.calls == []
+    assert sorted(fetch.fetched_ids) == ["a1", "a2"]
+    assert (speaking.text, speaking.has_speech, speaking.language, speaking.frames) == (
+        "hello world",
+        True,
+        "en",
+        [],
+    )
+    assert (silent.text, silent.has_speech, silent.language) == ("", False, None)
+    assert [f.local_path for f in silent.frames] == ["a2/frames/0.png", "a2/frames/1.png"]
+    assert (report.videos_transcribed, report.videos_reused) == (0, 1)
+    assert (
+        report.transcribed,
+        report.no_speech,
+        report.visual_footage,
+        report.visual_skipped,
+        report.hollow,
+    ) == (1, 1, 1, 1, 0)
+
+
+def test_keep_transcript_recovers_every_item_of_a_shared_video(tmp_path: Path):
+    """Two hollow items of one video (like the real pair 2070957137027871193 /
+    2071616417938522264) store the same empty transcript: the video is fetched and
+    described once, the ASR never runs, and EACH item gets its own frames."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    digest_videos(
+        store,
+        ["a1", "a2"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    fetch = _FakeFetch()
+    transcriber = _TranscriberMustNotRun()
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+
+    report = digest_videos(
+        store,
+        ["a1", "a2"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert transcriber.calls == []
+    assert fetch.fetched_ids == ["a1"]
+    assert len(visual.describe_calls) == 2
+    for item_id in ("a1", "a2"):
+        source = store[item_id].content.sources[0]
+        assert (source.text, source.has_speech) == ("", False)
+        assert [f.local_path for f in source.frames] == [
+            f"{item_id}/frames/0.png",
+            f"{item_id}/frames/1.png",
+        ]
+    assert (report.no_speech, report.visual_footage, report.hollow) == (2, 1, 0)
+    assert (report.videos_transcribed, report.videos_reused) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("force", "with_visual", "message"),
+    [
+        pytest.param(
+            True,
+            False,
+            "keep_transcript requires visual (it re-runs the visual layer)",
+            id="without-visual",
+        ),
+        pytest.param(
+            False,
+            True,
+            "keep_transcript requires force (it re-digests already-digested videos)",
+            id="without-force",
+        ),
+    ],
+)
+def test_keep_transcript_rejects_a_run_without_visual_or_force(
+    tmp_path: Path, force: bool, with_visual: bool, message: str
+):
+    """The library guards the flag like the CLI does: a keep run without the visual
+    layer would strip stored frames and digests, and without `force` it does
+    nothing. Both raise before anything is fetched or written."""
+    store = _hollow_store(tmp_path)
+    before = store["a1"].content.sources[0]
+    fetch = _FakeFetch()
+    visual = _FakeVisual().config(tmp_path / "media") if with_visual else None
+
+    with pytest.raises(ValueError) as excinfo:
+        digest_videos(
+            store,
+            ["a1"],
+            force=force,
+            keep_transcript=True,
+            fetch_fn=fetch,
+            transcribe_fn=_TranscriberMustNotRun(),
+            temp_root=tmp_path,
+            visual=visual,
+        )
+    assert str(excinfo.value) == message
+    assert fetch.fetched_ids == []
+    assert store["a1"].content.sources == [before]
+    assert store["a1"].content.sources[0] is before
+
+
+def _item_with_sources(sources: list) -> dict[str, Item]:
+    item = _item("a1", _VIDEO_A_URL_1)
+    item.content = Content(fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=sources)
+    return {"a1": item}
+
+
+def test_keep_transcript_reads_the_first_x_video_success_source(tmp_path: Path):
+    """A failed `x_video` source listed before the stored hollow transcript does not
+    hide it: the transcript is still reused and the ASR does not run."""
+    store = _item_with_sources(
+        [
+            ContentSourceFailure(kind="x_video", url=_VIDEO_A_URL_1, failure_reason="timeout"),
+            ContentSourceSuccess(kind="x_video", url=_VIDEO_A_URL_1, text="", has_speech=False),
+        ]
+    )
+    transcriber = _TranscriberMustNotRun()
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=2).config(tmp_path / "media"),
+    )
+    sources = store["a1"].content.sources
+    assert transcriber.calls == []
+    assert [(s.outcome, s.text, s.has_speech) for s in sources] == [("success", "", False)]
+    assert [f.local_path for f in sources[0].frames] == ["a1/frames/0.png", "a1/frames/1.png"]
+    assert (report.videos_transcribed, report.videos_reused) == (0, 1)
+
+
+_TWO_FRAMES = ["a1/frames/0.png", "a1/frames/1.png"]
+
+
+@pytest.mark.parametrize(
+    ("text", "has_speech", "frame_paths", "counts"),
+    [
+        pytest.param("real words", True, [], (1, 0, 0, 1, 0), id="legacy-speech"),
+        pytest.param("", False, _TWO_FRAMES, (0, 1, 1, 0, 0), id="legacy-empty"),
+        pytest.param("  ", False, _TWO_FRAMES, (0, 1, 1, 0, 0), id="legacy-blank"),
+    ],
+)
+def test_keep_transcript_reads_a_legacy_speech_flag_from_the_text(
+    tmp_path: Path, text: str, has_speech: bool, frame_paths: list[str], counts: tuple
+):
+    """A legacy source with `has_speech=None` counts as speech when its text has
+    words (as `generate` reads it) and as silent otherwise; the text is kept.
+    `counts` is (transcribed, no_speech, visual_footage, visual_skipped, hollow)."""
+    store = _item_with_sources(
+        [ContentSourceSuccess(kind="x_video", url=_VIDEO_A_URL_1, text=text, has_speech=None)]
+    )
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=2).config(tmp_path / "media"),
+    )
+    source = store["a1"].content.sources[0]
+    assert (source.text, source.has_speech) == (text, has_speech)
+    assert [f.local_path for f in source.frames] == frame_paths
+    assert (
+        report.transcribed,
+        report.no_speech,
+        report.visual_footage,
+        report.visual_skipped,
+        report.hollow,
+    ) == counts
+
+
+def test_format_digest_summary_names_reused_transcripts():
+    """A run that reused stored transcripts says how many, inside the Dedup
+    parenthesis; without reuse the line is today's (tested above)."""
+    report = DigestReport(no_speech=3, videos_transcribed=1, videos_reused=2, groups=_THREE_GROUPS)
+    assert format_digest_summary(report) == (
+        "Vídeos: transcritos 0, sin voz 3, ya digeridos 0, fallidos 0, "
+        "sin vídeo 0, desconocidos 0. "
+        "Dedup: 3 items ← 3 vídeos (1 transcritos este run, 2 con transcripción guardada)."
+    )
+
+
+def _stored_hollow_item(
+    item_id: str, url: str, *, after=(), before=(), language=None, has_speech=False
+) -> Item:
+    """A video item whose `x_video` source is hollow (no words, no frames), with
+    other sources around it — the orders the real store holds (17 of the 43
+    hollow items keep a `quoted_tweet` / `external_article` AFTER the video)."""
+    item = _item(item_id, url)
+    video = ContentSourceSuccess(
+        kind="x_video", url=url, text="", has_speech=has_speech, language=language
+    )
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[*before, video, *after],
+    )
+    return item
+
+
+_QUOTED = ContentSourceSuccess(
+    kind="quoted_tweet", url="https://x.com/b/status/9", text="the quoted post"
+)
+_ARTICLE = ContentSourceSuccess(
+    kind="external_article", url="https://ex.com/a", text="the article body"
+)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param((), (_QUOTED,), id="video-then-quoted"),
+        pytest.param((), (_ARTICLE,), id="video-then-article"),
+        pytest.param((_ARTICLE,), (_QUOTED,), id="article-video-quoted"),
+    ],
+)
+def test_keep_transcript_reads_the_video_source_wherever_it_sits(tmp_path: Path, before, after):
+    """The stored transcript is THE `x_video` source's, wherever it sits among the
+    item's sources — never another source's text, never "nothing stored"."""
+    store = {"a1": _stored_hollow_item("a1", _VIDEO_A_URL_1, before=before, after=after)}
+    transcriber = _TranscriberMustNotRun()
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=2).config(tmp_path / "media"),
+    )
+    assert transcriber.calls == []
+    sources = store["a1"].content.sources
+    assert [(s.kind, s.text) for s in sources] == [
+        *[(s.kind, s.text) for s in (*before, *after)],
+        ("x_video", ""),
+    ]
+    assert (sources[-1].has_speech, [f.local_path for f in sources[-1].frames]) == (
+        False,
+        ["a1/frames/0.png", "a1/frames/1.png"],
+    )
+    assert (report.no_speech, report.visual_footage, report.hollow) == (1, 1, 0)
+
+
+def test_keep_transcript_carries_a_real_transcript_byte_for_byte(tmp_path: Path):
+    """Text, language and title are copied as stored: case, accents, spacing and
+    length untouched (158 of the 162 stored speech texts have capitals, 17 are
+    non-ASCII, talks run to thousands of characters)."""
+    text = " Welcome to the KEYNOTE — ¿Qué tal, São Paulo?\n" * 80
+    store = _stored_speech_store(tmp_path, replace(_speech(text), language="pt", title="Día 1"))
+    transcriber = _TranscriberMustNotRun()
+
+    digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=transcriber,
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head").config(tmp_path / "media"),
+    )
+    source = store["a1"].content.sources[0]
+    assert transcriber.calls == []
+    assert (source.text, source.has_speech, source.language, source.title) == (
+        text,
+        True,
+        "pt",
+        "Día 1",
+    )
+
+
+@pytest.mark.parametrize("language", [None, "ko"], ids=["no-language", "ko"])
+def test_keep_transcript_keeps_a_hollow_sources_metadata(tmp_path: Path, language):
+    """A hollow source's language (the real store has None, "en" and "ko") and
+    empty title come back unchanged."""
+    store = {"a1": _stored_hollow_item("a1", _VIDEO_A_URL_1, language=language)}
+
+    digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head").config(tmp_path / "media"),
+    )
+    source = store["a1"].content.sources[0]
+    assert (source.text, source.has_speech, source.language, source.title) == (
+        "",
+        False,
+        language,
+        None,
+    )
+
+
+def test_keep_transcript_clears_frames_a_shorter_redigest_no_longer_keeps(tmp_path: Path):
+    """A kept-transcript re-digest that keeps FEWER frames removes the stale PNGs
+    (and their references) exactly like a normal re-digest."""
+    media = tmp_path / "media"
+    store = _hollow_store(tmp_path)
+    for n_frames in (3, 1):
+        digest_videos(
+            store,
+            ["a1"],
+            force=True,
+            keep_transcript=True,
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=_TranscriberMustNotRun(),
+            temp_root=tmp_path,
+            visual=_FakeVisual(classification="talking_head", n_frames=n_frames).config(media),
+        )
+    assert sorted(p.name for p in (media / "a1" / "frames").iterdir()) == ["0.png"]
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == ["a1/frames/0.png"]
+
+
+def _store_with_stored_sources(sources: dict[str, ContentSourceSuccess]) -> dict[str, Item]:
+    """Build same-video items with their independently stored transcript metadata."""
+    urls = {"a1": _VIDEO_A_URL_1, "a2": _VIDEO_A_URL_2}
+    store: dict[str, Item] = {}
+    for item_id, source in sources.items():
+        item = _item(item_id, urls[item_id])
+        item.content = Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=[source]
+        )
+        store[item_id] = item
+    return store
+
+
+def _stored_source(
+    url: str,
+    *,
+    text: str = "same words",
+    has_speech: bool = True,
+    language: str | None = "en",
+    title: str | None = "Same title",
+) -> ContentSourceSuccess:
+    return ContentSourceSuccess(
+        kind="x_video",
+        url=url,
+        text=text,
+        has_speech=has_speech,
+        language=language,
+        title=title,
+    )
+
+
+def test_keep_transcript_invalidates_the_old_digest_and_advances_fetched_at(tmp_path: Path):
+    """T1: a completed keep re-digest invalidates both downstream consumers."""
+    media = tmp_path / "media"
+    store = _hollow_store(tmp_path)
+    source = store["a1"].content.sources[0]
+    source.digest = "digest of the old frames"
+    old_fetched_at = store["a1"].content.fetched_at
+
+    digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=1).config(media),
+    )
+
+    current = store["a1"].content.sources[0]
+    assert current.digest == ""
+    assert store["a1"].content.fetched_at > old_fetched_at
+
+
+@pytest.mark.parametrize(
+    ("field", "second_value"),
+    [
+        pytest.param("text", "different words", id="text"),
+        pytest.param("has_speech", False, id="has-speech"),
+        pytest.param("language", "ko", id="language"),
+        pytest.param("title", "Different title", id="title"),
+    ],
+)
+def test_keep_transcript_never_crosses_items_that_differ_in_one_field(
+    tmp_path: Path, field: str, second_value
+):
+    """T2: every stored transcript field participates in the batch identity."""
+    first_values = {
+        "text": "same words",
+        "has_speech": True,
+        "language": "en",
+        "title": "Same title",
+    }
+    second_values = {**first_values, field: second_value}
+    store = _store_with_stored_sources(
+        {
+            "a1": _stored_source(_VIDEO_A_URL_1, **first_values),
+            "a2": _stored_source(_VIDEO_A_URL_2, **second_values),
+        }
+    )
+    fetch = _FakeFetch()
+
+    digest_videos(
+        store,
+        ["a1", "a2"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=1).config(tmp_path / "media"),
+    )
+
+    assert fetch.fetched_ids == ["a1", "a2"]
+    for item_id, expected in (("a1", first_values), ("a2", second_values)):
+        source = store[item_id].content.sources[0]
+        assert (source.text, source.has_speech, source.language, source.title) == (
+            expected["text"],
+            expected["has_speech"],
+            expected["language"],
+            expected["title"],
+        )
+
+
+def test_keep_transcript_fetch_failure_preserves_source_and_frame_files(tmp_path: Path):
+    """T3: a failed fetch does not partially apply a destructive keep re-digest."""
+    media = tmp_path / "media"
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech("stored words"),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=2).config(media),
+    )
+    old = store["a1"].content.sources[0]
+    old.digest = "old digest"
+    old_fetched_at = store["a1"].content.fetched_at
+    old_files = {path.name: path.read_bytes() for path in (media / "a1" / "frames").iterdir()}
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(fail_ids={"a1"}),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=1).config(media),
+    )
+
+    assert report.failed == 1
+    assert store["a1"].content.sources[0] is old
+    assert store["a1"].content.fetched_at == old_fetched_at
+    assert {
+        path.name: path.read_bytes() for path in (media / "a1" / "frames").iterdir()
+    } == old_files
+
+
+def test_keep_transcript_continues_after_the_first_batch_fetch_fails(tmp_path: Path):
+    """T5: a failed pending batch is tallied and cannot abort a stored sibling."""
+    store = _hollow_pair_store(tmp_path)
+    report = digest_videos(
+        store,
+        ["p1", "a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(fail_ids={"p1"}),
+        transcribe_fn=lambda _p: _speech("fresh"),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=1).config(tmp_path / "media"),
+    )
+
+    assert report.failed == 1
+    assert store["p1"].content is None
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == ["a1/frames/0.png"]
+
+
+def test_keep_transcript_accumulates_hollow_from_an_earlier_batch(tmp_path: Path):
+    """T5: a later successful batch cannot erase an earlier hollow outcome."""
+    store = _store_with_stored_sources(
+        {
+            "a1": _stored_source(_VIDEO_A_URL_1, text="", has_speech=False),
+            "a2": _stored_source(_VIDEO_A_URL_2, text="spoken", has_speech=True),
+        }
+    )
+    fake = _FakeVisual(classification="talking_head", n_frames=1)
+
+    def _extract(path: Path) -> list[KeyFrame]:
+        if path.name == "a1.mp4":
+            raise FrameExtractionFailed("bad first batch")
+        return fake.extract(path)
+
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=_extract,
+        describe_fn=fake.describe,
+        classify_fn=fake.classify,
+        reduce_fn=fake.reduce_slides,
+        footage_reduce_fn=fake.reduce_footage,
+    )
+    report = digest_videos(
+        store,
+        ["a1", "a2"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=visual,
+    )
+
+    assert report.hollow == 1
+    assert (report.visual_slides, report.visual_skipped) == (0, 1)
+
+
+def test_keep_transcript_accumulates_visual_slides_from_an_earlier_batch(tmp_path: Path):
+    """T5: a later talking-head batch cannot erase the group's slide tally."""
+    store = _store_with_stored_sources(
+        {
+            "a1": _stored_source(_VIDEO_A_URL_1, text="first"),
+            "a2": _stored_source(_VIDEO_A_URL_2, text="second"),
+        }
+    )
+    fake = _FakeVisual(n_frames=1)
+    classifications = iter(["slides", "talking_head"])
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=fake.extract,
+        describe_fn=fake.describe,
+        classify_fn=lambda _frames: next(classifications),
+        reduce_fn=fake.reduce_slides,
+        footage_reduce_fn=fake.reduce_footage,
+    )
+    report = digest_videos(
+        store,
+        ["a1", "a2"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=visual,
+    )
+
+    assert (report.visual_slides, report.visual_skipped) == (1, 1)
+
+
+@pytest.mark.parametrize("failure", ["fetch", "asr"])
+def test_keep_transcript_counts_every_item_in_a_failed_shared_batch(tmp_path: Path, failure: str):
+    """T5: a failure is item-granular even though work is video-deduplicated."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    fetch = _FakeFetch(fail_ids={"a1"}) if failure == "fetch" else _FakeFetch()
+    transcribe = _transcription_fails if failure == "asr" else (lambda _p: _speech())
+    report = digest_videos(
+        store,
+        ["a1", "a2"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=transcribe,
+        temp_root=tmp_path,
+        visual=_FakeVisual().config(tmp_path / "media"),
+    )
+
+    assert report.failed == 2
+
+
+def test_keep_transcript_accumulates_reused_videos_across_groups(tmp_path: Path):
+    """T6: the run-level reused count accumulates across distinct videos."""
+    store = {
+        "a1": _item("a1", _VIDEO_A_URL_1),
+        "b1": _item("b1", _VIDEO_B_URL),
+    }
+    for item_id, url in (("a1", _VIDEO_A_URL_1), ("b1", _VIDEO_B_URL)):
+        store[item_id].content = Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            sources=[_stored_source(url, text="", has_speech=False)],
+        )
+    report = digest_videos(
+        store,
+        ["a1", "b1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=1).config(tmp_path / "media"),
+    )
+
+    assert report.videos_reused == 2
+    assert "2 con transcripción guardada" in format_digest_summary(report)
+
+
+def test_keep_transcript_keeps_at_most_one_mp4_on_disk(tmp_path: Path):
+    """T7: the no-ASR path still deletes each mp4 before the next fetch."""
+    store = {
+        "a1": _item("a1", _VIDEO_A_URL_1),
+        "b1": _item("b1", _VIDEO_B_URL),
+    }
+    for item_id, url in (("a1", _VIDEO_A_URL_1), ("b1", _VIDEO_B_URL)):
+        store[item_id].content = Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            sources=[_stored_source(url, text="", has_speech=False)],
+        )
+
+    class _DiskProbeFetch(_FakeFetch):
+        def __init__(self):
+            super().__init__()
+            self.mp4s_before_fetch: list[int] = []
+
+        def __call__(self, store, ids, dest_dir):
+            self.mp4s_before_fetch.append(len(list(Path(dest_dir).glob("*.mp4"))))
+            return super().__call__(store, ids, dest_dir)
+
+    fetch = _DiskProbeFetch()
+    digest_videos(
+        store,
+        ["a1", "b1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=fetch,
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=1).config(tmp_path / "media"),
+    )
+
+    assert fetch.mp4s_before_fetch == [0, 0]
+
+
+def test_keep_transcript_clears_stale_frames_for_every_shared_item(tmp_path: Path):
+    """T8: a shared-video re-digest cleans every item's stale frame files."""
+    media = tmp_path / "media"
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    digest_videos(
+        store,
+        ["a1", "a2"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=3).config(media),
+    )
+    digest_videos(
+        store,
+        ["a1", "a2"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=1).config(media),
+    )
+
+    for item_id in ("a1", "a2"):
+        assert sorted(path.name for path in (media / item_id / "frames").iterdir()) == ["0.png"]
+        assert [frame.local_path for frame in store[item_id].content.sources[0].frames] == [
+            f"{item_id}/frames/0.png"
+        ]
+
+
+def test_keep_transcript_preserves_explicit_speech_flag_on_blank_text(tmp_path: Path):
+    """T9: an explicit stored flag wins even when it contradicts blank text."""
+    store = _store_with_stored_sources(
+        {"a1": _stored_source(_VIDEO_A_URL_1, text="", has_speech=True)}
+    )
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="talking_head", n_frames=1).config(tmp_path / "media"),
+    )
+
+    assert store["a1"].content.sources[0].has_speech is True
+    assert (report.transcribed, report.no_speech, report.visual_footage, report.hollow) == (
+        1,
+        0,
+        1,
+        0,
+    )
+
+
+@pytest.mark.parametrize("outcome", ["visual-failure", "talking-head"])
+def test_keep_transcript_completed_redigest_drops_old_visuals_and_digest(
+    tmp_path: Path, outcome: str
+):
+    """T10: once fetch succeeds, the forced result replaces old visual evidence.
+
+    This deliberately differs from T3's fetch-failure contract. A visual failure
+    or reclassification completes the re-digest with no frames and clears the old
+    long-form digest. The `pre-digest-video` snapshot manages the store files
+    `items.json`, `state.json`, `vocab.yaml`, and `topics.json`: it restores those
+    present in the snapshot (and removes a live one absent there), but never
+    contains `data/media/` or frame PNGs. Frame PNGs have already been deleted or
+    overwritten when it is taken. Before re-digesting items that currently have
+    frames, copy their `data/media/<id>/frames/` directories aside and restore them
+    with the snapshot
+    if needed; without that copy, restored metadata can point to missing files or
+    different pixels. Hollow items have no prior frames and are not exposed to
+    this loss.
+    """
+    media = tmp_path / "media"
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech("stored words"),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=2).config(media),
+    )
+    store["a1"].content.sources[0].digest = "digest of old frames"
+    assert sorted(path.name for path in (media / "a1" / "frames").iterdir()) == [
+        "0.png",
+        "1.png",
+    ]
+
+    if outcome == "visual-failure":
+
+        def _fail_extract(_path: Path) -> list[KeyFrame]:
+            raise FrameExtractionFailed("cannot decode")
+
+        visual = VisualConfig(
+            media_root=media,
+            extract_fn=_fail_extract,
+            describe_fn=lambda _path: "unused",
+            classify_fn=lambda _frames: "slides",
+        )
+    else:
+        visual = _FakeVisual(classification="talking_head", n_frames=1).config(media)
+
+    digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        keep_transcript=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=_TranscriberMustNotRun(),
+        temp_root=tmp_path,
+        visual=visual,
+    )
+
+    source = store["a1"].content.sources[0]
+    assert source.frames == []
+    assert source.digest == ""
+    assert not (media / "a1" / "frames").exists()

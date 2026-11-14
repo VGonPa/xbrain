@@ -1,8 +1,11 @@
 # tests/test_generate.py
+import os
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import generate
+from xbrain.generate import _SF_DATALESS, _is_dataless, _mirror_file, generate
 from xbrain.models import (
     Author,
     Content,
@@ -12,7 +15,7 @@ from xbrain.models import (
     Item,
     Link,
 )
-from xbrain.notes_io import slugify
+from xbrain.notes_io import note_filename, slugify
 
 
 def _item(item_id: str, with_link: bool, text: str | None = None) -> Item:
@@ -576,6 +579,7 @@ def _video_item(
     has_speech: bool = True,
     title: str | None = "The Talk",
     frames: list | None = None,
+    digest: str = "",
 ) -> Item:
     """An enriched video bookmark carrying an `x_video` transcript source (#44)."""
     return Item(
@@ -603,6 +607,7 @@ def _video_item(
                     text=text,
                     has_speech=has_speech,
                     frames=frames or [],
+                    digest=digest,
                 )
             ],
         ),
@@ -651,6 +656,60 @@ def test_generate_video_digest_spanish_header(tmp_path: Path):
     assert "## Video digest:" not in note
     assert "## Resumen del vídeo: The Talk" in note  # the localised heading IS rendered
     assert "Cuerpo de la transcripción." in note
+
+
+def test_generate_renders_video_digest_prose_when_present(tmp_path: Path):
+    """When the `x_video` source carries a long-form `digest`, it renders as the
+    body of the `## Video digest` section — the readable headline of the video."""
+    generate(
+        {"7": _video_item(text="raw transcript body", digest="This talk explains scaling laws.")},
+        tmp_path,
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest: The Talk" in note
+    assert "This talk explains scaling laws." in note
+
+
+def test_generate_video_digest_demotes_raw_to_details_when_digest_present(tmp_path: Path):
+    """With a digest, the raw transcript + frame embeds are demoted into a collapsible
+    `<details>` below the digest prose — evidence kept, noise hidden. The digest prose
+    sits ABOVE the `<details>`, the transcript + embeds INSIDE it."""
+    generate(
+        {
+            "7": _video_item(
+                text="raw transcript body", frames=_frames(), digest="A concise digest."
+            )
+        },
+        tmp_path,
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "<details>" in note and "</details>" in note
+    digest_idx = note.index("A concise digest.")
+    details_idx = note.index("<details>")
+    assert digest_idx < details_idx  # digest prose is the headline, above the raw dump
+    inside = note[details_idx : note.index("</details>")]
+    assert "raw transcript body" in inside
+    assert "![[_media/7/frames/0.png]]" in inside
+
+
+def test_generate_video_digest_no_details_when_digest_absent(tmp_path: Path):
+    """Fallback: with no digest, the section is unchanged — transcript rendered inline,
+    no `<details>` wrapper. Safe to ship the render change before any digest exists."""
+    generate({"7": _video_item(text="inline transcript body")}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "inline transcript body" in note
+    assert "<details>" not in note
+
+
+def test_generate_video_digest_evidence_label_is_localised(tmp_path: Path):
+    """The `<details>` summary label follows the configured output language."""
+    generate(
+        {"7": _video_item(text="cuerpo", digest="Un resumen conciso.")},
+        tmp_path,
+        output_language="Spanish",
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "transcripción" in note.lower()  # the ES evidence label
 
 
 # ----------------------------------------------------------- x_video slide frames (#44 PR4)
@@ -1155,3 +1214,786 @@ def test_article_blocks_lines_strips_baked_separator(tmp_path: Path):
     # Every rendered line is a single physical line (no internal newline that
     # would desync the `"\n".join` in `_render_note`).
     assert all("\n" not in line for line in lines)
+
+
+# ----------------------------------------------------- verification badges (#79, staleness-aware)
+
+
+def _badge_item(item_id: str = "9", *, summary: str = "A crisp summary.") -> Item:
+    """An enriched (non-video) item for verification-badge tests."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="a tweet",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="api",
+            summary=summary,
+            primary_topic="ai-coding",
+            topics=["ai-coding", "software-engineering"],
+        ),
+    )
+
+
+def _stamp(
+    item: Item,
+    target: str,
+    verdict: str,
+    *,
+    flags: list[str] | None = None,
+    language: str = "English",
+) -> None:
+    """Stamp a CURRENT verification verdict onto `item` — current under the whole judging
+    CONTRACT (the output it judged, the source it read, the rubric it applied), not just
+    the output text."""
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import contract_fingerprint, fingerprint_output
+
+    fp = fingerprint_output(item, target)
+    contract = contract_fingerprint(item, target, language)
+    assert fp is not None and contract is not None
+    item.verification[target] = VerificationVerdict(
+        verdict=verdict,
+        faithfulness="FAIL" if verdict == "FAIL" else "PASS",
+        adherence="REVIEW" if verdict == "REVIEW" else "PASS",
+        output_fingerprint=fp,
+        contract_fingerprint=contract,
+        verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        flags=flags or [],
+    )
+
+
+def _note_body(tmp_path: Path) -> str:
+    return next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+
+
+def test_generate_badges_a_current_summary_fail(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" in body
+    assert "Verification: FAIL" in body
+    assert "unsupported number" in body
+
+
+def test_generate_badges_a_current_review_with_warning_emoji(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "REVIEW")
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "⚠️" in body
+    assert "Verification: REVIEW" in body
+
+
+def test_generate_does_not_badge_a_stale_verdict(tmp_path: Path):
+    """THE core correctness test: a verdict stored against the OLD summary is silently
+    NOT badged once the summary is re-generated (fingerprint no longer matches) — a fixed
+    output never shows a ❌."""
+    item = _badge_item(summary="Original summary that FAILED.")
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+    # The summary is re-generated (fixed) AFTER the verdict was stored.
+    item.enriched.summary = "Corrected, faithful summary."
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+    assert "Corrected, faithful summary." in body  # the current output still renders
+
+
+def test_generate_does_not_badge_a_pass(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "PASS")
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "Verification:" not in body
+
+
+def test_generate_legacy_item_without_verification_renders_no_badge(tmp_path: Path):
+    item = _badge_item()
+    assert item.verification == {}
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "Verification:" not in body
+    assert "A crisp summary." in body
+
+
+def test_generate_badges_topics_verdict(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "topics", "FAIL", flags=["wrong topic"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "Verification: FAIL" in body
+    assert "wrong topic" in body
+
+
+def test_generate_badges_digest_verdict_near_video_header(tmp_path: Path):
+    item = _video_item(item_id="12", text="Transcript body.", digest="A long readable digest.")
+    _stamp(item, "digest", "FAIL", flags=["hallucinated claim"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    header_idx = body.index("## Video digest")
+    badge_idx = body.index("Verification: FAIL")
+    assert badge_idx > header_idx
+    # The badge sits right by the header, above the digest body.
+    assert badge_idx < body.index("A long readable digest.")
+
+
+def test_generate_spanish_badge_label_is_localized(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["número no soportado"], language="Spanish")
+    generate({item.id: item}, tmp_path, output_language="Spanish")
+    body = _note_body(tmp_path)
+    assert "Verificación: FALLA" in body
+
+
+def test_generate_badge_collapses_newline_in_flag_issue(tmp_path: Path):
+    """A multi-line flag issue must not break out of the single-line `> …` blockquote —
+    internal newlines are collapsed to spaces (mirrors the frame-caption invariant)."""
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["line one\nline two"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    badge_line = next(line for line in body.splitlines() if "Verification: FAIL" in line)
+    assert badge_line.startswith(">")  # still one blockquote line
+    assert "line one line two" in badge_line
+
+
+def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
+    """End-to-end (#79): a FAIL judged on summary "A", the summary regenerated to "B" BEFORE
+    `--write-verdicts`, must never badge "B" — the stored (judged) fingerprint is of "A", so
+    `generate` on "B" finds a mismatch. Uses the real write path with a judged fingerprint."""
+    from xbrain.verification import (
+        apply_verdicts_to_store,
+        contract_fingerprint,
+        fingerprint_output,
+    )
+
+    item = _badge_item(summary="A - judged and FAILED.")
+    judged_fp = fingerprint_output(item, "summary")
+    judged_contract = contract_fingerprint(item, "summary", "English")
+    item.enriched.summary = "B - fixed before the write."  # regenerated in the window
+    store = {item.id: item}
+    result = apply_verdicts_to_store(
+        store,
+        [
+            {
+                "item_id": item.id,
+                "target": "summary",
+                "verdict": "FAIL",
+                "faithfulness": "FAIL",
+                "adherence": "PASS",
+                "flags": [],
+            }
+        ],
+        {(item.id, "summary"): judged_fp},
+        {(item.id, "summary"): judged_contract},
+    )
+    assert result.written == 1
+    assert store[item.id].verification["summary"].output_fingerprint == judged_fp
+    generate(store, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body and "Verification: FAIL" not in body
+    assert "B - fixed before the write." in body  # the current output still renders
+
+
+# ------------------------------------------------------- the quoted post, for the READER
+#
+# The quoted post reaches every LLM surface (#98) and never reached the human: on 762
+# notes (35%) the reader met a summary ABOUT a post they could not see. Worse, a
+# readable quote fell into the generic `## Content: <url>` branch — a THIRD PARTY's
+# words, unattributed, in a note whose author is the poster. That is the very
+# conflation the attribution rule exists to stop, rendered for the reader.
+
+from xbrain.executors.api import quoted_source, quoted_text  # noqa: E402
+from xbrain.i18n import SUPPORTED_LANGUAGES, strings_for  # noqa: E402
+from xbrain.models import QUOTED_CONTENT_KINDS  # noqa: E402
+
+_QUOTED_BODY = "Karpathy's career moves map AI's centre of gravity.\n\n2015: co-founds OpenAI."
+
+
+def _sections(note: str) -> dict[str, str]:
+    """Split a rendered note into `{"## Heading": body}`.
+
+    So a test can assert WHICH section a span sits under. `assert body in note` would
+    pass even with the quoted post served under `## Content` — the exact mislabelling
+    this PR removes.
+    """
+    sections: dict[str, list[str]] = {}
+    heading: str | None = None
+    for line in note.split("\n"):
+        if line.startswith("## "):
+            heading = line
+            sections.setdefault(heading, [])
+        elif heading is not None:
+            sections[heading].append(line)
+    return {key: "\n".join(value) for key, value in sections.items()}
+
+
+def _quoting_item(source) -> Item:
+    """A quote-tweet as it really exists in the store: enriched (all 762 are), so it
+    already has a note — this PR changes what that note SHOWS, not which notes exist."""
+    item = _item("1", with_link=False, text="Read this and you'll understand this career move")
+    item.quoted_id = "999"
+    item.enriched = Enrichment(
+        summary="Un post sobre la trayectoria de Karpathy.",
+        primary_topic="ai",
+        topics=["ai"],
+        executor="api",
+        enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+    )
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=[source] if source else []
+    )
+    return item
+
+
+def _readable_quote() -> ContentSourceSuccess:
+    return ContentSourceSuccess(
+        kind="quoted_tweet",
+        url="https://x.com/karpathy/status/999",
+        text=_QUOTED_BODY,
+        author=Author(handle="karpathy", name="Andrej Karpathy"),
+    )
+
+
+def _note_text(item: Item, tmp_path: Path, language: str = "Spanish") -> str:
+    generate({item.id: item}, tmp_path, output_language=language)
+    return (tmp_path / "items" / note_filename(item)).read_text(encoding="utf-8")
+
+
+def _quoted_heading(note: str, strings) -> str:
+    return next(h for h in _sections(note) if h.startswith(f"## {strings.quoted_post_header}"))
+
+
+def test_the_note_names_the_quoted_author_and_shows_their_words(tmp_path: Path):
+    """WHO is quoted and WHAT they said — the two facts the reader was denied."""
+    strings = strings_for("Spanish")
+    note = _note_text(_quoting_item(_readable_quote()), tmp_path)
+    heading = _quoted_heading(note, strings)
+
+    assert heading == f"## {strings.quoted_post_header} — @karpathy (Andrej Karpathy)"
+    body = _sections(note)[heading]
+    assert "> Karpathy's career moves map AI's centre of gravity." in body
+    assert "> 2015: co-founds OpenAI." in body
+    assert "<https://x.com/karpathy/status/999>" in body
+
+
+def test_the_quoted_body_is_never_rendered_as_generic_content(tmp_path: Path):
+    """The regression this PR exists for: a readable quote used to fall into the
+    generic `## Content: <url>` branch — a third party's words with no author, inside
+    a note attributed to the poster."""
+    strings = strings_for("Spanish")
+    note = _note_text(_quoting_item(_readable_quote()), tmp_path)
+    sections = _sections(note)
+
+    assert not any(h.startswith(f"## {strings.content_header}") for h in sections)
+    # and the body appears under the quoted heading, nowhere else
+    assert _QUOTED_BODY.splitlines()[0] not in sections["## Tweet"]
+
+
+def test_the_quoted_post_is_distinguished_from_the_posters_own_words(tmp_path: Path):
+    """The whole failure mode is the two being conflated. The poster's text stays under
+    `## Tweet`; the quoted words sit under their own heading, blockquoted."""
+    note = _note_text(_quoting_item(_readable_quote()), tmp_path)
+    sections = _sections(note)
+    strings = strings_for("Spanish")
+
+    assert "Read this and you'll understand this career move" in sections["## Tweet"]
+    assert (
+        "Read this and you'll understand this career move"
+        not in sections[_quoted_heading(note, strings)]
+    )
+    # Every line of the quoted body is blockquoted — markdown's own idiom for words that
+    # are not the note author's — and NEVER appears unquoted anywhere in the note.
+    quoted_body = sections[_quoted_heading(note, strings)]
+    for line in _QUOTED_BODY.split("\n"):
+        if line.strip():
+            assert f"> {line}" in quoted_body
+            assert f"\n{line}\n" not in note
+
+
+def test_the_note_shows_exactly_the_body_the_LLMs_were_shown(tmp_path: Path):
+    """Identity, not coincidence: the reader sees the SAME source the generator and the
+    judge saw — selected by the SAME helper (`quoted_source`), not a parallel lookup."""
+    item = _quoting_item(_readable_quote())
+    note = _note_text(item, tmp_path)
+    source = quoted_source(item)
+
+    assert source is not None
+    assert source.author is not None
+    assert f"@{source.author.handle} ({source.author.name})" in _quoted_heading(
+        note, strings_for("Spanish")
+    )
+    for line in quoted_text(item).split("\n"):
+        if line.strip():
+            assert f"> {line}" in note
+
+
+def test_an_unavailable_quoted_post_is_written_down_not_silently_omitted(tmp_path: Path):
+    """A reader who sees nothing assumes there was nothing. A quote we could not read is
+    a FACT — carry it, with its reason."""
+    strings = strings_for("Spanish")
+    failure = ContentSourceFailure(
+        kind="quoted_tweet", url="https://x.com/i/status/999", failure_reason="not_found"
+    )
+    note = _note_text(_quoting_item(failure), tmp_path)
+    sections = _sections(note)
+    heading = f"## {strings.quoted_post_unavailable}"
+
+    assert heading in sections
+    assert strings.quoted_unavailable_deleted in sections[heading]
+    assert "<https://x.com/i/status/999>" in sections[heading]
+
+
+def test_the_unavailable_reason_distinguishes_deleted_from_protected(tmp_path: Path):
+    """`not_found` and `forbidden` are different facts about the world and must not
+    collapse into one wording."""
+    strings = strings_for("Spanish")
+    protected = ContentSourceFailure(
+        kind="quoted_tweet", url="https://x.com/i/status/999", failure_reason="forbidden"
+    )
+    note = _note_text(_quoting_item(protected), tmp_path)
+    body = _sections(note)[f"## {strings.quoted_post_unavailable}"]
+
+    assert strings.quoted_unavailable_protected in body
+    assert strings.quoted_unavailable_deleted not in body
+
+
+def test_a_note_with_no_quote_renders_no_quoted_section(tmp_path: Path):
+    strings = strings_for("Spanish")
+    note = _note_text(_item("1", with_link=True), tmp_path)
+
+    assert strings.quoted_post_header not in note
+    assert strings.quoted_post_unavailable not in note
+
+
+def test_the_quoted_section_is_localised_in_every_supported_language(tmp_path: Path):
+    """The dataclass enforces presence; this enforces USE — a hardcoded Spanish header
+    would render Spanish inside an English vault."""
+    for index, language in enumerate(SUPPORTED_LANGUAGES):
+        strings = strings_for(language)
+        out = tmp_path / f"vault-{index}"
+        note = _note_text(_quoting_item(_readable_quote()), out, language=language)
+        assert f"## {strings.quoted_post_header} — @karpathy (Andrej Karpathy)" in note
+
+
+def test_the_quoted_kind_is_selected_by_the_shared_frozenset(tmp_path: Path):
+    """Guards the drift this whole workstream is about: the renderer must not grow its
+    own private notion of what a quoted post is."""
+    assert _readable_quote().kind in QUOTED_CONTENT_KINDS
+
+
+def test_generate_does_not_badge_a_verdict_judged_against_a_DIFFERENT_SOURCE(tmp_path: Path):
+    """The output is untouched, but the evidence under it changed (a new frame description
+    landed). The judge never saw that source, so its verdict says nothing about this
+    output-plus-source pair. No badge."""
+    from xbrain.models import Content, ContentSourceSuccess, VideoFrame
+
+    item = _badge_item()
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_video",
+                url="https://x.com/v",
+                title="A talk",
+                text="the transcript body",
+                has_speech=True,
+                frames=[
+                    VideoFrame(timestamp=0.0, local_path="9/frames/0.png", description="A chart.")
+                ],
+            )
+        ],
+    )
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+    source = item.content.sources[0]
+    source.frames = [
+        *source.frames,
+        VideoFrame(timestamp=9.0, local_path="9/frames/9.png", description="A brand-new slide."),
+    ]
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+
+
+def test_generate_does_not_badge_a_verdict_judged_under_an_OLD_RUBRIC(tmp_path: Path, monkeypatch):
+    """#86 rewrote `rubric-verify.md` without touching one output character, and every
+    stored verdict still painted. This is the arm that closes it."""
+    from xbrain import rubrics as rubrics_mod
+    from xbrain.verification import rubric_digest
+
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+
+    original = rubrics_mod._RUBRICS_DIR
+    shadow = tmp_path / "rubrics"
+    shadow.mkdir()
+    for rubric in original.glob("*.md"):
+        shadow.joinpath(rubric.name).write_text(
+            rubric.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    verify = shadow / "rubric-verify.md"
+    verify.write_text(
+        verify.read_text(encoding="utf-8") + "\nA RULE THE JUDGE NEVER SAW.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", shadow)
+    rubric_digest.cache_clear()
+    try:
+        generate({item.id: item}, tmp_path / "out")
+        body = next((tmp_path / "out" / "items").glob("*.md")).read_text(encoding="utf-8")
+    finally:
+        rubric_digest.cache_clear()
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+
+
+def test_generate_does_not_badge_a_LEGACY_verdict_with_no_contract(tmp_path: Path):
+    """Every verdict stored before this change was judged under a contract we cannot
+    reconstruct. It is not grandfathered in: it paints NOTHING."""
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import fingerprint_output
+
+    item = _badge_item()
+    item.verification["summary"] = VerificationVerdict(
+        verdict="FAIL",
+        faithfulness="FAIL",
+        output_fingerprint=fingerprint_output(item, "summary"),
+        verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        flags=["unsupported number"],
+    )  # no contract_fingerprint — the old shape
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+
+
+def test_article_video_block_renders_a_playable_link(tmp_path: Path):
+    """A pending article video surfaces its stream — it must not render silently.
+
+    A pending IMAGE is silent because `xbrain media` will download it later. No
+    such pass exists for an article-embedded video, so silence here would
+    reproduce the very defect the video block was added to fix: a hole in the
+    prose where the author put a demo.
+    """
+    from xbrain.generate import _article_blocks_lines
+    from xbrain.i18n import strings_for
+    from xbrain.models import ArticleTextBlock, ArticleVideoBlock, MediaVideoPending
+
+    blocks = [
+        ArticleTextBlock(text="Watch this."),
+        ArticleVideoBlock(
+            media=MediaVideoPending(
+                url="https://video.twimg.com/amplify_video/1/vid/avc1/1920x1080/x.mp4",
+                thumbnail_url="https://pbs.twimg.com/amplify_video_thumb/1/img/y.jpg",
+                bitrate=10368000,
+                duration_millis=24016,
+            ),
+            alt="the demo",
+        ),
+    ]
+    source = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/99",
+        title="T",
+        text="".join(b.text for b in blocks if isinstance(b, ArticleTextBlock)),
+        blocks=blocks,
+    )
+    lines = _article_blocks_lines(source, strings_for("English"))
+    body = "\n".join(lines)
+
+    assert "https://video.twimg.com/amplify_video/1/vid/avc1/1920x1080/x.mp4" in body
+    assert "🎥" in body
+    assert "> the demo" in lines  # the alt becomes a caption
+    # The poster is NOT what we link: a still frame is not the video.
+    assert "amplify_video_thumb" not in body
+
+
+def test_article_markdown_code_block_renders_with_its_fences(tmp_path: Path):
+    """A recovered `MARKDOWN` block is multi-line by nature — its newlines survive.
+
+    Every other article text block is a single paragraph, so this is the first
+    one that spans lines. The fences have to reach the note intact or a code
+    listing renders as mangled prose.
+    """
+    from xbrain.generate import _article_blocks_lines
+    from xbrain.i18n import strings_for
+    from xbrain.models import ArticleTextBlock
+
+    code = "```python\nprint('hi')\nprint('bye')\n```"
+    blocks = [ArticleTextBlock(text="Before."), ArticleTextBlock(text=f"\n\n{code}")]
+    source = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/99",
+        title="T",
+        text="".join(b.text for b in blocks),
+        blocks=blocks,
+    )
+    body = "\n".join(_article_blocks_lines(source, strings_for("English")))
+
+    assert code in body
+    assert body.count("```") == 2  # opening and closing fence, both intact
+
+
+def test_mirror_file_leaves_an_unchanged_destination_untouched(tmp_path: Path):
+    """Re-mirroring identical bytes must not rewrite the vault copy.
+
+    `generate` mirrors every photo, video and slide frame into the vault's
+    `_media/` tree on EVERY run, and the nightly job runs `generate` nightly.
+    `shutil.copy2` truncates and rewrites the destination even when nothing
+    changed, which a cloud-synced vault reads as a modification: iCloud keeps
+    the version it had not finished uploading as a `name N.ext` sibling. The
+    x-knowledge vault accumulated 8.41 GB of such conflict copies — 50,020
+    files, all byte-identical to the sibling they were forked from.
+
+    Asserted on `st_ctime_ns`, not mtime or inode: `copy2` truncates in place
+    (same inode) and `copystat` restores the source mtime, so both look
+    untouched after a rewrite. Only ctime records that the bytes were written
+    — which is exactly the "this file was modified" signal a sync client acts
+    on.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    _mirror_file("1", source, destination)
+    before = destination.stat()
+    time.sleep(0.01)
+
+    _mirror_file("1", source, destination)
+
+    after = destination.stat()
+    assert after.st_ctime_ns == before.st_ctime_ns
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_destination_that_drifted(tmp_path: Path):
+    """A destination whose bytes differ still gets overwritten.
+
+    The skip must not strand a stale vault copy: if the store's bytes changed,
+    or the vault copy was corrupted/edited, the mirror has to repair it.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresh pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"stale")
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresh pixels"
+
+
+def test_mirror_file_rewrites_when_the_whole_stat_matches_but_bytes_differ(tmp_path: Path):
+    """Identical size AND identical mtime, different content — still repaired.
+
+    Guards the comparison against being satisfied by METADATA. An earlier
+    version of this test wrote the two files at different moments, so their
+    mtimes differed and any stat-only comparison already answered "different";
+    it passed against a `filecmp.cmp(..., shallow=True)` mutant that skips the
+    repair entirely. Measured: mutate the comparison to `shallow=True` and this
+    file's three tests all stayed green.
+
+    Copying the source's timestamps onto the destination makes the two stat
+    signatures identical, so nothing but reading the bytes can tell them apart.
+    That is the corrupted-vault-copy case: `copy2` restores the source's mtime
+    on every mirror, so a copy damaged in place — a truncating sync client, a
+    half-written file, bit rot — really can carry the source's timestamp and a
+    matching length while holding the wrong bytes.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"AAAA")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"BBBB")
+    stat = source.stat()
+    os.utime(destination, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert destination.stat().st_size == stat.st_size
+    assert destination.stat().st_mtime_ns == stat.st_mtime_ns
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"AAAA"
+
+
+# --- The mirror must never force a cloud file to materialise -------------------
+#
+# `_already_mirrored` answers "are these the same bytes?" by READING both files.
+# On a cloud-synced vault the destination may be a placeholder whose bytes are
+# not on disk ("dataless"/evicted). `open()` on one blocks until the sync daemon
+# fetches them, and when it cannot, it blocks with no timeout: a `generate` run
+# sat there for 22 minutes at 0.0% CPU. That is not iCloud-specific — OneDrive,
+# Dropbox and any FUSE/NFS placeholder behave the same way.
+#
+# These tests inject the platform's dataless flag through `os.stat` and make the
+# destination genuinely unreadable, so a comparison that reads is caught by the
+# operating system rather than by a mock.
+
+
+class _StatWithFlags:
+    """A real `os.stat_result` with `st_flags` overridden.
+
+    `os.stat_result` is immutable and cannot be constructed with a chosen
+    `st_flags`, so this delegates every other attribute to the real one. The
+    production code therefore reads REAL sizes and REAL timestamps; only the
+    platform flag is injected.
+    """
+
+    def __init__(self, real: os.stat_result, flags: int) -> None:
+        self._real = real
+        self.st_flags = flags
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def _dataless_stat(monkeypatch, *targets: Path) -> None:
+    """Make `os.stat` report `targets` as evicted cloud placeholders.
+
+    Injects `_SF_DATALESS` imported from the production module, never a
+    re-derived `stat.SF_DATALESS`. The bare attribute does not exist on Linux —
+    an earlier version of this helper used it and these tests failed on CI while
+    passing on macOS. One definition, shared, so the two cannot diverge again.
+    """
+    real_stat = os.stat
+    wanted = {str(t) for t in targets}
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path) in wanted:
+            return _StatWithFlags(result, _SF_DATALESS)
+        return result
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+
+
+def test_mirror_file_does_not_read_a_dataless_destination(tmp_path: Path, monkeypatch):
+    """An evicted vault copy must be compared from metadata, never opened.
+
+    The destination is `chmod 000`: any attempt to read it raises
+    `PermissionError`, and any attempt to rewrite it raises too. So the test
+    needs no mock assertion — if the mirror reads or writes, the OS fails the
+    call and the test errors. Passing proves the bytes were never touched.
+
+    The flag is the trigger, the unreadable file is the detector. Both are
+    needed: without the flag the code has no reason to skip, without the
+    unreadable file a skip and a successful read look identical.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    shutil.copy2(source, destination)
+    destination.chmod(0o000)
+    _dataless_stat(monkeypatch, destination)
+
+    try:
+        _mirror_file("1", source, destination)
+    finally:
+        destination.chmod(0o644)
+
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_dataless_destination_whose_size_differs(
+    tmp_path: Path, monkeypatch
+):
+    """Skipping the read must not strand a copy that is visibly wrong.
+
+    Size comes from the placeholder's metadata, so it is known without
+    materialising anything. A mismatch is decisive: repair it.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresh pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"short")
+    _dataless_stat(monkeypatch, destination)
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresh pixels"
+
+
+def test_mirror_file_tolerates_sub_second_mtime_drift_on_a_dataless_destination(
+    tmp_path: Path, monkeypatch
+):
+    """Timestamps are compared at 1-second granularity, not nanoseconds.
+
+    `copy2` restores mtime with nanosecond precision, but the two filesystems
+    need not agree on it: a copy onto a cloud-backed volume comes back rounded.
+    Comparing `st_mtime_ns` for equality would call an already-correct mirror
+    stale and re-copy — the rewrite this guard exists to prevent.
+
+    One second is not a tuned tolerance: it is the coarsest resolution POSIX
+    guarantees for a timestamp, and the granularity every archive format
+    preserves. It is pinned here at 100 ns, the drift a real APFS/iCloud pair
+    shows, and 2 s below, which must still repair.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    # Pinned mid-second: +100 ns can then never straddle a second boundary,
+    # which would make this test flaky roughly once in ten million runs.
+    pinned = int(source.stat().st_mtime) * 1_000_000_000 + 500_000_000
+    os.utime(source, ns=(pinned, pinned))
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    shutil.copy2(source, destination)
+    src_stat = source.stat()
+    os.utime(destination, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns + 100))
+    destination.chmod(0o000)
+    _dataless_stat(monkeypatch, destination)
+
+    try:
+        _mirror_file("1", source, destination)
+    finally:
+        destination.chmod(0o644)
+
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_dataless_destination_a_second_out_of_date(
+    tmp_path: Path, monkeypatch
+):
+    """Drift beyond the 1-second granularity is a real difference: repair it."""
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresher")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"staler!")
+    src_stat = source.stat()
+    assert source.stat().st_size == destination.stat().st_size
+    os.utime(destination, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns - 2_000_000_000))
+    _dataless_stat(monkeypatch, destination)
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresher"
+
+
+def test_dataless_detection_is_false_where_the_platform_has_no_flags():
+    """On Linux there is no `st_flags`, so the new branch is unreachable there.
+
+    This is the portability contract, asserted rather than assumed: every
+    platform that does not report the flag keeps the byte comparison as its
+    ONLY path, exactly as before this guard existed. CI runs on Linux, so
+    without this assertion the whole dataless branch would be untested there
+    in a way nothing would notice.
+    """
+
+    class _NoFlags:
+        st_size = 1
+        st_mtime_ns = 0
+
+    assert _is_dataless(_NoFlags()) is False

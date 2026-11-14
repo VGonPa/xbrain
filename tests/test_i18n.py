@@ -37,6 +37,7 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
     """If a field is added or removed, every translation must be updated."""
     field_names = {f.name for f in dataclasses.fields(Strings)}
     assert field_names == {
+        "language",
         "topics_label",
         "content_header",
         "summary_header",
@@ -44,7 +45,23 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
         "also_relevant",
         "video_digest_header",
         "silent_video",
+        "video_evidence_header",
+        "verify_badge_fail",
+        "verify_badge_review",
+        "quoted_post_header",
+        "quoted_post_unavailable",
+        "quoted_unavailable_deleted",
+        "quoted_unavailable_protected",
+        "quoted_unavailable_unknown",
     }
+
+
+def test_verify_badge_strings_present_in_every_language() -> None:
+    """The #79 verification-badge labels must exist in every supported language."""
+    for language in SUPPORTED_LANGUAGES:
+        s = strings_for(language)
+        assert s.verify_badge_fail
+        assert s.verify_badge_review
 
 
 def test_video_digest_strings_present_in_every_language() -> None:
@@ -78,3 +95,18 @@ def test_strings_dataclass_is_frozen() -> None:
     s = strings_for("English")
     with pytest.raises(dataclasses.FrozenInstanceError):
         s.topics_label = "mutated"  # type: ignore[misc]
+
+
+def test_every_language_localises_the_quoted_post_strings() -> None:
+    """The quoted post is rendered into the human's note, so its headers must speak the
+    vault's language — a hardcoded Spanish `Post citado` would sit in an English vault.
+    Asserts the strings DIFFER per language, not merely that they are present: a field
+    copied verbatim across languages passes a presence check and still reads wrong."""
+    english, spanish = strings_for("English"), strings_for("Spanish")
+
+    assert english.quoted_post_header == "Quoted post"
+    assert spanish.quoted_post_header == "Post citado"
+    assert english.quoted_post_unavailable != spanish.quoted_post_unavailable
+    assert english.quoted_unavailable_deleted != spanish.quoted_unavailable_deleted
+    assert english.quoted_unavailable_protected != spanish.quoted_unavailable_protected
+    assert english.quoted_unavailable_unknown != spanish.quoted_unavailable_unknown

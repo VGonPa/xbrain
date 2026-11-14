@@ -31,6 +31,7 @@ from xbrain.models import (
     MediaVideoPending,
     TopicPage,
 )
+from xbrain.verification import ALL_TARGETS, fingerprint_output, verdict_is_current
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ _VIDEO_TYPES = (MediaVideoPending, MediaVideoDownloaded, MediaVideoFailed)
 # corpus of described photos vanishes from the dashboard. Mirrors the isinstance
 # grouping in `generate._render_media_lines`.
 _DOWNLOADED_PHOTO_TYPES = (MediaPhotoDownloaded, MediaPhotoDescribed)
+# Verdicts reported on the dashboard, worst last so the bar reads left to right.
+_VERDICT_ORDER = ("PASS", "REVIEW", "FAIL")
 
 
 def humanize_topic(slug: str) -> str:
@@ -346,6 +349,46 @@ _META_LONGFORM_KEYS = (
 )
 
 
+def _verification(items: list[Item], language: str) -> dict[str, Any]:
+    """Coverage and verdict mix of the LLM-as-judge pass (`xbrain verify`).
+
+    Counts OUTPUTS, not items: one post can carry a summary, a topics assignment
+    and a video digest, and each is judged separately against its own source.
+
+    A stored verdict counts as coverage only while it is CURRENT. Re-generating
+    the output it judged (or changing the rubric or the source) invalidates it,
+    and a stale verdict says nothing about what a reader sees today — so it is
+    reported in its own bucket instead of being folded into the verdict mix.
+    Reading `judged` as "verified" without `unjudged` next to it is exactly the
+    misreading this block exists to prevent, which is why coverage ships as a
+    percentage of the whole population rather than as a bare count.
+    """
+    outputs = 0
+    current: "Counter[str]" = Counter()
+    stale = 0
+    for item in items:
+        for target in ALL_TARGETS:
+            if fingerprint_output(item, target) is None:
+                continue
+            outputs += 1
+            verdict = (item.verification or {}).get(target)
+            if verdict is None:
+                continue
+            if verdict_is_current(item, target, language):
+                current[verdict.verdict] += 1
+            else:
+                stale += 1
+    judged = sum(current.values())
+    return {
+        "outputs": outputs,
+        "judged": judged,
+        "unjudged": outputs - judged,
+        "stale": stale,
+        "coverage_pct": round(judged / outputs * 100, 1) if outputs else 0.0,
+        "verdicts": {v: current.get(v, 0) for v in _VERDICT_ORDER},
+    }
+
+
 def _meta(
     items: list[Item],
     topic_freq: "Counter[str]",
@@ -374,12 +417,15 @@ def compute_dashboard_data(
     id2note: dict[str, str],
     thumbs: list[dict[str, Any]],
     updated: str,
+    language: str,
 ) -> dict[str, Any]:
     """Assemble the full JSON blob the dashboard template consumes.
 
     Pure: no file or network IO (photo thumbnails are computed by
     `collect_thumbnails` and injected via `thumbs`). `updated` is a display
-    string (the caller stamps the generation date).
+    string (the caller stamps the generation date). `language` is the configured
+    output language — the verification block needs it because a verdict is bound
+    to the rubric contract it was judged under, and that contract is per-language.
     """
     growth = _growth(items)
     per_month: dict[str, list[Item]] = growth.pop("_per_month")
@@ -419,6 +465,7 @@ def compute_dashboard_data(
             "samples": _recent(rows(photo_posts), 6),
         },
         "videos": {"count": media["videos"], "items": _videos(items, id2note)},
+        "verification": _verification(items, language),
         "sources": {
             "bookmark": {"count": len(bookmark_items), "samples": _recent(rows(bookmark_items), 6)},
             "own_tweet": {"count": len(own_items), "samples": _recent(rows(own_items), 6)},

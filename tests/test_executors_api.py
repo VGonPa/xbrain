@@ -1,8 +1,16 @@
 # tests/test_executors_api.py
 from datetime import datetime, timezone
 
-from xbrain.executors.api import ApiExecutor, _user_prompt
-from xbrain.models import Author, Item, Link, Topic
+import pytest
+
+from xbrain.executors.api import (
+    QUOTED_CONTENT_UNFETCHED_NOTE,
+    ApiExecutor,
+    _user_prompt,
+    links_content_unfetched,
+    unfetched_links_note,
+)
+from xbrain.models import Author, Content, ContentSourceSuccess, Item, Link, Topic
 
 from tests.conftest import FakeAnthropic
 
@@ -352,3 +360,247 @@ def test_user_prompt_video_transcript_sits_between_images_and_links_and_article(
     article_idx = prompt.index("Linked article")
     assert image_idx < transcript_idx < links_idx
     assert transcript_idx < article_idx
+
+
+def _video_item_with_frames(
+    item_id: str,
+    *,
+    text: str = "a talk about scaling laws",
+    has_speech: bool = True,
+    frame_descs: tuple[str, ...] = (),
+):
+    """An `x_video` item carrying key-frame descriptions (slides/screens shown).
+
+    Frame descriptions ride on the `x_video` `ContentSourceSuccess.frames` list,
+    a different field from the `MediaPhotoDescribed` photo descriptions on
+    `item.media` — so a slide/screen-share video contributes visual topic signal
+    even with `has_speech=False` (no transcript).
+    """
+    from xbrain.models import Content, ContentSourceSuccess, VideoFrame
+
+    frames = [
+        VideoFrame(timestamp=float(i), local_path=f"1/frames/{i}.png", description=desc)
+        for i, desc in enumerate(frame_descs)
+    ]
+    return _item(
+        item_id,
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/a/status/1/video/1",
+                    title="A great talk",
+                    text=text,
+                    has_speech=has_speech,
+                    frames=frames,
+                )
+            ],
+        ),
+    )
+
+
+def test_user_prompt_includes_video_frame_descriptions():
+    """Key-frame descriptions surface under a labelled `Video frames` block so the
+    LLM reads what the video SHOWS (slides/screens), not just what it says."""
+    item = _video_item_with_frames(
+        "1", frame_descs=("A title slide: 'Scaling Laws'.", "A chart of loss vs compute.")
+    )
+    prompt = _user_prompt(item, VOCAB)
+    assert "Video frames" in prompt
+    assert "A title slide: 'Scaling Laws'." in prompt
+    assert "A chart of loss vs compute." in prompt
+
+
+def test_user_prompt_omits_video_frames_when_none():
+    """A video with no described frames must NOT have the frames section — otherwise
+    the LLM sees a hint of missing visual context and may hallucinate slides."""
+    prompt = _user_prompt(_video_item_with_frames("1", frame_descs=()), VOCAB)
+    assert "Video frames" not in prompt
+
+
+def test_user_prompt_includes_frames_even_when_no_speech():
+    """THE slide-deck case: a mute screen-share video (has_speech=False, empty text)
+    still contributes its frame descriptions as topic signal, even though it has no
+    transcript. This is the whole reason frames feed enrich."""
+    item = _video_item_with_frames(
+        "1",
+        text="",
+        has_speech=False,
+        frame_descs=("A slide comparing Postgres vs DynamoDB latency.",),
+    )
+    prompt = _user_prompt(item, VOCAB)
+    assert "Video frames" in prompt
+    assert "Postgres vs DynamoDB" in prompt
+    assert "Video transcript:" not in prompt  # no speech → no transcript block
+
+
+def test_user_prompt_bounds_the_video_frames_section():
+    """A 60-frame deck can't blow the per-item prompt: the frames block is capped at
+    `FRAME_DESC_CHAR_LIMIT` and signposts the cut."""
+
+    big = tuple(f"Frame {i}: " + ("x" * 500) for i in range(60))  # >> the cap
+    prompt = _user_prompt(_video_item_with_frames("1", frame_descs=big), VOCAB)
+    assert "Video frames" in prompt
+    # The section is bounded: not every 500-char frame made it in.
+    assert len(prompt) < sum(len(d) for d in big)
+    assert "frames omitted" in prompt
+
+
+def test_user_prompt_video_frames_sit_after_transcript_before_links():
+    """Order: post → images → transcript → frames → links → article. Voice then
+    slides, both before the links/article, so the LLM reads the video in one place."""
+    from xbrain.models import Content, ContentSourceSuccess, Link, VideoFrame
+
+    item = _item(
+        "1",
+        links=[Link(url="https://example.com/x", domain="example.com")],
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/a/status/1/video/1",
+                    title="A great talk",
+                    text="a talk about scaling laws",
+                    has_speech=True,
+                    frames=[
+                        VideoFrame(
+                            timestamp=1.0, local_path="1/frames/0.png", description="A title slide."
+                        )
+                    ],
+                ),
+                ContentSourceSuccess(
+                    kind="external_article",
+                    url="https://example.com/x",
+                    title="An article",
+                    text="the article body",
+                ),
+            ],
+        ),
+    )
+    prompt = _user_prompt(item, VOCAB)
+    transcript_idx = prompt.index("Video transcript:")
+    frames_idx = prompt.index("Video frames")
+    links_idx = prompt.index("Links in the post")
+    article_idx = prompt.index("Linked article")
+    assert transcript_idx < frames_idx < links_idx
+    assert frames_idx < article_idx
+
+
+# -------------------------------------------------- unfetched-content guardrails
+
+
+def _linked_item(*, links: int = 1, sources: list[ContentSourceSuccess] | None = None, **extra):
+    """An item with `links` outbound links and an optional content source list."""
+    return _item(
+        "1",
+        links=[Link(url=f"https://t.co/{i}", domain=f"site{i}.com") for i in range(links)],
+        content=(
+            Content(fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=list(sources))
+            if sources is not None
+            else None
+        ),
+        **extra,
+    )
+
+
+def _source(kind: str, text: str = "some body", **extra) -> ContentSourceSuccess:
+    return ContentSourceSuccess(kind=kind, url="https://x/1", text=text, **extra)
+
+
+# The predicate is the WHOLE guardrail: when it is False no surface is marked, so
+# every content shape it can meet is pinned here. Only a fetched LINKED page
+# (`external_article` / `x_article`) counts as "the link was fetched" — a `thread`
+# is the item's OWN text, a `quoted_tweet` is another post, an `x_video` is a
+# manufactured transcript. None of them is evidence an outbound link was read.
+@pytest.mark.parametrize(
+    ("links", "kinds", "expected"),
+    [
+        (0, [], False),  # no links → nothing to guard
+        (1, [], True),  # links, content is None → nothing fetched
+        (1, ["external_article"], False),  # the link WAS fetched
+        (1, ["x_article"], False),  # an X longform article counts too
+        (1, ["thread"], True),  # F1: a thread is the item's own text
+        (1, ["quoted_tweet"], True),  # a quoted post is not the linked page
+        (1, ["x_video"], True),  # a transcript is not the linked page
+        (1, ["thread", "x_video"], True),  # F1: still nothing linked was fetched
+        (2, ["external_article"], True),  # F5: 1 of 2 links fetched → still flagged
+        (2, ["external_article", "x_article"], False),  # both links fetched
+        (1, ["external_article", "thread"], False),  # article + own thread → fetched
+    ],
+)
+def test_links_content_unfetched_only_counts_fetched_linked_pages(links, kinds, expected):
+    item = _linked_item(links=links, sources=[_source(k) for k in kinds] if kinds else None)
+    assert links_content_unfetched(item) is expected
+
+
+def test_links_content_unfetched_ignores_a_textless_source():
+    """A success source with empty text (a no-speech video) is not fetched content."""
+    item = _linked_item(sources=[_source("x_video", text="", has_speech=False)])
+    assert links_content_unfetched(item) is True
+
+
+def test_user_prompt_flags_unfetched_links():
+    """When the linked content was never fetched, the prompt carries the guardrail
+    note — the model must not reconstruct the linked content from the URL/domain."""
+    item = _linked_item()
+    prompt = _user_prompt(item, VOCAB)
+    # Identity, not a substring: the prompt must carry the SHARED note verbatim, so the
+    # judge can hold the generator to exactly what it was told.
+    assert unfetched_links_note(item) in prompt
+
+
+def test_user_prompt_does_not_flag_links_when_article_fetched():
+    item = _linked_item(sources=[_source("external_article", "the fetched body")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "NOT fetched" not in prompt
+    assert "the fetched body" in prompt
+
+
+def test_user_prompt_labels_thread_text_as_thread_not_article():
+    """F1: a thread's own text is the item's own words, NOT a fetched linked page.
+    It must reach the model under its own label, and it must not suppress the
+    unfetched-links guardrail for a link nobody downloaded."""
+    item = _linked_item(sources=[_source("thread", "1/ my thread\n\n2/ about agents")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "1/ my thread" in prompt  # the thread text is NOT dropped — it is signal
+    thread_idx = prompt.index("Thread (full text by the same author):")
+    assert thread_idx < prompt.index("1/ my thread")
+    assert "Linked article" not in prompt  # …but it is not served as a fetched article
+    assert unfetched_links_note(item) in prompt  # …and the unfetched link is still flagged
+
+
+def test_user_prompt_partial_fetch_flags_the_missing_link_with_counts():
+    """F5: 2 links, 1 fetched — the fetched body is present AND the note says how
+    many links were left unfetched, so a claim about the other one is checkable."""
+    item = _linked_item(links=2, sources=[_source("external_article", "the fetched body")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "the fetched body" in prompt
+    note = unfetched_links_note(item)
+    assert note is not None and "1 of 2" in note
+    assert note in prompt
+
+
+def test_user_prompt_marks_an_unfetched_quoted_post():
+    """F3: the quoted post's content is never downloaded — say so, so the generator
+    does not invent the content it was told to summarise."""
+    item = _item("1", quoted_id="123")
+    prompt = _user_prompt(item, VOCAB)
+    assert "Quoted post" in prompt
+    assert QUOTED_CONTENT_UNFETCHED_NOTE in prompt
+
+
+def test_user_prompt_has_no_quoted_marker_without_a_quote():
+    assert "Quoted post" not in _user_prompt(_item("1"), VOCAB)
+
+
+def test_user_prompt_ships_the_author_display_name(tmp_path):
+    """D6: the rubric promises the judge "@handle and display name" as author metadata,
+    but the api prompt only ever shipped the handle — so a summary naming the poster by
+    their display name was judged against evidence the generator never had."""
+    item = _item("1")
+    item.author = Author(handle="emollick", name="Ethan Mollick")
+    prompt = _user_prompt(item, VOCAB)
+    assert "@emollick" in prompt
+    assert "Ethan Mollick" in prompt

@@ -14,7 +14,17 @@ def load_store(path: Path) -> dict[str, Item]:
     """Load the item store; an empty dict if the file does not exist."""
     if not path.exists():
         return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    return parse_store(path.read_text(encoding="utf-8"))
+
+
+def parse_store(text: str) -> dict[str, Item]:
+    """The item store from its JSON text — the ONE parser, shared with the index loader.
+
+    Split from `load_store` so a reader that must bind what it parsed to the exact bytes it
+    read (`knowledge.index_build.load_index_inputs`) can read through its own file handle and
+    still parse through this function, instead of a second copy of these two lines.
+    """
+    raw = json.loads(text)
     return {item_id: Item.model_validate(data) for item_id, data in raw.items()}
 
 
@@ -40,7 +50,12 @@ def load_topic_pages(path: Path) -> dict[str, TopicPage]:
     """Load the topic-page store; an empty dict if the file does not exist."""
     if not path.exists():
         return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    return parse_topic_pages(path.read_text(encoding="utf-8"))
+
+
+def parse_topic_pages(text: str) -> dict[str, TopicPage]:
+    """The topic-page store from its JSON text — the ONE parser (see `parse_store`)."""
+    raw = json.loads(text)
     return {slug: TopicPage.model_validate(data) for slug, data in raw.items()}
 
 

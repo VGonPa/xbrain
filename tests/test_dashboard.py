@@ -102,7 +102,7 @@ def test_compute_counts_topics_authors_and_deep_links():
         _item("102", "own_tweet", "claude-code", "vgonpa"),
     ]
     id2note = {"100": "/v/items/100.md", "101": "/v/items/101.md", "102": "/v/items/102.md"}
-    data = compute_dashboard_data(items, {}, id2note, [], "JUN 1, 2026")
+    data = compute_dashboard_data(items, {}, id2note, [], "JUN 1, 2026", "Spanish")
 
     m = data["meta"]
     assert (m["total"], m["bookmarks"], m["own"], m["enriched"], m["topics_count"]) == (
@@ -163,7 +163,7 @@ def test_long_form_and_media_counts():
         ),
         _item("4", media=[MediaPhotoPending(url="https://p2")]),
     ]
-    data = compute_dashboard_data(items, {}, {}, [], "JUN 1, 2026")
+    data = compute_dashboard_data(items, {}, {}, [], "JUN 1, 2026", "Spanish")
 
     lf = data["meta"]["longform"]
     assert (lf["ext_saved"], lf["ext_failed"], lf["saved"], lf["total"]) == (1, 1, 1, 2)
@@ -240,7 +240,7 @@ def test_growth_is_cumulative_across_months_with_month_slices():
             created=datetime(2026, 6, 5, tzinfo=timezone.utc),
         ),
     ]
-    data = compute_dashboard_data(items, {}, {}, [], "x")
+    data = compute_dashboard_data(items, {}, {}, [], "x", "Spanish")
     assert data["months"] == ["2026-05", "2026-06"]
     assert data["new_total"] == [1, 2]
     assert data["cum_total"] == [1, 3]
@@ -257,12 +257,12 @@ def test_domains_exclude_x_com():
         _item("1", links=[Link(url="https://x.com/a", domain="x.com")]),
         _item("2", links=[Link(url="https://ex.com/b", domain="ex.com")]),
     ]
-    data = compute_dashboard_data(items, {}, {}, [], "x")
+    data = compute_dashboard_data(items, {}, {}, [], "x", "Spanish")
     assert [d["domain"] for d in data["domains"]] == ["ex.com"]
 
 
 def test_empty_store_does_not_crash():
-    data = compute_dashboard_data([], {}, {}, [], "x")
+    data = compute_dashboard_data([], {}, {}, [], "x", "Spanish")
     assert data["meta"]["total"] == 0
     assert data["topics_sorted"] == [] and data["authors"] == [] and data["months"] == []
     assert data["meta"]["longform"]["saved_pct"] == 0.0  # ZeroDivisionError guard
@@ -285,7 +285,7 @@ def test_videos_row_content():
             ],
         )
     ]
-    data = compute_dashboard_data(items, {}, {}, [], "x")
+    data = compute_dashboard_data(items, {}, {}, [], "x", "Spanish")
     v = data["videos"]["items"][0]
     assert v["dur"] == 95 and v["poster"] == "https://poster"
 
@@ -326,7 +326,7 @@ def test_described_photos_count_as_downloaded_and_populate_photo_posts():
         _item("2", media=[_described_photo("2/0.png", decorative=True)]),
         _item("3", media=[MediaPhotoPending(url="https://p")]),
     ]
-    data = compute_dashboard_data(items, {}, {}, [], "JUN 1, 2026")
+    data = compute_dashboard_data(items, {}, {}, [], "JUN 1, 2026", "Spanish")
     md = data["meta"]["media"]
     assert (md["photos_downloaded"], md["photos_pending"]) == (2, 1)  # both described counted
     assert data["photos"]["downloaded"] == 2
@@ -368,3 +368,85 @@ def test_generate_writes_dashboard_with_valid_blob_and_links_it(tmp_path):
     data = json.loads(blob)
     assert data["meta"]["total"] == 2
     assert data["meta"]["bookmarks"] == 1 and data["meta"]["own"] == 1
+
+
+def _judged(item, target, verdict, *, language="Spanish"):
+    """Stamp a stored verdict on `item`, bound to the contract it was judged under.
+
+    Mirrors the write path in `verify --write-verdicts`: the verdict carries the
+    fingerprint of the output text and of the full contract (output + source +
+    rubrics). To make one go stale, re-generate the output afterwards — do not
+    hand-forge a hash, or the test passes on a fingerprint the product never writes.
+    """
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import contract_fingerprint, fingerprint_output
+
+    item.verification = dict(item.verification or {})
+    item.verification[target] = VerificationVerdict(
+        verdict=verdict,
+        faithfulness="PASS" if verdict != "FAIL" else "FAIL",
+        adherence="PASS",
+        output_fingerprint=fingerprint_output(item, target),
+        contract_fingerprint=contract_fingerprint(item, target, language),
+        verified_at=DT,
+        flags=[],
+    )
+    return item
+
+
+def test_verification_counts_outputs_not_items():
+    """One post carries several judgeable outputs; coverage is per output."""
+    data = compute_dashboard_data([_item("1"), _item("2")], {}, {}, [], "x", "Spanish")
+
+    v = data["verification"]
+    # Two enriched posts → two summaries + two topics assignments, no digests.
+    assert v["outputs"] == 4
+    assert v["judged"] == 0 and v["unjudged"] == 4
+    assert v["coverage_pct"] == 0.0
+    assert v["verdicts"] == {"PASS": 0, "REVIEW": 0, "FAIL": 0}
+
+
+def test_verification_reports_verdict_mix_and_coverage():
+    items = [
+        _judged(_item("1"), "summary", "PASS"),
+        _judged(_item("2"), "summary", "REVIEW"),
+        _item("3"),
+    ]
+
+    v = compute_dashboard_data(items, {}, {}, [], "x", "Spanish")["verification"]
+
+    assert v["outputs"] == 6 and v["judged"] == 2 and v["unjudged"] == 4
+    assert v["verdicts"] == {"PASS": 1, "REVIEW": 1, "FAIL": 0}
+    assert v["coverage_pct"] == 33.3
+
+
+def test_verification_treats_a_stale_verdict_as_unjudged():
+    """Re-generating a judged output invalidates its verdict — it stops counting.
+
+    A stale FAIL must not appear in the mix either: it describes text nobody
+    reads any more, so claiming a current failure would be as wrong as claiming
+    a current pass.
+    """
+    item = _judged(_item("1"), "summary", "FAIL")
+    # What actually happens: the summary is re-written after being judged.
+    item.enriched = item.enriched.model_copy(update={"summary": "resumen corregido"})
+    items = [item]
+
+    v = compute_dashboard_data(items, {}, {}, [], "x", "Spanish")["verification"]
+
+    assert v["stale"] == 1
+    assert v["judged"] == 0 and v["unjudged"] == 2
+    assert v["verdicts"]["FAIL"] == 0
+
+
+def test_verification_on_an_empty_store_does_not_divide_by_zero():
+    v = compute_dashboard_data([], {}, {}, [], "x", "Spanish")["verification"]
+
+    assert v == {
+        "outputs": 0,
+        "judged": 0,
+        "unjudged": 0,
+        "stale": 0,
+        "coverage_pct": 0.0,
+        "verdicts": {"PASS": 0, "REVIEW": 0, "FAIL": 0},
+    }

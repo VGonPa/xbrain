@@ -18,6 +18,22 @@ from xbrain.models import Topic
 # str.replace("{language}", ...) would silently miss.
 _LEFTOVER_PLACEHOLDER = re.compile(r"\{[^}]*language[^}]*\}", re.IGNORECASE)
 
+# The shared on-screen-text rule (#90). It lives in ONE fragment file spliced
+# into every rubric that describes an image, because the frame rubric and the
+# photo rubric must state the SAME rule — two copies drift, and a drifted rule
+# is worse than no rule (one surface silently keeps translating).
+#
+# The fragment is named `fragment-*.md`, NOT `rubric-*.md`, so `load_rubric`
+# cannot load it as a rubric and `tests/test_rubrics.py`'s `rubric-*.md` glob
+# does not parametrize over it.
+_ONSCREEN_FRAGMENT = "fragment-onscreen-text.md"
+_ONSCREEN_PLACEHOLDER = "{onscreen_text_rule}"
+# Same defensive idea as `_LEFTOVER_PLACEHOLDER`: a near-miss spelling
+# (`{onscreen_text_rules}`) survives str.replace and would ship the literal
+# placeholder to the vision model. Deliberately NOT a generic `\{[^}]*\}` scan —
+# `rubric-describe-image.md` embeds a JSON example that such a pattern would flag.
+_LEFTOVER_ONSCREEN = re.compile(r"\{[^}]*onscreen[^}]*\}", re.IGNORECASE)
+
 _PKG = Path(__file__).resolve().parent
 _RUBRICS_DIR = _PKG / "rubrics"
 _GUARDRAILS = _PKG / "guardrails.yaml"
@@ -27,13 +43,23 @@ _GUARDRAILS = _PKG / "guardrails.yaml"
 ARTICLE_CHAR_LIMIT = 4000
 
 # Max characters of an `x_video` transcript passed to the per-item ENRICH prompt
-# (#44). A 72-min talk transcribes to ~68k chars, but the LLM saturates on
-# topic + gist far sooner, so we cap at 12000 chars (~3k tokens, ~3× the article
-# limit): the first ~13 minutes of speech, enough to assign a real
-# `primary_topic` + summary without a single long talk blowing the prompt.
-# Shared by the `api` executor prompt and the worksheet export so both truncate
-# identically.
+# on the `api` engine (#44). A 72-min talk transcribes to ~68k chars, but the LLM
+# saturates on topic + gist far sooner, so we cap at 12000 chars (~3k tokens, ~3×
+# the article limit): the first ~13 minutes of speech, enough to assign a real
+# `primary_topic` + summary without a single long talk blowing the per-item prompt.
+# The `api` engine is a bounded per-item model call, so it truncates here; the
+# worksheet engine is judged by a full-context agent and carries the FULL
+# transcript instead (`worksheet._video_transcript`) — the two engines
+# legitimately diverge on input size.
 TRANSCRIPT_CHAR_LIMIT = 12000
+
+# Max characters of the `Video frames` block (key-frame descriptions of the
+# slides/screens a video shows) passed to the per-item ENRICH prompt on the `api`
+# engine. A slide deck can dedup to dozens of distinct frames (~300 chars each);
+# 6000 chars (~1.5k tokens) is plenty of visual topic signal without a screen-heavy
+# talk crowding out the transcript. Bounds the `api` engine only — the worksheet
+# engine carries every frame description (agent-judged, full context).
+FRAME_DESC_CHAR_LIMIT = 6000
 
 # Tighter per-video cap for the TOPIC-page synthesis prompt (#44). A single topic
 # can gather many video items, so each member's transcript is trimmed to 2000
@@ -56,6 +82,18 @@ def truncate_transcript(text: str, limit: int) -> str:
     return text[:limit].rstrip() + "\n[… transcript truncated …]"
 
 
+def _load_fragment(filename: str) -> str:
+    """Return the text of a shared rubric fragment (`rubrics/<filename>`).
+
+    Fragments are composed INTO rubrics by `load_rubric`; they are never a
+    prompt on their own, which is why they carry no `rubric-` prefix.
+    """
+    path = _RUBRICS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Rubric fragment not found: {path}")
+    return path.read_text(encoding="utf-8").strip()
+
+
 def load_rubric(name: str, *, language: str | None = None) -> str:
     """Return the text of `rubrics/rubric-<name>.md`.
 
@@ -69,11 +107,26 @@ def load_rubric(name: str, *, language: str | None = None) -> str:
     Defensive check: when `language` is provided, the returned text must not
     contain a literal `{language}` (catches typos like `{Language}` that
     would silently survive substitution and ship the placeholder to the LLM).
+
+    A `{onscreen_text_rule}` placeholder is replaced with the shared
+    `fragment-onscreen-text.md` before the language pass, so the rule is stated
+    once and both image rubrics inherit it verbatim.
     """
     path = _RUBRICS_DIR / f"rubric-{name}.md"
     if not path.exists():
         raise FileNotFoundError(f"Rubric not found: {path}")
     text = path.read_text(encoding="utf-8")
+    # Splice shared fragments FIRST, so a fragment's own `{language}` is
+    # substituted by the language pass below rather than shipped literally.
+    if _ONSCREEN_PLACEHOLDER in text:
+        text = text.replace(_ONSCREEN_PLACEHOLDER, _load_fragment(_ONSCREEN_FRAGMENT))
+    leftover_rule = _LEFTOVER_ONSCREEN.search(text)
+    if leftover_rule is not None:
+        raise ValueError(
+            f"Rubric {name!r} contains an unresolved placeholder "
+            f"{leftover_rule.group()!r}. The supported form is "
+            f"`{{onscreen_text_rule}}` (lowercase, singular)."
+        )
     if language is not None:
         text = text.replace("{language}", language)
         leftover = _LEFTOVER_PLACEHOLDER.search(text)
@@ -97,7 +150,12 @@ def load_vocab(path: Path) -> list[Topic]:
     """Load the topic vocabulary; an empty list if the file does not exist."""
     if not path.exists():
         return []
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return parse_vocab(path.read_text(encoding="utf-8"))
+
+
+def parse_vocab(text: str) -> list[Topic]:
+    """The vocabulary from its YAML text — the ONE parser (see `store.parse_store`)."""
+    data = yaml.safe_load(text) or {}
     return [Topic(**entry) for entry in data.get("topics", [])]
 
 

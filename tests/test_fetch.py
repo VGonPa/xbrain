@@ -3,7 +3,10 @@ import socket
 import urllib.error
 from datetime import datetime, timezone
 
+import pytest
+
 from xbrain.enrich import items_pending_enrichment
+from xbrain.executors.api import links_content_unfetched, unfetched_links_note
 from xbrain.fetch import (
     FetchFailure,
     FetchResult,
@@ -12,7 +15,12 @@ from xbrain.fetch import (
     _probe_status,
     _reason_for_status,
     _should_refetch,
+    plan_retry_failed,
+    retry_failed,
+    revalidate_stored_bodies,
+    should_retry_failed,
     _sources_materially_equal,
+    extract_article,
     fetch_item,
     fetch_pending,
     trafilatura_extract,
@@ -41,8 +49,18 @@ def _item(item_id: str, urls: list[str]) -> Item:
     )
 
 
+_ARTICLE_FILLER = "Contenido del artículo. " * 15  # clears `_MIN_ARTICLE_CHARS`
+
+
 def _fake_extractor(url: str) -> FetchResult:
-    return FetchSuccess(title="Título", text=f"cuerpo de {url}", http_status=200)
+    """A plausible article body. It must clear the length floor: `validate_body` rejects a body
+    too thin to be an article (a consent wall is short), so a 15-char stub would now be
+    persisted as a `blocked_interstitial` FAILURE — which is correct behaviour, not a bug."""
+    return FetchSuccess(title="Título", text=_body_for(url), http_status=200)
+
+
+def _body_for(url: str) -> str:
+    return f"cuerpo de {url}. {_ARTICLE_FILLER}"
 
 
 def test_reason_for_status_maps_http_codes():
@@ -109,7 +127,7 @@ def test_fetch_item_extracts_external_articles():
     source = content.sources[0]
     assert isinstance(source, ContentSourceSuccess)
     assert source.kind == "external_article"
-    assert source.text == "cuerpo de https://example.com/p"
+    assert source.text == _body_for("https://example.com/p")
 
 
 def test_fetch_item_skips_x_urls():
@@ -202,6 +220,133 @@ def test_firecrawl_extract_returns_none_without_api_key(monkeypatch):
     assert _firecrawl_extract("https://e.com/a") is None
 
 
+def _write_credentials(tmp_path, payload: str):
+    """Write a `firecrawl` CLI credentials file and point the lookup at it."""
+    path = tmp_path / "credentials.json"
+    path.write_text(payload)
+    return path
+
+
+def test_firecrawl_key_falls_back_to_cli_credentials(monkeypatch, tmp_path):
+    """A key the `firecrawl` CLI stored counts as configured — the measured defect.
+
+    39 repairable items sat at `attempts=1` because a key that WAS on the machine
+    was invisible to xbrain, so `_retryable_now` read "no fallback" and called
+    them terminal.
+    """
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() == "fc-from-cli"
+    assert fetch.firecrawl_available() is True
+
+
+def test_firecrawl_key_env_wins_over_credentials_file(monkeypatch, tmp_path):
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-from-env")
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() == "fc-from-env"
+
+
+def test_firecrawl_key_opt_out_beats_every_source(monkeypatch, tmp_path):
+    """`XBRAIN_NO_FIRECRAWL` is the hard "run without the fallback" switch."""
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.setenv("XBRAIN_NO_FIRECRAWL", "1")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-from-env")
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() is None
+    assert fetch.firecrawl_available() is False
+
+
+def test_firecrawl_key_tries_each_location_in_order(monkeypatch, tmp_path):
+    """A missing first location must not stop the search at the first candidate."""
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    second = tmp_path / "second.json"
+    second.write_text(json.dumps({"apiKey": "fc-second"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (tmp_path / "absent.json", second))
+
+    assert fetch.firecrawl_key() == "fc-second"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["not json at all", "[]", "{}", '{"apiKey": ""}', '{"apiKey": "   "}', '{"apiKey": 42}'],
+)
+def test_firecrawl_key_survives_a_malformed_credentials_file(monkeypatch, tmp_path, payload):
+    """An unreadable / keyless credentials file yields None — it never raises.
+
+    The fallback is OPTIONAL; a corrupt file must not take down a fetch run.
+    """
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, payload)
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() is None
+
+
+def test_firecrawl_key_strips_surrounding_whitespace(monkeypatch, tmp_path):
+    """A key with a trailing newline is still a key (a hand-edited file)."""
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "  fc-padded\n"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() == "fc-padded"
+
+
+def test_firecrawl_extract_uses_the_credentials_file_key(monkeypatch, tmp_path):
+    """End to end: the stored key actually reaches the Authorization header."""
+    import io
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+    seen: dict = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _opener(req, timeout=None):
+        seen["auth"] = req.headers.get("Authorization")
+        return _Resp(json.dumps({"data": {"markdown": "cuerpo"}}).encode())
+
+    result = fetch._firecrawl_extract("https://e.com/a", opener=_opener)
+
+    assert seen["auth"] == "Bearer fc-from-cli"
+    assert result.text == "cuerpo"
+
+
 def test_firecrawl_extract_parses_markdown(monkeypatch):
     import io
     import json
@@ -227,18 +372,21 @@ def test_firecrawl_extract_parses_markdown(monkeypatch):
     assert result.title == "T"
 
 
-def test_extract_article_falls_back_to_firecrawl_on_js_required():
-    from xbrain.fetch import extract_article
+_RESCUED = "Rescatado por Firecrawl. " * 20
 
+
+def test_extract_article_falls_back_to_firecrawl_on_js_required():
     def primary(url):
         return FetchFailure(failure_reason="js_required", error="js", attempts=1)
 
     def firecrawl(url):
-        return FetchSuccess(text="rescatado por firecrawl", attempts=1)
+        # A plausible article body: the length floor exists to reject chrome/walls, and a
+        # 23-char fixture would be indistinguishable from one.
+        return FetchSuccess(text=_RESCUED, attempts=1)
 
     result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
     assert isinstance(result, FetchSuccess)
-    assert result.text == "rescatado por firecrawl"
+    assert result.text == _RESCUED
     assert result.attempts == 2
 
 
@@ -370,7 +518,9 @@ def test_extract_article_merges_firecrawl_error_when_both_fail():
 # --------------------------------------------------------------------- #19: transient retry
 
 
-def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_article", text=None):
+def _content_with_source(
+    *, ok: bool, failure_reason="timeout", kind="external_article", text=None, attempts=1
+):
     """Helper: build a Content with a single ContentSource of the requested shape.
 
     `ok=True` builds a `ContentSourceSuccess` (text required); `ok=False`
@@ -381,7 +531,10 @@ def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_a
         source = ContentSourceSuccess(kind=kind, url="https://example.com/p", text=text or "body")
     else:
         source = ContentSourceFailure(
-            kind=kind, url="https://example.com/p", failure_reason=failure_reason
+            kind=kind,
+            url="https://example.com/p",
+            failure_reason=failure_reason,
+            attempts=attempts,
         )
     return Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
@@ -389,62 +542,75 @@ def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_a
     )
 
 
+def _refetch(content, force: bool, *, urls=("https://example.com/p",)) -> bool:
+    """`_should_refetch` asks the question of the ITEM, not of a bare `Content`.
+
+    It has to: "content exists" is not "the links were fetched" — the extract stage
+    stamps the quoted post, `digest-video` a transcript. So the decision reads the
+    item's LINKS. These wrappers keep the truth table below stated in terms of the
+    content, with the item's links held at the default single non-x link.
+    """
+    item = _item("1", list(urls))
+    item.content = content
+    return _should_refetch(item, force=force)
+
+
 # --- Truth table on _should_refetch ---
 
 
 def test_should_refetch_when_content_is_none():
-    assert _should_refetch(None, force=False) is True
-    assert _should_refetch(None, force=True) is True
+    assert _refetch(None, force=False) is True
+    assert _refetch(None, force=True) is True
 
 
 def test_should_skip_successful_fetch_without_force():
     c = _content_with_source(ok=True, text="body")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_refetch_successful_fetch_with_force():
     c = _content_with_source(ok=True, text="body")
-    assert _should_refetch(c, force=True) is True
+    assert _refetch(c, force=True) is True
 
 
 def test_should_refetch_all_transient_timeout():
     c = _content_with_source(ok=False, failure_reason="timeout")
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_should_refetch_all_transient_dns_error():
     c = _content_with_source(ok=False, failure_reason="dns_error")
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_should_skip_terminal_not_found_without_force():
     c = _content_with_source(ok=False, failure_reason="not_found")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_paywall_without_force():
     c = _content_with_source(ok=False, failure_reason="paywall")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_forbidden_without_force():
     c = _content_with_source(ok=False, failure_reason="forbidden")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_js_required_without_force():
     c = _content_with_source(ok=False, failure_reason="js_required")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_empty_content_without_force():
     c = _content_with_source(ok=False, failure_reason="empty_content")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_refetch_terminal_with_force():
     c = _content_with_source(ok=False, failure_reason="not_found")
-    assert _should_refetch(c, force=True) is True
+    assert _refetch(c, force=True) is True
 
 
 def test_should_skip_mixed_transient_and_terminal():
@@ -456,7 +622,7 @@ def test_should_skip_mixed_transient_and_terminal():
             ContentSourceFailure(kind="external_article", url="b", failure_reason="not_found"),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_mixed_transient_and_success():
@@ -468,7 +634,7 @@ def test_should_skip_mixed_transient_and_success():
             ContentSourceSuccess(kind="external_article", url="b", text="got it"),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_only_x_sources():
@@ -483,7 +649,7 @@ def test_should_skip_only_x_sources():
             ),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False, urls=("https://x.com/i/article/1",)) is False
 
 
 # --- Integration on fetch_pending ---
@@ -565,7 +731,7 @@ def test_should_refetch_legacy_uncategorized_failure_migrates_to_transient():
     # which would mislabel the actual cause).
     assert src.failure_reason == "unknown_error"
     c = Content(fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=[src])
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_should_refetch_external_transient_alongside_xcom_source():
@@ -589,7 +755,7 @@ def test_should_refetch_external_transient_alongside_xcom_source():
             ),
         ],
     )
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_fetch_pending_replaces_sources_does_not_append():
@@ -631,7 +797,7 @@ def test_extractor_exception_persists_as_transient_failure():
     assert failure.failure_reason == "unknown_error"
     assert "network blip" in failure.error
     # And `_should_refetch` correctly retries on the next run
-    assert _should_refetch(content, force=False) is True
+    assert _refetch(content, force=False) is True
 
 
 def test_content_source_from_uncategorised_failure_is_transient():
@@ -830,3 +996,548 @@ def test_force_refetch_unchanged_success_does_not_reenrich():
     assert item.content is not None
     assert item.content.fetched_at == _T0  # preserved despite --force
     assert items_pending_enrichment(store) == []  # not re-enriched
+
+
+# --- fetch --retry-failed: which failures a retry could actually change ---------------------
+# `_should_refetch` retries only _TRANSIENT_FAILURES, so `js_required` / `empty_content` are
+# never retried. But those are the exact two reasons `extract_article` escalates to the
+# Firecrawl fallback — and when FIRECRAWL_API_KEY is unset the fallback returns None and the
+# original failure is kept at attempts=1. The whole real corpus is in that state: 33 of 44
+# exposed items are fallback-eligible failures the fallback NEVER ran on, permanently stuck
+# because the policy calls them terminal. "trafilatura cannot do better" is not the same fact
+# as "the pipeline cannot do better".
+
+
+def test_retry_failed_selects_a_fallback_eligible_failure_the_fallback_never_ran_on():
+    """js_required at attempts=1 = the Firecrawl pass never happened. With Firecrawl now
+    configured a retry has a genuinely different extractor to offer — so it is selected."""
+    c = _content_with_source(ok=False, failure_reason="js_required", attempts=1)
+    assert should_retry_failed(c, firecrawl_configured=True) is True
+
+
+def test_retry_failed_skips_a_fallback_eligible_failure_when_firecrawl_is_unconfigured():
+    """Without the key the retry runs the SAME extractor and reproduces the SAME failure. That
+    is not a repair, it is just hammering someone's server — so it is not selected."""
+    c = _content_with_source(ok=False, failure_reason="js_required", attempts=1)
+    assert should_retry_failed(c, firecrawl_configured=False) is False
+
+
+def test_retry_failed_skips_a_fallback_eligible_failure_both_extractors_already_tried():
+    """attempts=2 means trafilatura AND Firecrawl both failed. Nothing new to bring."""
+    c = _content_with_source(ok=False, failure_reason="empty_content", attempts=2)
+    assert should_retry_failed(c, firecrawl_configured=True) is False
+
+
+def test_retry_failed_selects_a_transient_failure_regardless_of_firecrawl():
+    """A 429/timeout/dns blip may simply succeed today — no new extractor needed. (The real
+    corpus's `cursor.directory/mcp` is exactly this: HTTP 429, recorded `unknown_error`.)"""
+    c = _content_with_source(ok=False, failure_reason="unknown_error", attempts=1)
+    assert should_retry_failed(c, firecrawl_configured=False) is True
+
+
+def test_retry_failed_skips_a_terminal_failure_no_extractor_can_fix():
+    """A dead page or a hard 403 is not an extraction problem. Retrying cannot help; the note
+    (which now names the reason) is what protects these."""
+    for reason in ("not_found", "forbidden", "paywall"):
+        c = _content_with_source(ok=False, failure_reason=reason)
+        assert should_retry_failed(c, firecrawl_configured=True) is False, reason
+
+
+def test_retry_failed_skips_an_item_whose_link_content_was_fetched():
+    c = _content_with_source(ok=True, text="body")
+    assert should_retry_failed(c, firecrawl_configured=True) is False
+
+
+def test_retry_failed_selects_a_partial_fetch_whose_other_link_is_still_recoverable():
+    """One link fetched, one still js_required: the fetched article is no evidence for the
+    other, so the recoverable one still deserves the retry (`_should_refetch`'s all() would
+    skip this item entirely)."""
+    content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(kind="external_article", url="https://example.com/a", text="body"),
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://example.com/b",
+                failure_reason="js_required",
+                attempts=1,
+            ),
+        ],
+    )
+    assert should_retry_failed(content, firecrawl_configured=True) is True
+
+
+def test_retry_failed_ignores_a_never_fetched_item():
+    """`content is None` is the plain `fetch` path's job — --retry-failed is about REPAIRING
+    recorded failures, and must not silently widen into a general backfill."""
+    assert should_retry_failed(None, firecrawl_configured=True) is False
+
+
+# --- C1: a consent/login wall must NOT become evidence -------------------------------------
+# The only content check was `if not text` — non-empty ⇒ success. Firecrawl RENDERS JavaScript,
+# and `js_required` means "downloadable but no extractable article", which is the most enriched
+# population there is for consent shells and SPA login walls. So the retry would very often
+# "succeed" on exactly those pages and return the banner markdown. That flips the source to
+# success, which makes `links_content_unfetched` False, which DELETES the
+# `[Links — content NOT fetched]` block from all three surfaces — and rubric-summary then
+# ORDERS the generator to summarise "the article's substance". Nature/Reddit/Instagram/Twitch
+# are in the 25-ungrounded-entity list; a rendered Instagram login wall contains the word
+# "Instagram", so the entity checker would call it GROUNDED. Accepting a wall is strictly worse
+# than the honest failure it replaces.
+
+_COOKIE_WALL = (
+    "# We value your privacy\n\nWe and our 842 partners store and access information on a "
+    "device, such as cookies. Accept all cookies to continue to the site."
+)
+_LOGIN_WALL = "Log in to Instagram\n\nSign in to continue. Create an account to see photos."
+
+
+def _extractor_returning(text: str, title: str | None = None):
+    return lambda url: FetchSuccess(title=title, text=text, http_status=200)
+
+
+def test_extract_article_rejects_a_cookie_wall_instead_of_calling_it_an_article():
+    """A rendered consent banner is not the article. It must come back as a FAILURE naming a
+    true cause, so the guardrail keeps firing — never as a success the judge will trust."""
+    result = extract_article(
+        "https://www.nature.com/articles/x", primary=_extractor_returning(_COOKIE_WALL)
+    )
+    assert isinstance(result, FetchFailure)
+    assert result.failure_reason == "blocked_interstitial"
+
+
+def test_extract_article_rejects_a_login_wall():
+    result = extract_article(
+        "https://www.instagram.com/reel/x", primary=_extractor_returning(_LOGIN_WALL)
+    )
+    assert isinstance(result, FetchFailure)
+    assert result.failure_reason == "blocked_interstitial"
+
+
+def test_extract_article_rejects_a_body_too_thin_to_be_an_article():
+    """Below the floor there is no substance to summarise, and whatever is there is far more
+    likely to be chrome than an article. Failing closed is the safe direction."""
+    result = extract_article("https://example.com/x", primary=_extractor_returning("Short."))
+    assert isinstance(result, FetchFailure)
+    assert result.failure_reason == "blocked_interstitial"
+
+
+def test_extract_article_still_accepts_a_real_article():
+    """The floor must not eat legitimate content — the guardrail is only valuable if the
+    successes are real."""
+    body = "The talk covered agentic coding. " * 40  # a plausible article body
+    result = extract_article("https://example.com/x", primary=_extractor_returning(body))
+    assert isinstance(result, FetchSuccess)
+    assert result.text == body
+
+
+def test_a_rejected_wall_keeps_the_guardrail_firing_end_to_end():
+    """THE acceptance test: the wall must not silence the note. Before the retry the guardrail
+    fires; after a retry that lands a wall it must STILL fire — because the source is still a
+    failure, so `links_content_unfetched` is still True."""
+    item = _item("7", ["https://www.nature.com/articles/x"])
+    item.content = fetch_item(item, _extractor_returning(_COOKIE_WALL))
+
+    assert links_content_unfetched(item) is True  # the wall did NOT become evidence
+    note = unfetched_links_note(item)
+    assert note is not None and "NOT fetched" in note
+    assert "cookie" in note or "wall" in note or "blocked" in note  # and it names the true cause
+
+
+# --- C2: the retry must not destroy a successful article -------------------------------------
+
+
+def test_retry_failed_preserves_a_successful_article_on_a_partial_item():
+    """`should_retry_failed` uses ANY semantics, so a PARTIAL item (one link fetched, one still
+    failing) IS selected. But `fetch_item` re-extracts EVERY non-x link, so the good article was
+    re-fetched too — and if that re-fetch failed (a 429 mid-run), the body was gone, with no copy
+    anywhere in the store. Repairing one link must never destroy another's evidence."""
+    item = _item("7", ["https://good.com/a", "https://bad.com/b"])
+    good = ContentSourceSuccess(
+        kind="external_article", url="https://good.com/a", title="Good", text=_body_for("good")
+    )
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            good,
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://bad.com/b",
+                failure_reason="unknown_error",
+                attempts=1,
+            ),
+        ],
+    )
+
+    def hostile(url: str) -> FetchResult:
+        """Everything fails now — including the previously-good link (a 429 mid-run)."""
+        return FetchFailure(failure_reason="unknown_error", error="429", attempts=1)
+
+    store = {"7": item}
+    plan = plan_retry_failed(store, firecrawl_configured=False)
+    assert plan.retryable == ["7"]  # the partial item IS selected
+    retry_failed(store, plan, hostile)
+
+    sources = {s.url: s for s in store["7"].content.sources}
+    survivor = sources["https://good.com/a"]
+    assert isinstance(survivor, ContentSourceSuccess)  # the good article SURVIVED the retry
+    assert survivor.text == _body_for("good")  # byte-identical — never re-extracted
+    assert isinstance(sources["https://bad.com/b"], ContentSourceFailure)  # the bad one was retried
+
+
+def test_retry_failed_only_refetches_the_urls_that_actually_failed():
+    """Proved on the CALLS, not on the outcome: the successful URL is never even requested."""
+    item = _item("7", ["https://good.com/a", "https://bad.com/b"])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article", url="https://good.com/a", text=_body_for("good")
+            ),
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://bad.com/b",
+                failure_reason="unknown_error",
+                attempts=1,
+            ),
+        ],
+    )
+    called: list[str] = []
+
+    def recording(url: str) -> FetchResult:
+        called.append(url)
+        return FetchSuccess(text=_body_for(url), http_status=200)
+
+    store = {"7": item}
+    retry_failed(store, plan_retry_failed(store, firecrawl_configured=False), recording)
+
+    assert called == ["https://bad.com/b"]  # the good link was never re-requested
+
+
+# --- C3: a Firecrawl OUTAGE must not permanently burn the retry -------------------------------
+
+
+def test_a_firecrawl_transport_error_does_not_count_as_an_attempt():
+    """`extract_article` bumped attempts whenever Firecrawl returned a FetchFailure — but a 503 /
+    timeout / bad-JSON returns one exactly like "rendered it, found nothing" does. So a Firecrawl
+    OUTAGE during the one backfill run would mark all 31 items `attempts=2` PERMANENTLY:
+    `--retry-failed` never selects them again and the dry run thereafter reports
+    "Reintentables: 0", which reads like success. The fallback that never ran is not an attempt."""
+
+    def primary(url):
+        return FetchFailure(failure_reason="js_required", error="js", attempts=1)
+
+    def firecrawl_down(url):
+        return FetchFailure(error="Firecrawl falló: 503", attempts=1, transport_error=True)
+
+    result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl_down)
+    assert isinstance(result, FetchFailure)
+    assert result.attempts == 1  # NOT burned — the item stays retryable
+    assert result.failure_reason == "js_required"  # the original evidence is kept
+    # …and it is therefore still selected by a later run.
+    content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://e.com/a",
+                failure_reason=result.failure_reason,
+                attempts=result.attempts,
+            )
+        ],
+    )
+    assert should_retry_failed(content, firecrawl_configured=True) is True
+
+
+def test_firecrawl_running_and_finding_nothing_DOES_count_as_an_attempt():
+    """The other side of the coin: a real verdict must burn the retry, or `--retry-failed` would
+    re-hit a genuinely unextractable page forever."""
+
+    def primary(url):
+        return FetchFailure(failure_reason="js_required", error="js", attempts=1)
+
+    def firecrawl_empty(url):
+        return FetchFailure(failure_reason="empty_content", error="sin contenido", attempts=1)
+
+    result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl_empty)
+    assert isinstance(result, FetchFailure)
+    assert result.attempts == 2  # both extractors have now had their say
+
+
+def test_retry_failed_paces_itself_between_items():
+    """C5: the corpus's one transient failure is a recorded HTTP 429. Retrying a host that
+    already rate-limited us with zero delay is the one place backoff is not optional."""
+    store = {i: _item_with_failure(i, "unknown_error") for i in ("7", "8", "9")}
+    plan = plan_retry_failed(store, firecrawl_configured=False)
+    assert len(plan.retryable) == 3
+    slept: list[float] = []
+    retry_failed(
+        store,
+        plan,
+        lambda url: FetchSuccess(text=_body_for(url), http_status=200),
+        sleep=slept.append,
+        delay=2.0,
+    )
+    assert slept == [2.0, 2.0]  # paced BETWEEN items — no leading delay before the first
+
+
+def _item_with_failure(item_id: str, reason: str):
+    item = _item(item_id, [f"https://example.com/{item_id}"])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url=f"https://example.com/{item_id}",
+                failure_reason=reason,
+                attempts=1,
+            )
+        ],
+    )
+    return item
+
+
+def test_a_long_body_that_is_really_page_chrome_is_rejected():
+    """The length floor alone is not enough. nature.com returns ~95k characters — nav, consent
+    text, journal furniture, and the article somewhere inside. It sails past any length floor
+    while being a body a model can mine for claims the article never made. Caught in the C1
+    acceptance run against the REAL URLs this backfill would hit."""
+    chrome = (
+        "Accurate predictions on small data | Nature Skip to main content Thank you for "
+        "visiting nature.com. You are using a browser version with limited support for CSS. "
+    ) + ("Advertisement View all journals Search Log in Content About the journal. " * 30)
+    result = extract_article(
+        "https://www.nature.com/articles/x",
+        primary=lambda u: FetchSuccess(
+            title="Accurate predictions | Nature", text=chrome, http_status=200
+        ),
+    )
+    assert isinstance(result, FetchFailure)
+    assert result.failure_reason == "blocked_interstitial"
+
+
+def test_a_title_that_is_just_the_bare_domain_is_rejected():
+    """`Instagram`, `Twitch` — the page title of a wall is the brand, not an article."""
+    body = "Instagram. Log in or sign up to see photos from your friends. " * 10
+    result = extract_article(
+        "https://www.instagram.com/reel/x",
+        primary=lambda u: FetchSuccess(title="Instagram", text=body, http_status=200),
+    )
+    assert isinstance(result, FetchFailure)
+    assert result.failure_reason == "blocked_interstitial"
+
+
+# --- A non-link source must never mask an unfetched link ---
+#
+# Since the quoted post is parsed at EXTRACT time, a quote-tweet arrives at `fetch`
+# with `content` ALREADY stamped — but with no `external_article` source. Reading
+# "content exists" as "nothing left to fetch" would silently never fetch the article
+# of every quote-tweet that also links out. 35% of the corpus quotes.
+
+_QUOTED = ContentSourceSuccess(
+    kind="quoted_tweet",
+    url="https://x.com/karpathy/status/999",
+    text="I am leaving OpenAI.",
+    author=Author(handle="karpathy", name="Andrej Karpathy"),
+)
+
+
+def _item_with(sources, *, urls=("https://example.com/a",)) -> Item:
+    return Item(
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="Read this and you'll understand better this career move",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        links=[Link(url=u, domain="example.com") for u in urls],
+        quoted_id="999",
+        content=(
+            Content(fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=list(sources))
+            if sources is not None
+            else None
+        ),
+    )
+
+
+def test_a_quoted_source_does_not_mask_an_unfetched_link():
+    """The regression guard: content stamped by the EXTRACT stage (a quoted post) is
+    not evidence that the item's LINK was ever fetched."""
+    assert _should_refetch(_item_with([_QUOTED]), force=False) is True
+
+
+def test_fetch_pending_still_fetches_the_article_of_a_quote_tweet():
+    """End to end: the article of a quote-tweet is fetched, and the quoted post
+    SURVIVES the fetch (only `external_article` sources are rebuilt)."""
+    item = _item_with([_QUOTED])
+    store = {"1": item}
+
+    fetched = fetch_pending(store, extractor=lambda url: FetchSuccess(title="T", text="body"))
+
+    assert fetched == 1
+    kinds = sorted(s.kind for s in store["1"].content.sources)
+    assert kinds == ["external_article", "quoted_tweet"]
+    assert _QUOTED in store["1"].content.sources
+
+
+def test_an_item_whose_links_are_all_fetched_is_not_refetched_despite_a_quote():
+    """The other arm — the fix must not turn into a re-fetch-forever loop."""
+    item = _item_with(
+        [
+            _QUOTED,
+            ContentSourceSuccess(kind="external_article", url="https://example.com/a", text="b"),
+        ]
+    )
+    assert _should_refetch(item, force=False) is False
+
+
+def test_an_item_with_only_x_links_and_a_quote_is_not_fetched():
+    """x.com links are `fetch_x`'s job — a quoted source must not drag them here."""
+    item = _item_with([_QUOTED], urls=("https://x.com/b/status/2",))
+    assert _should_refetch(item, force=False) is False
+
+
+# --- Walls ALREADY in the store: 28 of the corpus's 189 fetched "articles" are chrome ----------
+# Measured, not supposed: 17 YouTube footer blocks ("Información Prensa Derechos de autor…"),
+# `Loading...`, `Sign in`, bot checks, "You need to enable JavaScript to run this app." Each is
+# persisted as a SUCCESS, so `links_content_unfetched` is False and the guardrail never fires —
+# the generator was handed the footer under a `[Linked article]` label. `--retry-failed` cannot
+# reach them: it selects FAILURES. Revalidation is local and needs no network.
+
+
+def test_revalidate_demotes_a_stored_wall_and_the_guardrail_starts_firing():
+    """The exact YouTube-chrome body found 17 times in the real store."""
+    item = _item("7", ["https://youtu.be/kkXsDGmpLU4"])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://youtu.be/kkXsDGmpLU4",
+                title="8 Inversores Top VC Reflexionan sobre 2024",
+                text="Información Prensa Derechos de autor Contactar Creadores Publicidad "
+                "Desarrolladores Términos Privacidad Política y seguridad Cómo funciona YouTube",
+            )
+        ],
+    )
+    store = {"7": item}
+    assert links_content_unfetched(item) is False  # today: the wall IS the evidence
+
+    demoted = revalidate_stored_bodies(store)
+
+    assert demoted.items == ["7"]
+    assert demoted.urls == ["https://youtu.be/kkXsDGmpLU4"]
+    source = store["7"].content.sources[0]
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "blocked_interstitial"
+    assert links_content_unfetched(store["7"]) is True  # the guardrail now fires
+    note = unfetched_links_note(store["7"])
+    assert note is not None and "cookie/login wall" in note
+
+
+def test_revalidate_leaves_a_real_article_alone():
+    """0 of the corpus's 189 fetched articles are wrongly rejected — this pins that direction."""
+    item = _item("7", ["https://example.com/a"])
+    body = "The piece argues that distribution beats technology. " * 20
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article", url="https://example.com/a", title="Real", text=body
+            )
+        ],
+    )
+    store = {"7": item}
+
+    assert revalidate_stored_bodies(store).items == []
+    source = store["7"].content.sources[0]
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == body  # byte-identical: revalidation never rewrites a good body
+
+
+def test_revalidate_keeps_a_real_article_that_merely_carries_one_cookie_line():
+    """Measured false-reject guard: the platform.claude.com docs page prepends a cookie banner to
+    genuine documentation. ONE chrome marker is page furniture, not a wall."""
+    item = _item("7", ["https://platform.claude.com/docs/x"])
+    body = (
+        "We use cookies to deliver and improve our services. You can read our Cookie Policy "
+        "here. " + "The outcome elevates a session from conversation to work. " * 20
+    )
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://platform.claude.com/docs/x",
+                title="Define outcomes",
+                text=body,
+            )
+        ],
+    )
+    assert revalidate_stored_bodies({"7": item}).items == []
+
+
+def test_caption_contract_is_bookkeeping_not_material_content():
+    """THE REGRESSION THIS DESIGN NEARLY SHIPPED.
+
+    Stamping the contract on a source whose captions are byte-identical must NOT
+    read as a material change. If it does, every `redescribe-frames` run bumps
+    `content.fetched_at` on every source it touches and re-enriches the whole
+    video corpus for nothing.
+
+    The equality assertion at the end, BY ITSELF, is VACUOUS: pydantic v2
+    defaults to `extra="ignore"` at runtime, so if `caption_contract` were
+    nested on `VideoFrame` instead of on `ContentSourceSuccess`, the
+    `caption_contract=...` kwarg below would be silently DROPPED by the
+    constructor, `before` and `after` would come out byte-identical for
+    entirely the WRONG reason, and the equality would pass regardless of
+    whether the design is actually correct. The three structural assertions
+    below are what actually pin the design (field on the right model, absent
+    from the wrong one, deny-listed); do not "simplify" them away as redundant
+    with the equality — they are the only thing that makes the equality mean
+    anything.
+    """
+    from xbrain.fetch import _BOOKKEEPING_FIELDS, _sources_materially_equal
+    from xbrain.models import FRAME_CAPTION_CONTRACT, ContentSourceSuccess, VideoFrame
+
+    # PLACEMENT IS THE POINT, and the behavioural assertion below cannot see it:
+    # pydantic v2 ignores unknown kwargs at runtime, so with `caption_contract`
+    # nested on `VideoFrame` the constructor call below would silently DROP it,
+    # both sources would come out identical, and the equality would pass for
+    # entirely the wrong reason. These three assertions are what actually pin the
+    # design; the equality then pins the behaviour that design buys.
+    assert "caption_contract" in ContentSourceSuccess.model_fields
+    assert "caption_contract" not in VideoFrame.model_fields
+    assert "caption_contract" in _BOOKKEEPING_FIELDS
+
+    frames = [VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description="same")]
+    before = ContentSourceSuccess(
+        kind="x_video", url="https://x.com/a/status/1", text="t", frames=frames
+    )
+    after = ContentSourceSuccess(
+        kind="x_video",
+        url="https://x.com/a/status/1",
+        text="t",
+        frames=frames,
+        caption_contract=FRAME_CAPTION_CONTRACT,
+    )
+    assert _sources_materially_equal([before], [after])
+
+
+def test_a_changed_caption_IS_material_content():
+    """The other half: the stamp is excluded, the caption text is not."""
+    from xbrain.fetch import _sources_materially_equal
+    from xbrain.models import ContentSourceSuccess, VideoFrame
+
+    def _source(description: str) -> ContentSourceSuccess:
+        return ContentSourceSuccess(
+            kind="x_video",
+            url="https://x.com/a/status/1",
+            text="t",
+            frames=[
+                VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description=description)
+            ],
+        )
+
+    assert not _sources_materially_equal([_source("old")], [_source("new")])

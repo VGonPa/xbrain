@@ -695,7 +695,7 @@ def _decode_image(data: bytes) -> tuple[int, int, str] | None:
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
-    """Write `data` to `path` atomically (tmp file + rename).
+    """Write `data` to `path` atomically (tmp file + rename), skipping no-ops.
 
     Atomic write mirrors `xbrain.store._atomic_write`: a Ctrl-C between
     `open` and `write_bytes` would leave a zero-byte partial file that the
@@ -705,7 +705,37 @@ def _write_bytes(path: Path, data: bytes) -> None:
     Orphan `.part` files left behind by a hard interruption (SIGKILL, OOM)
     that bypassed our `except BaseException` cleanup are swept on the next
     `download_all` entry — see `_sweep_part_orphans`.
+
+    A byte-identical rewrite returns early instead of replacing the file.
+    `os.replace` installs a fresh inode even when nothing changed, and
+    `download_all` — idempotent at the item level — re-downloads every photo
+    on a full refresh, because the refresh rebuilds the item state. That is
+    thousands of no-op overwrites within minutes.
+
+    What this skip is NOT: the cause of the conflict copies that filled the
+    Obsidian vault. That damage is `generate._mirror_file`'s alone, and the
+    measurement separates them cleanly — `data/media/`, the tree THIS function
+    writes, held 0 files matching iCloud's `name N.ext` conflict pattern, while
+    the vault's `_media/` held 43,791. `data_dir` is a path under the repo, not
+    under the synced vault, so no sync client has ever watched these writes.
+
+    It is still worth skipping. The writes are pure waste either way, and the
+    function makes no assumption about where `data_dir` points: someone whose
+    store DOES live in a synced or backed-up tree gets the same protection
+    `_mirror_file` gets, for free.
+
+    The size check short-circuits before the read, so a differing payload is
+    rejected from metadata alone. It does not spare the common case, which is
+    an identical file whose size matches and whose bytes are therefore read —
+    cheap here, because `data` is already in memory and only the on-disk side
+    is read. A stat/read failure is not fatal: we fall through and write,
+    preserving the previous behaviour.
     """
+    try:
+        if path.stat().st_size == len(data) and path.read_bytes() == data:
+            return
+    except OSError:
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".part")
     try:

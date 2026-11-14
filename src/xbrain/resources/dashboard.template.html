@@ -75,6 +75,10 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
 .phead .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);display:block;margin-bottom:7px}
 .phead h3{font-family:var(--display);font-weight:600;font-size:20px;letter-spacing:-.005em;line-height:1.1}
 .phead .sub{font-size:12px;color:var(--ink-faint);text-align:right;white-space:nowrap}
+/* verification caveat line — the numbers above are meaningless without it */
+.vnote{font-size:12.5px;color:var(--ink-muted);margin:2px 24px 22px;line-height:1.6}
+.vnote b{color:var(--ink);font-weight:600}
+.vnote .stale{color:var(--sand)}
 .chart{width:100%}
 
 /* topic controls */
@@ -210,6 +214,12 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div class="panel">
       <div class="phead"><div><span class="kick">08 · Sources</span><h3>Top linked domains</h3></div><div class="sub">external · x.com excluded</div></div>
       <div class="chart" id="c-domains" style="height:340px"></div>
+    </div>
+
+    <div class="panel span2">
+      <div class="phead"><div><span class="kick">09 · Verification</span><h3>LLM-as-judge coverage</h3></div><div class="sub" id="verify-sub">outputs judged vs. unjudged</div></div>
+      <div class="chart" id="c-verify" style="height:220px"></div>
+      <p class="vnote" id="verify-note"></p>
     </div>
   </section>
 
@@ -385,6 +395,33 @@ chDom.setOption({
   label:{show:true,position:'right',color:C.faint,fontFamily:MONO,fontSize:11,formatter:p=>nf(p.value)}}]});
 chDom.on('click',p=>{if(p.data&&p.data.domain)openDomain(p.data.domain);});
 
+/* 09 · verification — coverage of `xbrain verify`, drawn as ONE full-width bar so
+   the judged slice is read against the whole population and never on its own. */
+const V=DATA.verification||{outputs:0,judged:0,unjudged:0,stale:0,coverage_pct:0,verdicts:{}};
+const vSeg=[['PASS',V.verdicts.PASS||0,C.saved],['REVIEW',V.verdicts.REVIEW||0,C.sand],
+            ['FAIL',V.verdicts.FAIL||0,C.failed],['UNJUDGED',V.unjudged||0,'#2A251C']];
+document.getElementById('verify-sub').textContent=
+ nf(V.judged)+' of '+nf(V.outputs)+' outputs · '+V.coverage_pct+'% coverage';
+const chVer=mk('c-verify');
+chVer.setOption({
+ grid:{left:16,right:16,top:34,bottom:10},
+ legend:{top:0,left:16,textStyle:{color:C.muted,fontFamily:MONO,fontSize:11},icon:'roundRect',
+   itemWidth:10,itemHeight:10},
+ tooltip:{...TIP,trigger:'item',formatter:p=>p.seriesName+' · '+nf(p.value)+
+   (V.outputs?' ('+(p.value/V.outputs*100).toFixed(1)+'%)':'')},
+ xAxis:{type:'value',max:V.outputs||1,show:false},
+ yAxis:{type:'category',data:[''],show:false},
+ series:vSeg.map(([name,value,color],i)=>({
+   name,type:'bar',stack:'v',data:[value],barWidth:44,
+   itemStyle:{color,borderRadius:i===0?[4,0,0,4]:(i===vSeg.length-1?[0,4,4,0]:0)}}))});
+document.getElementById('verify-note').innerHTML=
+ 'Each output — a summary, a topics assignment or a video digest — is judged separately '+
+ 'against its own source. <b>'+nf(V.unjudged)+'</b> carry no current verdict, so nothing '+
+ 'is known about them either way.'+
+ (V.stale?' <span class="stale">'+nf(V.stale)+' stored verdict'+(V.stale===1?'':'s')+
+  ' went stale</span> — the output was re-generated after being judged, so the verdict '+
+  'no longer describes what you read here and counts as unjudged.':'');
+
 /* ===== unified drill-down drawer ===== */
 const drawer=document.getElementById('drawer'),scrim=document.getElementById('scrim');
 function openDrawer(kick,title,meta,html){
@@ -432,7 +469,7 @@ scrim.onclick=closeDrawer;
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
 /* headless screenshot hooks */
 Object.assign(window,{__openTopic:openTopic,__openMonth:openMonth,__openPhotos:openPhotos,__openLongform:openLongform,__openAuthor:openAuthor});
-addEventListener('resize',()=>{['c-growth','c-activity','c-sources','c-topics','c-longform','c-media','c-authors','c-domains'].forEach(id=>{const el=document.getElementById(id);if(el&&echarts.getInstanceByDom(el))echarts.getInstanceByDom(el).resize();});});
+addEventListener('resize',()=>{['c-growth','c-activity','c-sources','c-topics','c-longform','c-media','c-authors','c-domains','c-verify'].forEach(id=>{const el=document.getElementById(id);if(el&&echarts.getInstanceByDom(el))echarts.getInstanceByDom(el).resize();});});
 </script>
 </body>
 </html>

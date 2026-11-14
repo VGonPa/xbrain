@@ -17,6 +17,16 @@ The `[dev]` extra above also installs the quality-gate tools (`poe`, `ruff`,
 Copy `config.toml.example` to `config.toml` and fill in your own values. That
 file is not tracked by git.
 
+## Branches: open your pull request against `develop`
+
+`main` holds the released versions; `develop` is where work is integrated. Branch
+from `develop` and target your pull request at `develop` — never at `main`.
+`develop` reaches `main` only through a release pull request.
+
+Both branches are protected: the `quality` check must pass and the branch must be
+up to date with its base before merging. A pull request from a fork runs the check
+once a maintainer approves the workflow run.
+
 ## Before opening a pull request
 
 - Run the full quality gate: `uv run poe check`. It must be green — warnings are
@@ -28,13 +38,20 @@ file is not tracked by git.
   test-first.
 - Keep the PR focused on one change. No drive-by refactors.
 - Describe what changed and why, in your own words.
+- **Watch every new test fail before you make it pass.** A test that is green before the
+  fix exists is testing nothing — this repo has shipped six of them, each satisfied for
+  the wrong reason. See *Rules paid for in blood* in `CLAUDE.md`.
+- **Run the suite on the merge result, not just on your branch.** Two PRs, each green
+  alone, have already merged into a red `develop`.
 
 ## Safety: destructive operations auto-snapshot
 
 Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`,
-`refresh-media`, `media`, `describe`, `download-videos`, `digest-video`) copy the
-full `data/` directory to
-`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`download-videos`
+`refresh-media`, `media`, `describe`, `download-videos`, `digest-video`,
+`video-digest --apply`) copy the full `data/` directory to
+`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`video-digest`
+snapshots only on `--apply` — the branch that writes each `source.digest` — never on
+plain worksheet export; `verify` writes only its report and is not destructive.) (`download-videos`
 takes its snapshot *after* the interactive size-gate confirmation, so a declined
 run leaves no stray snapshot — but always before the first byte is written.) If your change introduces or modifies a destructive
 operation, **wire the auto-snapshot** — see `_auto_snapshot` in `src/xbrain/cli.py`
@@ -146,9 +163,13 @@ description from **stdout**. The failure contract mirrors the transcriber: a
 `VisionFailed`, never a silent empty description (that would drop a slide's
 content invisibly). A per-video `ffmpeg` failure (`FrameExtractionFailed`) or a
 `VisionFailed` drops the visual layer for that one video (logged) while the
-transcript still attaches. The layer is **content-aware**: a talking-head /
-interview video is detected (`classify_visual`) and its visual layer is skipped
-with a logged reason, so vision calls are never wasted on camera-cut noise. If
+transcript still attaches. The layer is **content-aware** (`classify_visual`):
+slides are described; a non-slide video is skipped as a talking head, with a
+logged reason, only when it has speech, since the transcript already carries it
+and vision calls would be wasted on camera-cut noise; a **silent** non-slide
+video (a screen recording, a robot, a GIF) is described as footage, capped by
+`[frames].footage_max_frames`, because its frames are the only record of what it
+shows. If
 your VLM's native CLI differs, point `command` at a thin wrapper that adapts it to
 this `<cmd> <image> → stdout description` contract.
 
@@ -169,6 +190,11 @@ the same bar as hand-written code:
   AI agent") is enough and appreciated.
 - **Do not point agents at this repo's dependencies** or open agent-generated PRs
   to upstream projects from this work.
+- **Point your agent at `CLAUDE.md` § *Rules paid for in blood*.** Seven rules, each one
+  written the day it cost us a wrong answer that CI called green: assert where a value
+  lives (not that a string appears somewhere), never quote a number without saying what
+  it was measured on, bind agreeing components in code rather than prose, and invalidate
+  everything derived from evidence you repair.
 
 ## Adding an output language
 

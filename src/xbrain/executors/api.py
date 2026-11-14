@@ -10,12 +10,24 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Collection, Iterator
 
 from xbrain.executors.base import EnrichmentJudgment
 from xbrain.llm_json import json_from_response
-from xbrain.models import ContentSourceSuccess, Item, MediaPhotoDescribed, Topic
+from xbrain.models import (
+    LINK_CONTENT_KINDS,
+    QUOTED_CONTENT_KINDS,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    FailureReason,
+    Item,
+    MediaPhotoDescribed,
+    Topic,
+    VideoFrame,
+)
 from xbrain.rubrics import (
     ARTICLE_CHAR_LIMIT,
+    FRAME_DESC_CHAR_LIMIT,
     TRANSCRIPT_CHAR_LIMIT,
     load_rubric,
     truncate_transcript,
@@ -65,6 +77,84 @@ def _system_prompt(language: str) -> str:
     )
 
 
+# The content kinds whose body is a VIDEO. Its own frozenset, for the same reason
+# `LINK_CONTENT_KINDS` and `QUOTED_CONTENT_KINDS` are: every surface must select the
+# video by the SAME predicate, and a string literal repeated at each call site is how
+# two of them end up disagreeing.
+_VIDEO_CONTENT_KINDS: frozenset[str] = frozenset({"x_video"})
+
+
+def iter_content_sources(
+    item: Item, kinds: Collection[str]
+) -> Iterator[tuple[int, ContentSourceSuccess]]:
+    """Every readable content source of one of `kinds`, WITH its index in `content.sources`.
+
+    THE atomic walk over `content.sources`, shared by the enrichment selectors below and
+    by the knowledge-surface emitter (`xbrain.knowledge.surfaces`). The spec (§2.2) forbids
+    two hand-written lists of what counts as a source; the selectors collapse this walk in
+    three different ways (first-only, truncated, text-required), so what they share has to
+    be the walk itself, not any one of its collapses.
+
+    THREE PROPERTIES ARE LOAD-BEARING and none of them survives a `list[str]`:
+
+    * the INDEX is the position in `content.sources` — a `locator.source_index` built from
+      a counter over the filtered matches points at the wrong source as soon as one entry
+      is a failure;
+    * the URL rides on the yielded source — `source_key = sha1(kind\0url)` needs it, and
+      it is the only stable handle on a source (the list ORDER is rewritten by `fetch`);
+    * MULTIPLICITY is preserved — 119 items in the corpus carry more than one source, and
+      the emitter must surface every one of them.
+
+    Deliberately does NOT filter on `text`. A no-speech `x_video` (107 of 259) has an empty
+    transcript and real frames, and `_video_source` has always returned it; filtering here
+    would silently drop those videos and their frame descriptions. Callers that need a body
+    apply that filter themselves — which is exactly what makes the three collapses possible
+    over one walk.
+    """
+    if item.content is None:
+        return
+    for index, source in enumerate(item.content.sources):
+        if isinstance(source, ContentSourceSuccess) and source.kind in kinds:
+            yield index, source
+
+
+def iter_described_photos(item: Item) -> Iterator[tuple[int, MediaPhotoDescribed]]:
+    """Every content-bearing described photo, WITH its index in `item.media`.
+
+    THE atomic walk over `item.media`, and the home of the non-decorative seam: decorative
+    photos (avatars, reaction memes) and empty descriptions are filtered HERE, once, so the
+    enrichment prompt and the knowledge emitter cannot disagree about whether an avatar is
+    indexable content (spec §4: decorative descriptions emit no chunks).
+
+    The index is the position in `item.media`, not a counter over the matches — a video
+    entry, a merely-downloaded photo or a decorative one shifts it, and the emitter builds
+    `locator.media_index` from it.
+    """
+    for index, entry in enumerate(item.media):
+        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description:
+            yield index, entry
+
+
+def iter_video_frames(
+    item: Item,
+) -> Iterator[tuple[int, ContentSourceSuccess, int, VideoFrame]]:
+    """Every captioned key frame as `(source_index, source, frame_index, frame)`.
+
+    THE atomic walk over the frames of every `x_video` source. `_video_frame_descriptions`
+    flattens this into one `list[str]` across all videos, which makes it impossible to say
+    WHICH video and WHICH slide produced a caption — and a frame's `source_key` is
+    `<the video's source_key>.f<frame index>`, so both are required.
+
+    `frame_index` is the position in `source.frames`, preserved across the empty-caption
+    filter: a frame whose vision pass found nothing to say is skipped, and the next one is
+    still reported at its real index.
+    """
+    for source_index, source in iter_content_sources(item, _VIDEO_CONTENT_KINDS):
+        for frame_index, frame in enumerate(source.frames):
+            if frame.description:
+                yield source_index, source, frame_index, frame
+
+
 def _content_image_descriptions(item: Item) -> list[str]:
     """Return non-decorative image descriptions on the item, in media order.
 
@@ -74,11 +164,48 @@ def _content_image_descriptions(item: Item) -> list[str]:
     image happened to depict. Items without described photos return an
     empty list.
     """
-    return [
-        entry.description
-        for entry in item.media
-        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
-    ]
+    return [entry.description for _index, entry in iter_described_photos(item)]
+
+
+def _video_frame_descriptions(item: Item) -> list[str]:
+    """Return the key-frame descriptions of every `x_video` source, in order.
+
+    These are the slides/screens a video SHOWS — visual topic signal present even
+    when the video has no speech (`has_speech=False`, no transcript). They live on
+    the `x_video` `ContentSourceSuccess.frames` list, a DIFFERENT field from the
+    `MediaPhotoDescribed` photo descriptions on `item.media`
+    (`_content_image_descriptions`). Empty-description frames (the VLM found nothing
+    to say, or the frame was unreadable) are skipped.
+    """
+    return [frame.description for _si, _src, _fi, frame in iter_video_frames(item)]
+
+
+def _video_frames_section(item: Item) -> list[str]:
+    """Build the `Video frames` block bounded to `FRAME_DESC_CHAR_LIMIT`, or [].
+
+    A slide-heavy or screen-share talk can dedup to dozens of distinct frames; the
+    block is capped so it can't crowd the transcript out of the per-item prompt.
+    When the cap clips frames, an explicit `[… N further frames omitted …]` marker
+    signposts the cut so the LLM does not read it as the end of the deck. At least
+    one frame is always kept, even if a single description exceeds the cap.
+    """
+    descriptions = _video_frame_descriptions(item)
+    if not descriptions:
+        return []
+    lines = ["", "Video frames (slides/screens shown in the video):"]
+    used = 0
+    kept = 0
+    for description in descriptions:
+        line = f"- {description}"
+        if kept > 0 and used + len(line) > FRAME_DESC_CHAR_LIMIT:
+            break
+        lines.append(line)
+        used += len(line)
+        kept += 1
+    omitted = len(descriptions) - kept
+    if omitted > 0:
+        lines.append(f"[… {omitted} further frames omitted …]")
+    return lines
 
 
 def _images_section(item: Item) -> list[str]:
@@ -97,6 +224,196 @@ def _images_section(item: Item) -> list[str]:
     return lines
 
 
+# The rule half of every "this was never downloaded" guardrail note. One wording,
+# shared by every LLM surface (api prompt, enrich worksheet, verify source), so the
+# generator and the judge read the SAME contract and the judge can hold the
+# generator to it.
+_UNFETCHED_RULE = (
+    "Beyond the URL/domain itself, nothing about it is known — never describe, "
+    "reconstruct or guess it from the URL, the domain or world knowledge."
+)
+
+# The note stamped when an item quotes a post whose content is not on the item —
+# X tombstoned it (deleted), refused it (protected/suspended) or hydrated nothing.
+# Without this marker the generator is ordered (rubric-summary) to summarise content
+# that is not in its inputs — an invitation to invent. It fires ONLY on that state:
+# when the quoted body IS present, stamping it would tell the generator to ignore
+# its best evidence.
+QUOTED_CONTENT_UNFETCHED_NOTE = f"The quoted post's content was NOT fetched. {_UNFETCHED_RULE}"
+
+# The stem of the ONE label under which the quoted post travels, on every surface.
+QUOTED_LABEL = "Quoted post"
+
+# `bookmark_folder` is the USER'S OWN filing label — how HE sorted the post, not a fact the
+# post asserts about the world. It is deliberately NO evidence surface (`xbrain.evidence`),
+# and the judge never sees it. But both generators ship it (it is genuine topic signal), so
+# both must say what it is — otherwise a generator grounds a claim in it and the judge,
+# which never saw it, flags that claim: a false FAIL by construction. ONE wording, shared,
+# so the two generators cannot drift.
+BOOKMARK_FOLDER_RULE = (
+    "the user's own filing label — topic signal only, never a name and never a fact"
+)
+
+
+def fetched_link_sources(item: Item) -> int:
+    """How many fetched LINK-content bodies the item carries (`LINK_CONTENT_KINDS`).
+
+    A `thread` / `quoted_tweet` / `x_video` source is NOT a fetched link, so it can
+    never mask a link nobody downloaded.
+    """
+    if item.content is None:
+        return 0
+    return sum(
+        1
+        for src in item.content.sources
+        if isinstance(src, ContentSourceSuccess) and src.kind in LINK_CONTENT_KINDS and src.text
+    )
+
+
+def links_content_unfetched(item: Item) -> bool:
+    """True when the item links out and at least one link's content is missing.
+
+    A COUNT comparison, not a per-link URL match: pairing `item.links` to fetched
+    sources by URL is unreliable (a `t.co` shortlink vs the resolved URL), but
+    counting is exact — fewer fetched link bodies than links means some link's
+    content is missing, whether that is all of them or one of two.
+    """
+    return bool(item.links) and fetched_link_sources(item) < len(item.links)
+
+
+# Why the fetch produced nothing, in the generator's and the judge's language. Each clause
+# states a FACT about the page, recorded by the fetcher — never a guess.
+#
+# The distinction earns its keep: "the page is dead" and "our extractor could not render the
+# page" are different facts, and only the first says anything about the page itself. Collapsing
+# both to a bare "NOT fetched" leaves the generator unable to say anything true about a link it
+# can see, which is exactly the pressure that makes it invent from the slug.
+_FAILURE_CLAUSE: dict[FailureReason, str] = {
+    "not_found": "the page no longer exists (HTTP 404)",
+    "forbidden": "access was denied (paywall or block)",
+    "paywall": "the page is behind a paywall",
+    "blocked_interstitial": "the page served a cookie/login wall, not an article",
+    "js_required": "the page could not be extracted",
+    "empty_content": "the page could not be extracted",
+    "timeout": "the fetch failed",
+    "dns_error": "the fetch failed",
+    "unknown_error": "the fetch failed",
+}
+
+
+def _failure_clause(item: Item) -> str | None:
+    """The recorded reason(s) the linked content is missing, or None when the fetcher never
+    attempted the link (no failure source) — in which case there is no cause to name, and
+    inventing one would be the very sin the note exists to forbid."""
+    if item.content is None:
+        return None
+    reasons = [
+        _FAILURE_CLAUSE[src.failure_reason]
+        for src in item.content.sources
+        if isinstance(src, ContentSourceFailure)
+        and src.kind == "external_article"  # a failed thread/quoted_tweet is not a LINK failure
+        and src.failure_reason in _FAILURE_CLAUSE
+    ]
+    if not reasons:
+        return None
+    return "; ".join(dict.fromkeys(reasons))  # de-duped, order preserved
+
+
+def unfetched_links_note(item: Item) -> str | None:
+    """The guardrail note for an item whose linked content is missing, or None.
+
+    A PARTIAL fetch states the counts: a `Linked article` block IS present then, and
+    would otherwise lend its credibility to a claim about the link nobody fetched.
+
+    When the fetcher recorded WHY, the note names it (`_failure_clause`). The rule is
+    unconditional — naming the cause never licenses describing the content.
+    """
+    if not links_content_unfetched(item):
+        return None
+    total, fetched = len(item.links), fetched_link_sources(item)
+    if fetched:
+        headline = (
+            f"Only {fetched} of {total} linked pages were fetched — the content of "
+            f"the other {total - fetched} was NOT fetched, and the fetched article "
+            "is no evidence for it."
+        )
+    else:
+        headline = "The linked content was NOT fetched."
+    clause = _failure_clause(item)
+    if clause:
+        headline = f"{headline[:-1]} — {clause}."
+    return f"{headline} {_UNFETCHED_RULE}"
+
+
+def quoted_content_unfetched(item: Item) -> bool:
+    """True when the item quotes a post whose content is not on the item."""
+    if not item.quoted_id:
+        return False
+    if item.content is None:
+        return True
+    return not any(
+        isinstance(src, ContentSourceSuccess) and src.kind == "quoted_tweet" and src.text
+        for src in item.content.sources
+    )
+
+
+def first_source_text(item: Item, kinds: Collection[str]) -> str | None:
+    """The first success source of one of `kinds` that carries text, truncated, or None.
+
+    The one reader every surface shares (api prompt, worksheet, judge source), so a
+    thread / quoted post / linked article is never picked up under another's label.
+    """
+    for _index, src in iter_content_sources(item, kinds):
+        if src.text:
+            return src.text[:ARTICLE_CHAR_LIMIT]
+    return None
+
+
+def thread_text(item: Item) -> str | None:
+    """The item's own expanded thread body, truncated, or None."""
+    return first_source_text(item, _THREAD_KINDS)
+
+
+def quoted_text(item: Item) -> str | None:
+    """The quoted post's body, truncated, or None when it could not be fetched."""
+    return first_source_text(item, QUOTED_CONTENT_KINDS)
+
+
+def quoted_source(item: Item) -> ContentSourceSuccess | None:
+    """The item's readable quoted-post source, or None.
+
+    THE selector. Every surface asks this one question, so "is the quoted content
+    here?" cannot get five different answers.
+    """
+    for _index, src in iter_content_sources(item, QUOTED_CONTENT_KINDS):
+        if src.text:
+            return src
+    return None
+
+
+def quoted_attribution(item: Item) -> str | None:
+    """`Quoted post — @handle (Name)`, or None when there is no readable quote.
+
+    THE label, built once and read by all three LLM surfaces (api prompt, enrich
+    worksheet, judge source) — the whole point being that they cannot drift. The
+    author is the payload: a quoted post is a THIRD PARTY's, and #86's attribution
+    rule ("the poster is not the author of the quoted content") is only enforceable
+    if every surface is told, in the same words, WHO that third party is.
+
+    Degrades to the bare `Quoted post` when X hydrated a body but no author — naming
+    nobody, rather than letting the poster's identity silently fill the hole.
+    """
+    src = quoted_source(item)
+    if src is None:
+        return None
+    if src.author is None:
+        return QUOTED_LABEL
+    return f"{QUOTED_LABEL} — @{src.author.handle} ({src.author.name})"
+
+
+_THREAD_KINDS: frozenset[str] = frozenset({"thread"})
+
+
 def _links_section(item: Item) -> list[str]:
     """Build the `Links in the post:` block, or an empty list when not applicable."""
     if not item.links:
@@ -106,29 +423,111 @@ def _links_section(item: Item) -> list[str]:
         "Links in the post (the domain is topic signal even when the article body is unavailable):",
     ]
     lines += [f"- {ln.url}  (domain: {ln.domain})" for ln in item.links]
+    note = unfetched_links_note(item)
+    if note:
+        lines += ["", note]
     return lines
 
 
-def _article_sections(item: Item) -> list[str]:
-    """Build one block per successfully-fetched article. Empty if no content.
+def _thread_section(item: Item) -> list[str]:
+    """Build the `Thread:` block — the poster's OWN expanded thread text.
 
-    `x_video` sources are excluded here — a video transcript is manufactured
-    text, not a linked article, and gets its own labelled `Video transcript:`
-    block (`_video_transcript_section`). Rendering it as a "Linked article"
-    would mislabel the content type to the LLM.
+    Labelled as a thread, never as a `Linked article`: it is real evidence (full
+    text, by the same author), but it is not the content of any link the post points
+    at, and passing it off as one would tell the LLM a page was downloaded when none
+    was.
+    """
+    text = thread_text(item)
+    if not text:
+        return []
+    return ["", "Thread (full text by the same author):", text]
+
+
+def _quoted_section(item: Item) -> list[str]:
+    """Build the quoted-post block: its body under its author's name, else the
+    NOT-fetched marker. Two DIFFERENT states, both represented.
+
+    The body reaches the LLM under its OWN label — never `Linked article` (it is not a
+    link's content) and never unlabelled (it is not the poster's words). The label
+    comes from `quoted_attribution`, the same builder the worksheet and the judge read,
+    so the generator and the judge are held to one contract.
+    """
+    if not item.quoted_id:
+        return []
+    label = quoted_attribution(item)
+    body = quoted_text(item)
+    if not (label and body):
+        return ["", f"{QUOTED_LABEL} — content NOT fetched:", QUOTED_CONTENT_UNFETCHED_NOTE]
+    source = quoted_source(item)
+    if source is not None and source.author is not None:
+        rule = f"These are @{source.author.handle}'s words, NOT the poster's"
+    else:
+        # X gave us the body but no author. The label already names nobody; the rule must
+        # say so OUT LOUD. "These are that account's words" would point at an account
+        # that was never named — and the summary rubric, which tells the generator to
+        # attribute the quoted words to the account in the label, would be an order to
+        # invent one.
+        rule = (
+            "The author of this quoted post is UNKNOWN — do not name one, and do not "
+            "attribute these words to the poster"
+        )
+    return ["", f"{label} — the content this post is sharing. {rule}:", body]
+
+
+def _article_sections(item: Item) -> list[str]:
+    """Build one block per successfully-fetched LINKED article. Empty if no content.
+
+    Only `LINK_CONTENT_KINDS` are rendered here. A video transcript, a thread and a
+    quoted post are manufactured or own-authored text, not a linked article; each has
+    its own labelled block (`_video_transcript_section`, `_thread_section`,
+    `_quoted_section`). Rendering any of them as a "Linked article" would mislabel the
+    content type to the LLM — and tell it a link was fetched when it was not.
     """
     if item.content is None or not item.content.sources:
         return []
     lines: list[str] = []
     for src in item.content.sources:
         # Narrow to the success variant — only those carry `title`/`text`.
-        if isinstance(src, ContentSourceSuccess) and src.kind != "x_video" and src.text:
+        if isinstance(src, ContentSourceSuccess) and src.kind in LINK_CONTENT_KINDS and src.text:
             lines += [
                 "",
                 f"Linked article ({src.title or src.url}):",
                 src.text[:ARTICLE_CHAR_LIMIT],
             ]
     return lines
+
+
+def _video_source(item: Item) -> ContentSourceSuccess | None:
+    """The item's first `x_video` content source, or None.
+
+    Defined HERE, in the module every evidence reader already imports, because it was
+    defined TWICE — identically — in `worksheet.py` and `video_digest.py`. Two copies of
+    "which source is the video" is the same drift, one level down, that `xbrain.evidence`
+    exists to end. One definition; every consumer imports it.
+    """
+    for _index, source in iter_content_sources(item, _VIDEO_CONTENT_KINDS):
+        return source
+    return None
+
+
+def _video_title_section(item: Item) -> list[str]:
+    """Build the `Video title:` block — the video's own title, when it has one.
+
+    An ADMITTED evidence surface (`xbrain.evidence`): the digest worksheet has always
+    shipped it and the judge's `_source_text` carries `[Video title]`. The `api` prompt
+    was the one generator that never emitted it — so an `--executor api` summary would be
+    judged against a title its generator was never shown, which is the "judge sees MORE
+    than the generator" pathology the evidence contract exists to kill, arriving through
+    the one generator the old contract test could not see (it OR-ed the two generators
+    together, so the worksheet's copy covered for this one).
+
+    0 of 2,168 items carry a title today, so this is dormant — and would have gone live,
+    silently, on the first backfill that populates them.
+    """
+    source = _video_source(item)
+    if source is None or not source.title:
+        return []
+    return ["", f"Video title: {source.title}"]
 
 
 def _video_transcript_section(item: Item) -> list[str]:
@@ -158,13 +557,24 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
         "Controlled vocabulary (use only these slugs):",
         _vocab_block(vocab),
         "",
-        f"Post author: @{item.author.handle}",
+        f"Post author: @{item.author.handle} ({item.author.name})",
         f"Post text:\n{item.text}",
     ]
     if item.bookmark_folder:
-        parts += ["", f"Saved by the user in the bookmark folder: {item.bookmark_folder}"]
+        # The user's OWN filing label — organisational metadata, NOT evidence about the
+        # world (see `xbrain.evidence`: it is deliberately no surface). Topic signal only:
+        # a folder called "ai-industry" must never ground a name or a fact in the output.
+        parts += [
+            "",
+            f"Saved by the user in the bookmark folder: {item.bookmark_folder} "
+            f"({BOOKMARK_FOLDER_RULE})",
+        ]
+    parts += _thread_section(item)
     parts += _images_section(item)
+    parts += _video_title_section(item)
     parts += _video_transcript_section(item)
+    parts += _video_frames_section(item)
+    parts += _quoted_section(item)
     parts += _links_section(item)
     parts += _article_sections(item)
     return "\n".join(parts)

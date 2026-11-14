@@ -1,10 +1,52 @@
 name: Quality
 on:
+  # `pull_request` ALREADY tests a merge result: GitHub builds `refs/pull/N/merge` — the PR
+  # head merged into the base — and checks THAT out, not the bare PR head. The defect is not
+  # that the merge goes untested. It is that the merge ref is computed when the run is
+  # TRIGGERED, and is never recomputed when the base moves underneath it.
+  #
+  # #103, to the second: #94's green was measured against a base that did not yet contain
+  # #97. #97 landed at 14:01:08Z. #94 merged at 14:04:08Z on that now-stale green. Merging
+  # #97 does not re-trigger #94's checks, so nothing ever ran the two together — and
+  # `develop` went red with no textual conflict anywhere for git to complain about.
+  #
+  # `push` is therefore a DETECTOR: every push to develop/main IS the true merge result, and
+  # this run tests it — after the fact. The PREVENTER is branch protection's `strict`
+  # (require branches up to date before merging), which forces the merge ref to be
+  # recomputed against the current base first. They are complementary: `strict` stops the
+  # stale merge landing; `push` catches whatever lands anyway. Neither replaces the other.
+  #
+  # `VGonPa/umbrella-*` is the third gated shape, and it is gated for a DIFFERENT reason than
+  # develop/main. A large initiative is delivered as a sequence of small child PRs onto a
+  # long-lived umbrella branch, and a PR whose base is a feature branch runs NO gate at all
+  # while GitHub still reports `mergeStateStatus: CLEAN` — rule 14. `CLEAN` there does not mean
+  # "everything required passed", it means "nothing was required". Listing the umbrella under
+  # `pull_request` is what creates the `quality` check that the umbrella's own branch protection
+  # then REQUIRES; without this line that protection would wait forever for a check that never
+  # appears, and every child PR would be permanently unmergeable (the shape of rule 12).
+  #
+  # And under `push` for the same reason develop has it: merging child 4 and child 5, each green
+  # against the umbrella it saw, can leave the umbrella RED with no textual conflict anywhere —
+  # rule 4, one level down. The push run IS that merge result. Cost is bounded:
+  # announce_red_branch.sh keys its issue on `ci-red-<branch>`, one per branch, auto-closed.
+  push:
+    branches: [develop, main, "VGonPa/umbrella-*"]
   pull_request:
-    branches: [develop, main]
+    branches: [develop, main, "VGonPa/umbrella-*"]
 jobs:
+  # The job id IS the required status check name on develop/main. Renaming it (or giving it
+  # a `name:`) makes the required check never appear, and GitHub then waits for it forever:
+  # every merge blocks, permanently. Change the branch-protection setting FIRST if you ever
+  # must rename it. Guarded by tests/test_ci_workflow.py.
   quality:
     runs-on: ubuntu-latest
+    permissions:
+      # A `permissions:` block sets every scope NOT listed to `none` — `contents: read` is
+      # what lets actions/checkout clone the repo, so it is load-bearing, not boilerplate.
+      contents: read
+      # Lets the built-in GITHUB_TOKEN (`github-actions[bot]`) file the red-branch issue
+      # below. No PAT and no bot account, so no second identity to manage.
+      issues: write
     env:
       # Pin the Python hash seed so the gate is byte-reproducible run-to-run
       # (determinism; check.sh pins the same default for local runs).
@@ -15,9 +57,53 @@ jobs:
         uses: astral-sh/setup-uv@v3
       - name: Set up Python
         run: uv python install 3.12
-      - name: Create venv and install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
+      # `uv pip install` is uv's pip-COMPATIBILITY mode: it resolves fresh from
+      # pyproject.toml and never reads uv.lock. With `ruff>=0.5` declared, every run
+      # installed whatever ruff had shipped that morning, and the lockfile committed in
+      # this repo — pinning 0.15.13 — was decorative.
+      #
+      # Measured, this repo, same tree: `uv venv` + `uv pip install -e ".[dev]"` gives
+      # `uv run ruff` == 0.16.5 today (0.16.2 on 2026-08-13); `uv sync --extra dev
+      # --locked` gives 0.15.13. And `uv run` inside check.sh does NOT rescue it: ruff
+      # lives in `optional-dependencies.dev`, an EXTRA, which is not in uv run's default
+      # sync set, so it leaves the pip-installed build exactly where it is.
+      #
+      # The cost was not hypothetical. ruff 0.16 turned UP017 on by default and taught the
+      # formatter to open Markdown, so `develop` went red without a single commit landing
+      # on it: 618 lint errors, plus a gate-integrity test failing on a file-count skew it
+      # was never written to police. develop's last green push run is 2026-07-14 and
+      # nothing had run since, so the drift stayed invisible until the next PR inherited
+      # it and looked like its own fault.
+      #
+      # `--locked` fails the build if uv.lock is stale against pyproject.toml, so the lock
+      # cannot silently rot either. Upgrading stays deliberate and is one command:
+      # `uv lock --upgrade-package ruff`.
+      - name: Install dependencies from the lockfile
+        run: uv sync --extra dev --locked
       - name: Quality gate
         run: bash scripts/check.sh
+
+      # A red PUSH run blocks nothing — the commit has already landed — so it must speak, or
+      # it is detecting into a void. Scoped to `push`: a red PR is already in front of its
+      # author, and alerting on it would file one issue per pushed commit.
+      - name: Announce a red branch
+        if: failure() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/announce_red_branch.sh open
+
+      # A green push on the true merge result disproves the alert, so close it. An alert that
+      # is routinely stale is one people learn to scroll past.
+      - name: Resolve the red-branch alert
+        if: success() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/announce_red_branch.sh close

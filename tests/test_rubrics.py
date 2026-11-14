@@ -1,8 +1,22 @@
 # tests/test_rubrics.py
 from pathlib import Path
 
+import pytest
+
+from xbrain import rubrics as rubrics_module
 from xbrain.models import Topic
 from xbrain.rubrics import load_guardrails, load_rubric, load_vocab, save_vocab
+
+# Every rubric the package ships, by the short name `load_rubric` takes. Globbed
+# from the loader's OWN `_RUBRICS_DIR` — re-deriving the path here would let the
+# two drift apart silently, and a glob that collects nothing would parametrize to
+# an empty list: "1 skipped", exit 0, a guard that guards nothing. Assert
+# non-empty at COLLECTION time so that failure is loud.
+RUBRIC_NAMES = sorted(
+    path.name.removeprefix("rubric-").removesuffix(".md")
+    for path in rubrics_module._RUBRICS_DIR.glob("rubric-*.md")
+)
+assert RUBRIC_NAMES, f"no rubrics collected from {rubrics_module._RUBRICS_DIR}"
 
 
 def test_load_rubric_returns_file_text():
@@ -107,3 +121,392 @@ def test_describe_image_rubric_preserves_placeholder_when_language_none():
     """No-language calls (tests, manual inspection) keep the literal placeholder."""
     text = load_rubric("describe-image")
     assert "{language}" in text
+
+
+def test_video_digest_rubric_loads_and_substitutes_language():
+    """The video-digest rubric ships a `{language}` placeholder the loader must
+    substitute; its structural section keys must reach the LLM."""
+    text = load_rubric("video-digest", language="Spanish")
+    assert "{language}" not in text
+    assert "Spanish" in text
+    assert "Key points" in text
+    assert "What it is" in text
+
+
+def test_video_digest_rubric_preserves_placeholder_when_language_none():
+    text = load_rubric("video-digest")
+    assert "{language}" in text
+
+
+# --- Faithfulness rules (regression guards) ---------------------------------
+#
+# The digest rubric's generic "never invent facts, numbers, names or claims" did
+# not stop the model naming entities the source never names: it does not classify
+# recognising a famous speaker as invention. The explicit, mechanical rule below
+# is what closes that path, so it must survive a well-meaning "simplification".
+
+
+def test_video_digest_rubric_forbids_naming_entities_no_surface_names():
+    """The rule must enumerate the entity kinds that actually leaked, deny that
+    recognition counts as evidence, and offer the neutral-descriptor escape.
+
+    The enumeration IS the mechanism — the generic rule empirically failed — so
+    naming these kinds is load-bearing, not incidental phrasing.
+    """
+    text = load_rubric("video-digest").lower()
+    for entity in ("interviewer", "employer", "publication", "university", "course code"):
+        assert entity in text, f"digest rubric no longer forbids naming an unnamed {entity}"
+    # Recognising who someone probably is must be explicitly disqualified as evidence.
+    assert "world knowledge" in text
+    # Without an escape hatch the model names the entity anyway.
+    assert "neutral descriptor" in text
+
+
+def test_video_digest_rubric_admits_author_metadata_as_evidence():
+    """The evidence set must match what the generator is handed and the judge accepts.
+
+    A clip of a speaker posted by that speaker's own account attributes itself: the
+    author metadata is EVIDENCE (the verify rubric declares the `[Author]` block
+    supported, not world knowledge). A rule bound only to transcript+frames would
+    force "the speaker…" on a self-posted clip AND contradict the judge.
+    """
+    text = load_rubric("video-digest").lower()
+    assert "display name" in text, "digest rubric no longer admits the author metadata as evidence"
+    assert "tweet text" in text, "digest rubric no longer admits the tweet text as evidence"
+
+
+def test_video_digest_rubric_separates_attribution_evidence_from_summary_content():
+    """The tweet/author are evidence for WHO speaks — never content to summarise.
+    Without this the reader collapses "the caption is evidence" into "summarise the
+    caption", which the clickbait-caption rule exists to forbid."""
+    text = load_rubric("video-digest").lower()
+    assert "attribution" in text, "digest rubric no longer separates attribution from content"
+
+
+def test_video_digest_rubric_requires_verbatim_quotes():
+    """Quotes must be reproduced as the transcript renders them — ASR errors included."""
+    text = load_rubric("video-digest").lower()
+    assert "verbatim" in text
+    assert "asr" in text
+
+
+def test_video_digest_rubric_forbids_sharpening_the_source():
+    """No vague→specific resolution, and no specifics the source never states."""
+    text = load_rubric("video-digest").lower()
+    assert "sharpen" in text
+    assert "duration" in text
+    assert "affiliation" in text
+
+
+@pytest.mark.parametrize("name", RUBRIC_NAMES)
+def test_every_rubric_renders_with_its_placeholders_substituted(name: str):
+    """Every shipped rubric loads and leaves no `{language}` placeholder behind."""
+    text = load_rubric(name, language="English")
+    assert text.strip()
+    assert "{language}" not in text
+
+
+def test_verify_rubric_loads_and_substitutes_language():
+    """The verify rubric ships a `{language}` placeholder + names its axes/verdicts."""
+    text = load_rubric("verify", language="Spanish")
+    assert "{language}" not in text
+    assert "Spanish" in text
+    assert "Faithfulness" in text
+    assert "FAIL" in text
+
+
+def test_verify_audit_rubric_loads_and_substitutes_language():
+    """The audit rubric ships a `{language}` placeholder + names CONFIRM/REVOKE."""
+    text = load_rubric("verify-audit", language="Spanish")
+    assert "{language}" not in text
+    assert "Spanish" in text
+    assert "CONFIRM" in text
+    assert "REVOKE" in text
+
+
+def test_verify_rubric_author_block_licenses_only_who_posted():
+    """F2: the `[Author]` block says who POSTED the item — nothing about who wrote or
+    spoke its CONTENT. The two come apart on a repost/quote/clip of someone else: a
+    digest naming the poster as the speaker of a clip is a MISATTRIBUTION the judge
+    caught before this rule existed. The rubric must grant only the true half.
+    """
+    text = load_rubric("verify", language="English").lower()
+    # The permissive wording that licensed attributing anyone's words to the poster.
+    assert "attributing the post to its own author is supported" not in text
+    # What the block DOES establish: who posted it.
+    assert "posted" in text
+    # What it does NOT establish: authorship/voice of the content, on a repost/quote/clip.
+    assert "repost" in text or "quote" in text or "clip" in text
+    assert "speaker" in text
+    assert "does not establish" in text or "not establish" in text
+
+
+def test_summary_rubric_only_summarises_shared_content_when_present():
+    """F3: no fetcher downloads a quoted post, so ordering the generator to
+    'summarise the substantive content being shared' orders it to invent. The rule
+    must be conditional on that content actually being in the source."""
+    text = load_rubric("summary", language="English").lower()
+    assert "summarise the substantive content being shared." not in text
+    assert "when it is present" in text or "when its content is present" in text
+    assert "post's own text" in text
+
+
+# --- Summary faithfulness: the evidence contract (PR-E) ----------------------
+#
+# The summary rubric carried only "never invent facts, numbers or claims" — the same
+# abstraction that failed on digests, because the model does not classify recognising a
+# famous name as inventing. It produced 307 ungrounded names across 2,168 summaries.
+# These guards pin the mechanical rule that replaces it.
+
+
+def test_summary_rubric_declares_its_evidence_surfaces():
+    """The summary's evidence set is WIDER than the digest's: the enrich worksheet ships
+    the fetched article, the poster's own thread and the image descriptions. The rule must
+    ADMIT them — forbidding evidence the generator was correctly given would flag it for
+    doing its job (the exact bug found in the entity checker itself)."""
+    text = load_rubric("summary").lower()
+    for surface in ("display name", "tweet text", "thread", "article", "image descriptions"):
+        assert surface in text, f"summary rubric no longer admits {surface!r} as evidence"
+
+
+def test_summary_rubric_forbids_naming_entities_no_surface_names():
+    """Same mechanism as the digest rubric: the entity enumeration IS the mechanism,
+    since the generic rule empirically failed across 2,168 summaries."""
+    text = load_rubric("summary").lower()
+    for entity in ("interviewer", "employer", "publication", "university", "author"):
+        assert entity in text, f"summary rubric no longer forbids naming an unnamed {entity}"
+    assert "world knowledge" in text
+    assert "neutral descriptor" in text
+
+
+def test_summary_rubric_refuses_the_url_and_domain_as_a_source_of_names():
+    """A link to nytimes.com does not license naming "The New York Times". The generator
+    sees every link's URL+domain; the judge only sees them when the fetch FAILED. Reading a
+    publication's name off a domain is the "Financial Times" failure with extra steps."""
+    text = load_rubric("summary").lower()
+    assert "domain" in text
+    assert "topic signal" in text
+
+
+def test_summary_rubric_keeps_quote_verbatim_and_do_not_sharpen():
+    text = load_rubric("summary").lower()
+    assert "verbatim" in text
+    assert "sharpen" in text
+
+
+def test_summary_rubric_keeps_the_86_attribution_and_unfetched_guardrails():
+    """#86's constraints must survive intact and stay coherent with the new rule: the
+    author block licenses WHO POSTED only, and unfetched content is never reconstructed."""
+    text = load_rubric("summary").lower()
+    assert "posted" in text
+    assert "not fetched" in text or "never fetched" in text
+    assert "reconstruct" in text
+
+
+def test_video_digest_rubric_admits_the_video_title_as_evidence():
+    """The video title is evidence surface #5, and every other component already agreed.
+
+    The digest worksheet has shipped `title` all along (`video_digest.py`), and #86 made
+    the judge emit `[Video title]` — its own comment: "The title reaches the digest
+    generator, so the judge must see it too." Excluding it here left one field with FOUR
+    different rules (generator holds it, rubric forbids it, judge accepts it, checker
+    flags it) — and #91 admits it for the summary of the SAME item, so the two rubrics
+    would contradict each other on one field. 0/195 items carry a title today; this goes
+    live on the first backfill.
+
+    (The enumeration reads SIX surfaces since the rebase, not five: #98 added the quoted
+    post to the judge's `_source_text`, and 45 of the 235 video items are quote-tweets —
+    so the digest gained a sixth surface it must enumerate. Exactly the same argument as
+    the title, one PR later. See `test_video_digest.py::…admits_the_quoted_post…`.)
+    """
+    text = load_rubric("video-digest").lower()
+    assert "video title" in text, "digest rubric no longer admits the video title as evidence"
+    assert "six surfaces" in text
+
+
+def test_verify_rubric_treats_a_url_as_topic_signal_never_as_a_name():
+    """D1 — the deepest defect on the board. `rubric-verify` used to carve out the URL
+    ("unsupported ... beyond the URL/domain itself"), which made the domain EVIDENCE:
+    the judge was structurally unable to flag `Axios` reconstructed from
+    `axios.com/2025/05/28/ai-jobs...`, or `Nature` from `nature.com`. The generator's
+    rubric says the opposite — a domain is topic signal, never a name. Both must now say
+    the same thing, or the judge licenses exactly what the generator is forbidden."""
+    text = load_rubric("verify", language="English")
+    assert "beyond the URL/domain itself" not in text  # the carve-out that excused it
+    lowered = text.lower()
+    assert "topic signal" in lowered
+    # naming the publication/company a link belongs to is UNSUPPORTED
+    assert "publication" in lowered
+    assert "never a name" in lowered or "not a name" in lowered
+
+
+def test_verify_rubric_declares_the_evidence_surfaces_per_target():
+    """The judge must be told WHICH surfaces support a claim, and they differ by target:
+    a digest is judged against the video, a summary also against the article/thread/
+    images its generator was handed."""
+    text = load_rubric("verify", language="English")
+    assert "digest" in text and "summary" in text
+    assert "video transcript" in text.lower()
+    assert "fetched article body" in text.lower()
+
+
+def test_load_rubric_splices_the_shared_onscreen_fragment(tmp_path, monkeypatch):
+    """`{onscreen_text_rule}` is replaced by the shared fragment file, and the
+    fragment's OWN `{language}` is substituted in the same call — the fragment
+    must be spliced BEFORE the language pass, not after."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "fragment-onscreen-text.md").write_text(
+        "Transcribe VERBATIM; your prose is in {language}.\n", encoding="utf-8"
+    )
+    (rubric_dir / "rubric-probe.md").write_text(
+        "**Language:** {language}\n\n{onscreen_text_rule}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    text = load_rubric("probe", language="Spanish")
+    assert "{onscreen_text_rule}" not in text
+    assert "Transcribe VERBATIM" in text
+    # The fragment's own placeholder resolved too — proves the splice ran first.
+    assert "your prose is in Spanish" in text
+    assert "{language}" not in text
+
+
+def test_load_rubric_without_the_placeholder_is_unchanged(tmp_path, monkeypatch):
+    """A rubric that does not opt in is returned byte-for-byte — the splice is
+    opt-in, so the six rubrics that carry no on-screen text are untouched."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "rubric-plain.md").write_text("No placeholders here.\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    assert load_rubric("plain", language="English") == "No placeholders here.\n"
+
+
+def test_load_rubric_catches_a_misspelt_onscreen_placeholder(tmp_path, monkeypatch):
+    """`{onscreen_text_rules}` (plural) survives str.replace and would ship the
+    literal placeholder to the vision model. Same defence as `{Language}`."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "fragment-onscreen-text.md").write_text("rule\n", encoding="utf-8")
+    (rubric_dir / "rubric-typo.md").write_text("{onscreen_text_rules}\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    with pytest.raises(ValueError, match=r"onscreen_text_rules"):
+        load_rubric("typo", language="English")
+
+
+def test_load_rubric_missing_fragment_is_a_loud_error(tmp_path, monkeypatch):
+    """A rubric asking for a fragment that is not packaged must fail loudly, not
+    ship a half-rendered prompt."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "rubric-orphan.md").write_text("{onscreen_text_rule}\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    with pytest.raises(FileNotFoundError, match="fragment-onscreen-text.md"):
+        load_rubric("orphan", language="English")
+
+
+def test_describe_frame_rubric_states_the_verbatim_rule():
+    """The frame rubric must carry the shared rule and resolve both placeholders."""
+    text = load_rubric("describe-frame", language="Spanish")
+    assert "{language}" not in text
+    assert "{onscreen_text_rule}" not in text
+    assert "Spanish" in text
+    # The rule must enforce exact transcription without translation or normalization.
+    assert "VERBATIM" in text
+    # The rule must forbid translation explicitly — this is the #90 defect.
+    assert "Never translate" in text
+    # And must license an honest gap rather than a guess.
+    assert "do NOT guess" in text
+
+
+def test_describe_frame_rubric_asks_for_plain_text_not_json():
+    """`vision.describe_image` reads raw stdout, so the frame contract is prose.
+    Asking for JSON here would make every caption unparseable."""
+    text = load_rubric("describe-frame", language="English")
+    assert "is_decorative" not in text
+    assert "JSON" in text  # ...only to forbid it
+    assert "no JSON" in text
+
+
+def test_describe_frame_rubric_covers_footage_with_no_text():
+    """A silent non-slide video (a robot, an app being used, an animation) is now
+    described as footage, and its captions are the ONLY record of what it shows.
+    Before this bullet the list's only no-text case was "a face ... with no text:
+    say so in one short sentence", which licenses "no text" as a complete answer
+    for such a frame. Both bullets are pinned INSIDE the "What to describe"
+    section, so a bullet moved under "Output format" does not satisfy this."""
+    text = load_rubric("describe-frame", language="English")
+    section = text.split("## What to describe", 1)[1].split("## Output format", 1)[0]
+    assert (
+        "- **Footage with no text** (people, robots, products, animations, an app or site\n"
+        "  being used): what is shown and what is happening — subject, action, setting — in\n"
+        "  one or two sentences. In a silent video this is the only record of what it shows."
+    ) in section
+    assert "- **A face, a stage, a webcam or a title card with no text:**" in section
+
+
+def test_describe_frame_rubric_carries_the_shared_fragment():
+    """The frame half of the anti-drift assertion: the rule reaches the rubric from
+    the fragment file, not from a paragraph pasted into it. (The photo half lands
+    in Task 3, once that rubric opts in.)"""
+    frame = load_rubric("describe-frame", language="English")
+    fragment = rubrics_module._load_fragment(rubrics_module._ONSCREEN_FRAGMENT).replace(
+        "{language}", "English"
+    )
+    assert fragment in frame
+
+
+def test_describe_image_and_describe_frame_share_one_rule():
+    """The anti-drift assertion, now that BOTH rubrics opt in: they must carry the
+    SAME rule text, because both are spliced from the same fragment. If someone
+    re-inlines the paragraph into either one, this fails."""
+    frame = load_rubric("describe-frame", language="English")
+    photo = load_rubric("describe-image", language="English")
+    fragment = rubrics_module._load_fragment(rubrics_module._ONSCREEN_FRAGMENT).replace(
+        "{language}", "English"
+    )
+    assert fragment in frame
+    assert fragment in photo
+
+
+def test_describe_image_rubric_no_longer_orders_paraphrase_or_bans_quotes():
+    """Two clauses actively caused #90 on the photo surface:
+    'paraphrase the substance in your own words' discarded on-screen text, and
+    'no quotes' removed the only device for marking a verbatim string."""
+    text = load_rubric("describe-image", language="English")
+    assert "paraphrase the substance in your own words" not in text
+    assert "no quotes" not in text
+
+
+def test_describe_image_rubric_keeps_its_json_contract():
+    """The photo path is a BATCH JSON contract and must stay one — the new rule
+    changes what goes in `description`, never the response shape."""
+    text = load_rubric("describe-image", language="English")
+    assert "is_decorative" in text
+    assert "index" in text
+
+
+def test_both_image_rubrics_defer_language_to_the_onscreen_rule():
+    """The negative assertions above only catch the two exact strings #90 deleted;
+    they pass forever once those are gone. This is the positive half: BOTH image
+    rubrics must keep saying that `{language}` governs the model's own prose and
+    that the on-screen-text rule overrides it. Restoring an unconditional
+    "write in {language} regardless of any text visible" — the wording that
+    caused #90 — deletes these phrases, so this test fails where the negative
+    ones would not.
+    """
+    for name in ("describe-image", "describe-frame"):
+        text = load_rubric(name, language="English")
+        assert "for your own prose" in text, f"{name} no longer scopes {{language}} to prose"
+        assert "overrides this" in text, f"{name} no longer defers to the on-screen rule"

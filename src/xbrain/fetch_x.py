@@ -11,6 +11,7 @@ same structured evidence as `xbrain.fetch` (design §4, §15.2).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -22,13 +23,15 @@ import trafilatura
 from playwright.sync_api import BrowserContext, Response
 
 from xbrain.extract.article import parse_article_content_state
-from xbrain.extract.browser import is_logged_out, x_context
+from xbrain.extract.browser import is_logged_out, x_context, x_context_async
 from xbrain.extract.graphql import parse_tweets
+from xbrain.refetch_pool import clamp_tabs, drain
 from xbrain.fetch import _sources_materially_equal, _utcnow, is_x_url
 from xbrain.models import (
     ArticleBlock,
     ArticleImageBlock,
     ArticleTextBlock,
+    ArticleVideoBlock,
     Content,
     ContentSource,
     ContentSourceFailure,
@@ -216,10 +219,12 @@ def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess 
         )
     title, blocks = max(parsed, key=lambda item: len(item[1]))
     n_images = sum(1 for b in blocks if isinstance(b, ArticleImageBlock))
+    n_videos = sum(1 for b in blocks if isinstance(b, ArticleVideoBlock))
     logger.info(
-        "article: built structured body (%d blocks, %d images) for %s",
+        "article: built structured body (%d blocks, %d images, %d videos) for %s",
         len(blocks),
         n_images,
+        n_videos,
         url,
     )
     return ContentSourceSuccess(
@@ -393,6 +398,190 @@ def _attach_x_sources(
     item.content.sources = kept + list(sources)
     if not _sources_materially_equal(old_x_sources, list(sources)):
         item.content.fetched_at = now()
+
+
+def tweet_text_from_payloads(responses: list[dict], url: str) -> str | None:
+    """THIS tweet's body from captured TweetDetail payloads — never the thread's.
+
+    Pure, and separated precisely so it can be tested: the previous version delegated to
+    `_fetch_tweet`, which was never a "get this tweet's text" function. It fetches a LINKED
+    tweet as an `x_article` source via `assemble_linked_thread`, which joins EVERY tweet by
+    the anchor's author with "\n\n". So a re-fetch would have written a three-tweet blob into
+    `item.text` — and a post long enough to hit the 280-cap is exactly the kind that gets
+    self-replies, so this fired constantly, not rarely.
+
+    We parse the payload and select the item whose id matches the STATUS ID IN THE URL. No
+    match → None: a tombstoned or protected tweet must yield nothing, never a neighbouring
+    tweet's body, which would silently write someone else's words into this item.
+    """
+    status_id = _x_status_id(url)
+    if not status_id:
+        return None
+    for response in responses:
+        for item in parse_tweets(response, "bookmark"):
+            if item.id == status_id:
+                return item.text or None
+    return None
+
+
+def refetch_full_texts(
+    store: dict[str, Item],
+    targets: list[Item],
+    text_fetcher: Callable[[str], str | None],
+    *,
+    checkpoint: Callable[[], None] | None = None,
+    every: int = 25,
+) -> int:
+    """Replace each truncated item's text with the full post re-fetched from X.
+
+    `text_fetcher` is injected (tests pass a fake; production binds it to a Playwright
+    TweetDetail capture) — the same seam `fetch_x_articles` uses for `link_fetcher`.
+
+    A failed or empty re-fetch leaves the truncated text ALONE. Half a tweet is bad; blanking
+    the item is worse, and it would be silent data loss on the one surface that is the only
+    evidence 432 items have.
+
+    A repaired text NULLS `enriched`: the summary was written from half a sentence and must
+    be regenerated. `_needs_reenrichment` cannot do this job — it requires
+    `item.content is not None`, and the population this repairs is precisely the one with no
+    content block at all. The standard lever does not reach them.
+
+    `checkpoint` is called every `every` items and re-raised through: a session expiry on
+    item 400 of 535 must not discard the first 400 repairs — that is hours of deliberately
+    human-paced browser work.
+    """
+    repaired = 0
+    try:
+        for index, item in enumerate(targets, start=1):
+            if apply_refetched_text(item, text_fetcher(item.url)):
+                repaired += 1
+            if checkpoint and index % every == 0:
+                checkpoint()
+    finally:
+        if checkpoint:
+            checkpoint()
+    return repaired
+
+
+def apply_refetched_text(item: Item, fresh: str | None) -> bool:
+    """Write a re-fetched body onto `item`; True when it actually repaired something.
+
+    The ONE place the repair rule lives, shared by the sequential loop and the pooled one
+    (`refetch_full_texts_pooled`) so the two cannot drift on what counts as a repair.
+
+    A failed or empty re-fetch leaves the truncated text ALONE — half a tweet is bad,
+    blanking the item is worse. A repaired text NULLS `enriched`: the summary was written
+    from half a sentence and must be regenerated.
+    """
+    if not (fresh and fresh.strip()) or fresh == item.text:
+        return False
+    item.text = fresh
+    # The summary was written from the truncation. It is stale by construction, and its
+    # persisted verdict still reads PASS because verification fingerprints the OUTPUT,
+    # not the source it was built from.
+    item.enriched = None
+    return True
+
+
+def refetch_full_texts_pooled(
+    store: dict[str, Item],
+    targets: list[Item],
+    storage_state_path: Path,
+    *,
+    headless: bool = False,
+    tabs: int | None = None,
+    checkpoint: Callable[[], None] | None = None,
+    every: int = 25,
+) -> int:
+    """`refetch_full_texts` over a pool of REUSED tabs, paced like a person reading.
+
+    Same contract and same repair rule as the sequential version; what changes is the
+    browser behaviour. One browser, `refetch_pool.clamp_tabs(tabs)` tabs opened once and
+    navigated in place, a random 5-30 s pause between loads on each tab, and a shared
+    429 backoff that parks every tab at once rather than letting three of them keep
+    hammering a limited endpoint.
+
+    Raises `refetch_pool.RefetchRateLimited` past the backoff budget. Every repair made
+    before that point is already in `store` and has been checkpointed.
+    """
+    by_url = {item.url: item for item in targets}
+    repaired = 0
+    done = 0
+    saw_rate_limit = False
+
+    def on_result(url: str, text: str | None) -> None:
+        nonlocal repaired, done
+        item = by_url.get(url)
+        if item is not None and apply_refetched_text(item, text):
+            repaired += 1
+        done += 1
+        if checkpoint and done % every == 0:
+            checkpoint()
+
+    def clear_rate_limit() -> None:
+        nonlocal saw_rate_limit
+        saw_rate_limit = False
+
+    async def run() -> None:
+        nonlocal saw_rate_limit
+        async with x_context_async(storage_state_path, headless=headless) as context:
+            pages = [await context.new_page() for _ in range(clamp_tabs(tabs))]
+            captured: list[list[dict]] = [[] for _ in pages]
+
+            def listen(index: int) -> Callable[[object], None]:
+                """A per-tab response listener that files TweetDetail bodies under `index`.
+
+                Reading the body is itself async, so the handler schedules a task rather
+                than blocking the event loop. `fetch` snapshots the list when it reads it,
+                so a body that lands after the settle window is dropped, never mixed into
+                the next post's capture.
+                """
+
+                async def read(response) -> None:  # type: ignore[no-untyped-def]
+                    nonlocal saw_rate_limit
+                    if response.status == 429:
+                        saw_rate_limit = True
+                        return
+                    if "/graphql/" in response.url and "TweetDetail" in response.url:
+                        try:
+                            captured[index].append(await response.json())
+                        except Exception:  # noqa: BLE001 - non-JSON / partial bodies
+                            logger.debug("refetch: respuesta GraphQL ilegible: %s", response.url)
+
+                def handler(response: object) -> None:
+                    asyncio.ensure_future(read(response))
+
+                return handler
+
+            for index, page in enumerate(pages):
+                page.on("response", listen(index))
+
+            async def fetch(index: int, url: str) -> str | None:
+                captured[index].clear()
+                await pages[index].goto(url, wait_until="domcontentloaded")
+                await pages[index].wait_for_timeout(_SETTLE_MS)
+                return tweet_text_from_payloads(list(captured[index]), url)
+
+            try:
+                await drain(
+                    [item.url for item in targets],
+                    tabs=clamp_tabs(tabs),
+                    fetch=fetch,
+                    sleep=asyncio.sleep,
+                    on_result=on_result,
+                    rate_limited=lambda: saw_rate_limit,
+                    clear_rate_limit=clear_rate_limit,
+                )
+            finally:
+                for page in pages:
+                    await page.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        if checkpoint:
+            checkpoint()
+    return repaired
 
 
 def fetch_x_articles(

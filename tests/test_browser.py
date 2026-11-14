@@ -17,6 +17,13 @@ def test_is_logged_out_false_for_normal_pages():
 
 
 def test_x_context_requires_saved_session(tmp_path: Path):
-    with pytest.raises(FileNotFoundError, match="xbrain login"):
+    """The README's recommended route is importing the browser session, not
+    `xbrain login`; the error must name both, or a new user follows the one the
+    README calls unreliable."""
+    with pytest.raises(FileNotFoundError) as excinfo:
         with x_context(tmp_path / "missing.json"):
             pass
+
+    message = str(excinfo.value)
+    assert "scripts/import_chrome_session.py" in message
+    assert "xbrain login" in message

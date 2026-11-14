@@ -42,6 +42,11 @@ FailureReason = Literal[
     "dns_error",
     "js_required",
     "empty_content",
+    "blocked_interstitial",  # the page returned a cookie/consent or login wall instead of an
+    # article. TERMINAL on purpose: retrying serves the same wall. Recording it as a FAILURE
+    # (never a thin "success") is what keeps the unfetched-links guardrail firing — a rendered
+    # consent banner accepted as evidence would delete the note from every LLM surface, ground
+    # an entity in boilerplate, and hand the judge a `[Linked article]` it would trust.
     "unknown_error",  # catch-all for uncategorised failures (e.g. an extractor
     # exception we did not classify). Transient by default — `_should_refetch`
     # in fetch.py treats it as retry-worthy on the next run, mirroring the
@@ -54,6 +59,22 @@ FailureReason = Literal[
 # `ContentSourceSuccess(kind="x_video")` so the existing enrich → topics →
 # generate pipeline consumes it exactly like an article body.
 ContentKind = Literal["external_article", "x_article", "thread", "quoted_tweet", "x_video"]
+
+# The kinds whose body IS the content of an outbound LINK — the only evidence that
+# a link in `item.links` was actually downloaded. The other kinds are not: a
+# `thread` is the poster's OWN text, a `quoted_tweet` is a different post, an
+# `x_video` transcript is manufactured from the video. Treating any of them as "the
+# link was fetched" both silences the unfetched-links guardrail AND serves the
+# item's own words to the LLM under a `Linked article` label. ONE set, used by every
+# call site (api prompt, enrich worksheet, judge source) so the surfaces cannot drift.
+LINK_CONTENT_KINDS: frozenset[ContentKind] = frozenset({"external_article", "x_article"})
+
+# The kind whose body is the THIRD PARTY post a quote-tweet is sharing. Its own set,
+# for the same reason `LINK_CONTENT_KINDS` is one: every surface (api prompt, enrich
+# worksheet, judge source) must select it by the SAME predicate. A quoted post is not
+# a link body and not the poster's own words — it is someone else's post, and the
+# attribution guardrail depends on it keeping its own identity everywhere.
+QUOTED_CONTENT_KINDS: frozenset[ContentKind] = frozenset({"quoted_tweet"})
 
 
 class Author(BaseModel):
@@ -595,22 +616,57 @@ class ArticleImageBlock(BaseModel):
     alt: str | None = None
 
 
-# The ordered-block type — a discriminated union over the text and image
+class ArticleVideoBlock(BaseModel):
+    """One inline VIDEO of an X long-form Article body.
+
+    An article's `MEDIA` entity is not always a photo: X embeds native video
+    (`media_info.__typename == "ApiVideo"`, `mediaCategory: "AmplifyVideo"`) the
+    same way. The parser used to resolve a photo URL or nothing, so every
+    embedded video was dropped from the body — measured on the real corpus, and
+    invisible in the note: the reader saw prose with a hole where the author had
+    put a demo.
+
+    Wraps the SAME `MediaEntry` union as `ArticleImageBlock` (here a
+    `MediaVideoPending`), so the playable stream, the poster `thumbnail_url`, the
+    bitrate and the duration are all carried in the shape the rest of the
+    pipeline already understands. The discriminator is `kind` (`"video"`).
+
+    The video's bytes are NOT downloaded and its speech is NOT transcribed by
+    this block alone — `digest-video` selects from item-level media, not from
+    article bodies. What this variant guarantees is that the video is no longer
+    LOST: it is recorded, positioned and rendered where the author placed it.
+    """
+
+    kind: Literal["video"] = "video"
+    media: MediaEntry
+    alt: str | None = None
+
+
+# The ordered-block type — a discriminated union over the text, image and video
 # variants, tagged on `kind`. Same style as `_MediaTagged` /
 # `_ContentSourceTagged`. No `BeforeValidator` legacy shim is needed: `blocks`
 # is a brand-new field (#39), so there is no pre-existing on-wire shape to
-# migrate — a legacy record simply has no `blocks` key and defaults to `[]`.
+# migrate — a legacy record simply has no `blocks` key and defaults to `[]`,
+# and a legacy record with blocks simply has no `"video"`-tagged entry.
 ArticleBlock = Annotated[
-    Union[ArticleTextBlock, ArticleImageBlock],
+    Union[ArticleTextBlock, ArticleImageBlock, ArticleVideoBlock],
     Field(discriminator="kind"),
 ]
 
 
 # TypeAdapter for tests / ad-hoc validation of a single block outside an
 # `Item` context (mirrors `MediaEntryAdapter` / `ContentSourceAdapter`).
-ArticleBlockAdapter: TypeAdapter[Union[ArticleTextBlock, ArticleImageBlock]] = TypeAdapter(
-    ArticleBlock
+ArticleBlockAdapter: TypeAdapter[Union[ArticleTextBlock, ArticleImageBlock, ArticleVideoBlock]] = (
+    TypeAdapter(ArticleBlock)
 )
+
+
+# The frame-caption contract the descriptions on a source were produced under
+# (#90). Mirrors `verification._CONTRACT_VERSION`: when the rubric changes in a
+# way that invalidates existing captions, bump this and `redescribe-frames`
+# treats every older caption as stale. `""` means "produced before #90" — which
+# is also stale, and is what every record in the current corpus carries.
+FRAME_CAPTION_CONTRACT = "xbrain-frame-caption/v1"
 
 
 class ContentSourceSuccess(BaseModel):
@@ -627,6 +683,16 @@ class ContentSourceSuccess(BaseModel):
     title: str | None = None
     text: str
     http_status: int | None = None
+    # WHO wrote this body, when that is not the item's own author — set for
+    # `quoted_tweet` sources, whose text belongs to the THIRD PARTY being quoted
+    # (X embeds their handle + display name in the same timeline payload). This is
+    # the attribution evidence the generators were missing: without it the poster
+    # reads as the author of content they merely shared, which is the #86 bug.
+    # Optional + additive (defaults to None), so every EXISTING record LOADS
+    # unchanged — the same backward-compatible pattern as `has_speech`/`frames`/
+    # `blocks`. `None` = "the body is the item author's own, or the author is
+    # unknown"; it is never a licence to attribute the text to the poster.
+    author: Author | None = None
     # extraction attempts: 1 = single pass, 2 = + Firecrawl fallback;
     # 0 only on pre-Fase-2 records.
     attempts: int = 0
@@ -646,6 +712,26 @@ class ContentSourceSuccess(BaseModel):
     # one-time backward-compatible additive churn as `has_speech`/`language`. Each
     # `VideoFrame` embeds into the note like a downloaded photo (see `VideoFrame`).
     frames: list[VideoFrame] = Field(default_factory=list)
+    # Long-form readable digest of an `x_video` source — a "what it is · key
+    # points · why it matters" synthesis of the transcript (`text`) + `frames`,
+    # written by `xbrain video-digest`. Optional + additive (defaults to `""`), so
+    # every EXISTING record LOADS unchanged — a pre-digest `x_video` source (and
+    # every article source) simply carries an empty digest, and `generate` falls
+    # back to rendering the raw transcript + frames. `""` = "no digest yet".
+    digest: str = ""
+    # Which frame-caption contract the `frames` descriptions were produced under
+    # (#90). Optional + additive (defaults to `""`), so every EXISTING record
+    # LOADS unchanged — the same pattern as `frames`/`has_speech`/`digest`.
+    #
+    # It lives HERE and not on `VideoFrame` on purpose. `fetch._source_signature`
+    # fingerprints material content with `model_dump_json(exclude=...)` over a
+    # FLAT set of top-level field names; a stamp nested inside `frames` would land
+    # INSIDE that fingerprint, so re-stamping unchanged captions would read as a
+    # material change and bump `content.fetched_at` — re-enriching the whole video
+    # corpus for nothing. At source level it is excluded cleanly, as bookkeeping.
+    # Source-level granularity is also the right unit: captions are re-described
+    # per video, never per frame.
+    caption_contract: str = ""
     # Ordered body blocks (text + inline images) for `kind="x_article"` sources
     # captured as a structured Article (#39). Optional + additive (defaults to
     # `[]`), so every EXISTING record LOADS unchanged — a pre-#39 `x_article`
@@ -825,6 +911,63 @@ class Enrichment(BaseModel):
     user_notes: str | None = None
 
 
+# The three-way verification verdict shared by `verdict` and the two axes. A single
+# alias keeps them in lockstep and rejects a garbage value at load — see `VerificationVerdict`.
+Verdict = Literal["PASS", "REVIEW", "FAIL"]
+
+# The generated outputs a verdict can be about. It lives HERE, not in `verification`,
+# because `evidence` needs it too and evidence must not import the judge (the judge
+# imports evidence). `verification` re-exports both names, so its callers are unchanged.
+VerifyTarget = Literal["summary", "digest", "topics"]
+ALL_TARGETS: tuple[VerifyTarget, ...] = ("summary", "digest", "topics")
+
+
+class VerificationVerdict(BaseModel):
+    """A stored per-target verification verdict for an item — opt-in, written by
+    `xbrain verify --apply --write-verdicts` (#79), so `generate` can badge it.
+
+    STALENESS-AWARENESS lives in `output_fingerprint`: the sha256 hex of the EXACT
+    output text that was JUDGED (the `summary` / `topics` string, or the `x_video`
+    `digest`). It is captured at worksheet-**export** time (`export_verify_worksheet`
+    stamps it) and threaded through the filled worksheet to the writer — it is NEVER a
+    write-time recompute against the live store, so a regeneration in the
+    export→judge→write window cannot bind a verdict to output it never saw. `generate`
+    recomputes the CURRENT output's fingerprint and renders the badge only when it
+    matches — a verdict for an output re-generated since (a different fingerprint) is
+    silently stale and never badged, so an output fixed after a FAIL never shows a ❌.
+    The single canonicalization is `verification.fingerprint_output`, shared by the
+    export stamp and `generate`'s read. The field is pattern-constrained to a 64-char
+    lowercase-hex sha256 so a hand-edited/garbage hash is rejected at load.
+
+    Additive + backward-compatible: this rides on `Item.verification`, a map keyed by
+    target that defaults to `{}` — every legacy item (no `verification` key) loads
+    unchanged. `verdict` is the PASS/REVIEW/FAIL enum; `faithfulness`/`adherence` are
+    the two axes (same `Verdict` enum) carried for at-a-glance context, mirroring the
+    aggregated record shape. `flags` are the concise judge/auditor issue labels
+    (worst-first); the badge surfaces the leading one. `verified_at` MUST be
+    timezone-aware (UTC) — the same contract as every other persisted instant.
+    """
+
+    verdict: Verdict
+    faithfulness: Verdict = "PASS"
+    adherence: Verdict = "PASS"
+    output_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # The FULL judging contract: the output + the source the judge read for this target +
+    # the rubrics it applied (see `verification.contract_fingerprint`). This — not
+    # `output_fingerprint` — is what decides whether a badge may paint. Optional, so a
+    # verdict stored before it existed still LOADS; None means "judged under a contract we
+    # cannot reconstruct" → permanently stale, never grandfathered in.
+    contract_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    verified_at: datetime
+    flags: list[str] = Field(default_factory=list)
+
+    @field_validator("verified_at")
+    @classmethod
+    def _validate_verified_at(cls, value: datetime) -> datetime:
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
+        return _require_utc_aware("verified_at", value)
+
+
 class Topic(BaseModel):
     """One entry of the induced topic vocabulary (data/vocab.yaml)."""
 
@@ -863,6 +1006,12 @@ class Item(BaseModel):
     thread: ThreadInfo | None = None
     content: Content | None = None
     enriched: Enrichment | None = None
+    # Per-target verification verdicts (keyed by target: "summary"|"digest"|"topics"),
+    # written opt-in by `xbrain verify --apply --write-verdicts` (#79). Additive +
+    # backward-compatible: a legacy item has no `verification` key and defaults to `{}`.
+    # Each verdict carries a fingerprint of the judged output so `generate` badges only a
+    # verdict still current for the output a reader sees (see `VerificationVerdict`).
+    verification: dict[str, VerificationVerdict] = Field(default_factory=dict)
     bookmark_folder: str | None = None
 
 
