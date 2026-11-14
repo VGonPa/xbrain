@@ -164,14 +164,14 @@ def _probe_status(
         return (
             status,
             "js_required",
-            "Descargable pero sin artículo extraíble (posible JavaScript).",
+            "Downloadable but no extractable article (JavaScript likely required).",
         )
     except urllib.error.HTTPError as exc:
         return exc.code, _reason_for_status(exc.code), f"HTTP {exc.code}: {exc.reason}"
     except urllib.error.URLError as exc:
-        return None, _categorize_url_error(exc), f"Error de red: {exc.reason}"
+        return None, _categorize_url_error(exc), f"Network error: {exc.reason}"
     except (TimeoutError, socket.timeout) as exc:
-        return None, "timeout", f"Tiempo de espera agotado: {exc}"
+        return None, "timeout", f"Timed out: {exc}"
 
 
 def trafilatura_extract(
@@ -191,7 +191,7 @@ def trafilatura_extract(
         return FetchFailure(
             http_status=200,
             failure_reason="empty_content",
-            error="La página se descargó pero no tiene un artículo extraíble.",
+            error="The page downloaded but has no extractable article.",
             attempts=1,
         )
     metadata = trafilatura.extract_metadata(downloaded)
@@ -260,10 +260,10 @@ def _firecrawl_extract(
         with opener(req, timeout=_FIRECRAWL_TIMEOUT) as resp:
             payload = json.loads(resp.read())
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        return FetchFailure(error=f"Firecrawl falló: {exc}", attempts=1, transport_error=True)
+        return FetchFailure(error=f"Firecrawl failed: {exc}", attempts=1, transport_error=True)
     if payload.get("success") is False or payload.get("error"):
         return FetchFailure(
-            error=f"Firecrawl falló: {payload.get('error') or 'respuesta de error'}",
+            error=f"Firecrawl failed: {payload.get('error') or 'error response'}",
             attempts=1,
             transport_error=True,  # it refused (5xx / 429) — it did not judge the page
         )
@@ -274,7 +274,7 @@ def _firecrawl_extract(
         return FetchSuccess(title=title, text=text, http_status=200, attempts=1)
     return FetchFailure(
         failure_reason="empty_content",
-        error="Firecrawl no devolvió contenido.",
+        error="Firecrawl returned no content.",
         attempts=1,
     )
 
@@ -372,7 +372,7 @@ def validate_body(url: str, result: FetchResult) -> FetchResult:
     if marker:
         return FetchFailure(
             failure_reason="blocked_interstitial",
-            error=f"La página devolvió un muro (cookies/login), no un artículo: {marker!r}.",
+            error=f"The page returned a wall (cookies/login), not an article: {marker!r}.",
             http_status=result.http_status,
             attempts=result.attempts,
         )
@@ -380,8 +380,8 @@ def validate_body(url: str, result: FetchResult) -> FetchResult:
         return FetchFailure(
             failure_reason="blocked_interstitial",
             error=(
-                f"El cuerpo extraído ({len(result.text.strip())} caracteres) es demasiado "
-                "corto para ser un artículo."
+                f"The extracted body ({len(result.text.strip())} characters) is too "
+                "short to be an article."
             ),
             http_status=result.http_status,
             attempts=result.attempts,
@@ -389,7 +389,7 @@ def validate_body(url: str, result: FetchResult) -> FetchResult:
     if _title_is_bare_domain(url, result.title):
         return FetchFailure(
             failure_reason="blocked_interstitial",
-            error=f"El título extraído ({result.title!r}) es el dominio, no un artículo.",
+            error=f"The extracted title ({result.title!r}) is the domain, not an article.",
             http_status=result.http_status,
             attempts=result.attempts,
         )
@@ -445,7 +445,7 @@ def extract_article(
         return fallback.model_copy(update={"attempts": result.attempts + 1})
     # Both attempts exhausted — merge evidence and bump the attempt counter.
     merged_error = (
-        f"{result.error or 'sin contenido'} | Firecrawl: {fallback.error}"
+        f"{result.error or 'no content'} | Firecrawl: {fallback.error}"
         if fallback.error
         else result.error
     )
@@ -551,7 +551,7 @@ def _safe_extract(url: str, extractor: ArticleExtractor) -> FetchResult:
     except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
         return FetchFailure(
             failure_reason="unknown_error",
-            error=f"Extractor falló: {exc}",
+            error=f"Extractor failed: {exc}",
             attempts=1,
         )
 

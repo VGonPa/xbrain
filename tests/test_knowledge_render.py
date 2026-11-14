@@ -108,11 +108,11 @@ def test_the_search_rendering_shows_every_field_the_spec_requires() -> None:
 def test_the_summary_is_shown_WITH_its_origin() -> None:
     """Invariant 2 of spec §3.7: no text is presented without the provenance qualifying it.
 
-    Asserted on the pairing — the word `resumen` and `(llm)` on the SAME line — because a
+    Asserted on the pairing — the word `summary` and `(llm)` on the SAME line — because a
     test that only checked both appear somewhere would pass with the origin printed at the
     bottom of the screen, which is not the same claim.
     """
-    line = next(line for line in render_search(_response()).splitlines() if "resumen" in line)
+    line = next(line for line in render_search(_response()).splitlines() if "summary (" in line)
     assert "(llm)" in line
     assert "Un resumen generado." in line
 
@@ -125,7 +125,7 @@ def test_a_verified_summary_shows_its_verdict() -> None:
     line = next(
         line
         for line in render_search(_response(results=(result,))).splitlines()
-        if "resumen" in line
+        if "summary (" in line
     )
     assert "[FAIL]" in line
 
@@ -157,7 +157,7 @@ def test_a_derived_match_with_no_source_prints_the_warning() -> None:
     )
     text = render_search(_response(results=(result,)))
     assert "no_underlying_source" in text
-    assert "ninguna fuente primaria" in text
+    assert "no primary source" in text
 
 
 def test_a_behind_index_warns_and_names_the_command() -> None:
@@ -176,7 +176,7 @@ def test_a_behind_index_warns_and_names_the_command() -> None:
     )
     text = render_search(response)
     assert "xbrain index update" in text
-    assert "obsoleta" in text
+    assert "stale" in text
 
 
 def test_an_unimplemented_strategy_is_a_sentence_naming_what_did_NOT_run() -> None:
@@ -200,8 +200,8 @@ def test_an_unimplemented_strategy_is_a_sentence_naming_what_did_NOT_run() -> No
         )
     )
     text = render_search(response)
-    assert "`vector`" in text and "no tiene backend" in text
-    assert "NO son de `vector`" in text
+    assert "`vector`" in text and "has no backend" in text
+    assert "NOT from `vector`" in text
 
 
 def test_the_degradation_warning_comes_before_the_results() -> None:
@@ -225,11 +225,11 @@ def test_excluded_chunks_are_reported_with_the_repair() -> None:
         index=IndexStatusRef(manifest_version="1", built_at=WHEN, corrupt_chunks_excluded=3)
     )
     text = render_search(response)
-    assert "3 chunk(s) excluido(s)" in text
+    assert "3 chunk(s) excluded" in text
     assert "index build --force" in text
     # Since U-5 the counter also covers a row whose provenance, attribution or locator does
     # not recompute (and, since B-k, one that resolves to no locator): the sentence says so.
-    assert "procedencia" in text and "autor" in text and "localizador" in text
+    assert "provenance" in text and "author" in text and "locator" in text
 
 
 def test_a_profile_only_candidate_says_it_has_no_citable_fragment() -> None:
@@ -240,14 +240,14 @@ def test_a_profile_only_candidate_says_it_has_no_citable_fragment() -> None:
     wrote.
     """
     text = render_search(_response(results=(_result(matches=(), verify_with=("post",)),)))
-    assert "perfil del item" in text
-    assert "no hay fragmento citable" in text
+    assert "item profile" in text
+    assert "no citable fragment" in text
 
 
 def test_an_empty_result_set_says_so_without_claiming_anything() -> None:
     """Zero results is a legitimate answer; it just must not look like an error."""
     text = render_search(_response(results=()))
-    assert "Sin resultados" in text
+    assert "No results" in text
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +294,8 @@ def test_the_get_rendering_shows_failures_and_unfetched_links_apart() -> None:
     them makes a link nobody attempted indistinguishable from one that returned a 404.
     """
     text = render_get(_bundle())
-    assert "fetch falló: external_article https://dead.example (not_found)" in text
-    assert "sin cuerpo: https://nope.example (http_error) — 404" in text
+    assert "fetch failed: external_article https://dead.example (not_found)" in text
+    assert "no body: https://nope.example (http_error) — 404" in text
 
 
 def test_the_search_rendering_offers_a_runnable_continuation_when_truncated() -> None:
@@ -321,9 +321,9 @@ def test_the_search_rendering_offers_a_runnable_continuation_when_truncated() ->
         cursor="s:1",
     )
     out = render_search(response)
-    line = next(row for row in out.splitlines() if "Continúa con:" in row)
-    assert "⚠ Resultado truncado" in line
-    command = line.split("Continúa con: ", 1)[1]
+    line = next(row for row in out.splitlines() if "Continue with:" in row)
+    assert "⚠ Truncated result" in line
+    command = line.split("Continue with: ", 1)[1]
     assert command.startswith("xbrain search 'agent evaluation' --limit 1 ")
     for flag in (
         f"--from {date(2026, 1, 1).isoformat()}",
@@ -345,7 +345,7 @@ def test_a_truncation_with_no_continuation_says_why() -> None:
     remedy, never as a complete page."""
     out = render_search(_response(truncated=True, cursor=None))
     assert any(
-        "⚠ Resultado truncado" in row and "acota la consulta" in row for row in out.splitlines()
+        "⚠ Truncated result" in row and "narrow the query" in row for row in out.splitlines()
     )
 
 
@@ -388,7 +388,7 @@ def test_the_continuation_command_reproduces_the_surfaces_and_the_query() -> Non
 def test_the_get_rendering_lists_the_surfaces_you_can_ask_for() -> None:
     """The body is withheld by default, so the NAMES are what make it reachable."""
     text = render_get(_bundle())
-    assert "superficies disponibles: post, external_article" in text
+    assert "available surfaces: post, external_article" in text
 
 
 def test_the_get_rendering_fences_the_untrusted_body() -> None:
@@ -518,7 +518,7 @@ def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
     )
     searched = render_search(_response(results=(result,)))
     assert "\x1b" not in searched and "\x07" not in searched
-    assert "resumen (llm): ok [2K bad" in searched, searched
+    assert "summary (llm): ok [2K bad" in searched, searched
 
 
 def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
@@ -527,7 +527,7 @@ def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
     (CLAUDE.md rule 7). Asserted on the label the line carries, not on the handle appearing
     somewhere in the output — the handle is also in the JSON and would satisfy a substring.
 
-    Seen red before the fix: no line carried `autor:`.
+    Seen red before the fix: no line carried `author:`.
     """
     quoted = SearchMatch(
         chunk_id="item:1:quoted_post:abc:0:v1",
@@ -544,8 +544,8 @@ def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
     )
     text = render_search(_response(results=(_result(matches=(quoted,)),)))
     lines = [line.strip() for line in text.splitlines()]
-    assert any(line.startswith("autor: @othervoice (Other Voice)") for line in lines), text
-    assert not any(line.startswith("autor: @karpathy") for line in lines), (
+    assert any(line.startswith("author: @othervoice (Other Voice)") for line in lines), text
+    assert not any(line.startswith("author: @karpathy") for line in lines), (
         "the poster's own surfaces carry no separate author line"
     )
 
@@ -561,10 +561,10 @@ def test_a_chunk_with_its_own_author_is_rendered_with_that_author() -> None:
 
     One rule for both branches, the one `render_search` already applies: the surface's or
     chunk's own author is named on its header whenever it differs from the item's. Asserted
-    on the `autor:` label on the CHUNK's header line — not on the handle appearing somewhere,
+    on the `author:` label on the CHUNK's header line — not on the handle appearing somewhere,
     which the JSON would satisfy — and on its absence when the author is the item's own.
 
-    Seen red before the fix: the chunk header carried no `autor:`.
+    Seen red before the fix: the chunk header carried no `author:`.
     """
     from xbrain.knowledge.models import KnowledgeChunk
 
@@ -597,9 +597,9 @@ def test_a_chunk_with_its_own_author_is_rendered_with_that_author() -> None:
     headers = [line for line in lines if line.startswith("[")]
     assert len(headers) == 2, lines
     assert headers[0].startswith("[quoted_post 0:30]")
-    assert "autor: @othervoice (Other Voice)" in headers[0], headers[0]
+    assert "author: @othervoice (Other Voice)" in headers[0], headers[0]
     assert headers[1].startswith("[post 0:30]")
-    assert "autor:" not in headers[1], "the poster's own chunk carries no separate author"
+    assert "author:" not in headers[1], "the poster's own chunk carries no separate author"
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +624,7 @@ def test_an_author_name_cannot_forge_a_header_or_a_fence_nor_drive_the_terminal(
     cosmetics.
 
     ONE function renders an author for a human (`_author_label`), used by the bundle
-    header, the result line and the `autor:` label alike, and it collapses each field to
+    header, the result line and the `author:` label alike, and it collapses each field to
     one printable line. Asserted on the column-0 line set and on the absence of the
     bytes, in all three placements. Seen red before the fix: the forged header line was
     present at column 0 and `\\x1b` reached both renderings.
@@ -677,7 +677,7 @@ def test_an_author_name_cannot_forge_a_header_or_a_fence_nor_drive_the_terminal(
 
 def test_every_placement_of_an_author_goes_through_one_label(monkeypatch) -> None:
     """The identity half of D-3 (rule 5): the bundle header, the result line and the
-    `autor:` label of a match, a surface and a chunk all print an author through
+    `author:` label of a match, a surface and a chunk all print an author through
     `render._author_label`. Replaced with a sentinel, every placement must carry the
     sentinel; a placement that formats the author itself stays silent here and goes red.
     """
@@ -718,14 +718,14 @@ def test_every_placement_of_an_author_goes_through_one_label(monkeypatch) -> Non
     )
     got = render_get(_bundle(surfaces=(surface,), chunks=(chunk,))).splitlines()
     assert got[0].startswith("1884  <<karpathy>>")
-    assert sum(line.endswith("autor: <<othervoice>>") for line in got if line.startswith("[")) == 2
+    assert sum(line.endswith("author: <<othervoice>>") for line in got if line.startswith("[")) == 2
 
     match = SearchMatch(**{**_match().model_dump(), "attribution": other})
     searched = render_search(_response(results=(_result(matches=(match,)),))).splitlines()
     assert next(line for line in searched if line.startswith("1. ")).startswith(
         "1. 1884  <<karpathy>>"
     )
-    assert any(line.strip() == "autor: <<othervoice>>" for line in searched)
+    assert any(line.strip() == "author: <<othervoice>>" for line in searched)
 
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1155,7 @@ def test_a_missing_manifest_says_so_and_labels_its_advice() -> None:
     """
     out = render_status(_status_report(manifest=None, advice=FORGE))
     lines = out.splitlines()
-    assert "INCOMPLETO o inexistente" in out
+    assert "INCOMPLETE or missing" in out
     assert "\x1b" not in out
     assert FORGED_HEADER not in lines, out
     assert not any(line.startswith(FORGED_FENCE) for line in lines), out
@@ -1174,15 +1174,15 @@ def test_render_status_does_not_invent_a_tokenizer_the_manifest_never_sealed() -
     out = render_status(_status_report())
     assert "tokenizer" not in out, out
     assert "conectiva" not in out, out
-    assert "esquema 1" in out and "chunker v2" in out, "what IS sealed is still printed"
+    assert "schema 1" in out and "chunker v2" in out, "what IS sealed is still printed"
     assert "embeddings —" in out
 
 
 def test_the_incomplete_warning_is_printed_before_the_advice() -> None:
     """C-3: an unusable index says so BEFORE the remedy, so the built-at header above it is
     not read as health. Position is the requirement, so position is what is asserted."""
-    out = render_status(_status_report(incomplete=True, advice="Reconstruye."))
+    out = render_status(_status_report(incomplete=True, advice="Rebuild."))
     lines = out.splitlines()
-    warning = next(i for i, line in enumerate(lines) if "INCOMPLETO o inutilizable" in line)
-    advice = next(i for i, line in enumerate(lines) if "Reconstruye." in line)
+    warning = next(i for i, line in enumerate(lines) if "INCOMPLETE or unusable" in line)
+    advice = next(i for i, line in enumerate(lines) if "Rebuild." in line)
     assert warning < advice, lines

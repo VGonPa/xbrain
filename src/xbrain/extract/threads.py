@@ -83,7 +83,7 @@ def _fetch_thread_text(context: BrowserContext, item: Item) -> str:
         except Exception:  # noqa: BLE001 - navigation failure -> empty thread
             return ""
         if is_logged_out(page.url):
-            raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+            raise RuntimeError("X session expired. Run `xbrain login`.")
         return assemble_thread(captured, item.author.handle)
     finally:
         page.close()

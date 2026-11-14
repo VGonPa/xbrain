@@ -286,7 +286,7 @@ def test_asking_for_a_surface_the_item_does_not_have_lists_what_it_does(
     context: QueryContext,
 ) -> None:
     """An empty bundle would make "we never had it" look like "it is empty" (spec §9.3)."""
-    with pytest.raises(UnknownSurfaceError, match="Superficies disponibles"):
+    with pytest.raises(UnknownSurfaceError, match="Available surfaces"):
         get("k01", context, surfaces=("video_transcript",))
 
 
@@ -390,7 +390,7 @@ def test_the_cursor_continues_where_the_previous_call_stopped(
 def test_a_malformed_cursor_is_refused(long_article_context: QueryContext) -> None:
     """Restarting silently on a bad cursor loops a consumer forever while looking fine."""
     item = next(iter(long_article_context.store.values()))
-    with pytest.raises(ValueError, match="Cursor"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         get(item.id, long_article_context, surfaces=("external_article",), cursor="banana")
 
 
@@ -412,7 +412,7 @@ def test_an_out_of_range_surface_cursor_is_refused(context: QueryContext) -> Non
 
     Now raises the same ValueError as a malformed or negative cursor.
     """
-    with pytest.raises(ValueError, match="Cursor"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         # k03 has exactly 1 external_article surface, so index 1 is out of range.
         get("k03", context, surfaces=("external_article",), cursor="1:0")
 
@@ -431,7 +431,7 @@ def test_an_out_of_range_chunk_cursor_on_the_final_surface_is_refused(
 
     Now raises ValueError.
     """
-    with pytest.raises(ValueError, match="Cursor"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         # k03's external_article has far fewer than 99999 chunks at any reasonable budget.
         get(
             "k03",
@@ -454,7 +454,7 @@ def test_an_out_of_range_query_cursor_is_refused(context: QueryContext) -> None:
 
     Now raises ValueError.
     """
-    with pytest.raises(ValueError, match="Cursor"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         get(
             "k03",
             context,
@@ -482,7 +482,7 @@ def test_an_out_of_range_chunk_cursor_on_a_non_final_surface_is_refused(
     Same class of silent cut as B2, but on a non-final surface. Now raises ValueError on
     any starting surface, not only the final one.
     """
-    with pytest.raises(ValueError, match="Cursor"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         get(
             "k03",
             context,
@@ -600,17 +600,17 @@ def test_a_surface_the_item_lacks_is_refused_even_when_another_fetch_failed(
     unknown name. Seen red before the fix: `get("k11", surfaces=("video_transcript",))`
     returned a bundle.
     """
-    with pytest.raises(UnknownSurfaceError, match="no tiene video_transcript") as caught:
+    with pytest.raises(UnknownSurfaceError, match="has no video_transcript") as caught:
         get("k11", context, surfaces=("video_transcript",))
-    assert "Superficies disponibles" in str(caught.value)
+    assert "Available surfaces" in str(caught.value)
 
     answered = get("k11", context, surfaces=("external_article",))
     assert answered.surfaces == () and answered.chunks == ()
     assert [f.kind for f in answered.failures] == ["external_article"]
 
-    with pytest.raises(UnknownSurfaceError, match="no tiene video_transcript\\.") as caught:
+    with pytest.raises(UnknownSurfaceError, match="has no video_transcript\\.") as caught:
         get("k11", context, surfaces=("external_article", "video_transcript"))
-    assert "no tiene external_article" not in str(caught.value), "the failed one is not unknown"
+    assert "has no external_article" not in str(caught.value), "the failed one is not unknown"
 
 
 def test_a_request_mixing_a_present_and_an_absent_surface_is_refused_not_trimmed(
@@ -621,7 +621,7 @@ def test_a_request_mixing_a_present_and_an_absent_surface_is_refused_not_trimmed
     only when NOTHING was chosen. A partial answer that names no omission is the silent cut
     spec §9.3 forbids. Seen red before the fix: a bundle with one surface came back.
     """
-    with pytest.raises(UnknownSurfaceError, match="no tiene video_transcript"):
+    with pytest.raises(UnknownSurfaceError, match="has no video_transcript"):
         get("k03", context, surfaces=("post", "video_transcript"))
     assert get("k03", context, surfaces=("post",)).surfaces[0].surface_type == "post"
 
@@ -1267,9 +1267,9 @@ def test_a_negative_cursor_component_is_refused_like_any_other_malformed_one(
     same guard and a check on one of them would leave the other open.
     """
     for bad in ("-1:0", "0:-1"):
-        with pytest.raises(ValueError, match="Cursor inválido"):
+        with pytest.raises(ValueError, match="Invalid cursor"):
             get("k03", context, surfaces=("external_article",), cursor=bad)
-    with pytest.raises(ValueError, match="Cursor inválido"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         get("k03", context, surfaces=("external_article",), query="Quillfeather", cursor="q:-1")
 
 

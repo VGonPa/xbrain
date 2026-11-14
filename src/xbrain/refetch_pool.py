@@ -139,12 +139,12 @@ async def drain(
             while rate_limited():
                 if backoffs >= MAX_RATE_LIMIT_BACKOFFS:
                     raise RefetchRateLimited(
-                        f"X devolvió 429 tras {backoffs} backoffs — re-fetch "
-                        "detenido; las reparaciones hechas ya están guardadas."
+                        f"X returned 429 after {backoffs} backoffs — re-fetch "
+                        "stopped; the repairs already made are saved."
                     )
                 wait = backoff_ms(rng)
                 logger.warning(
-                    "X devolvió 429 (rate limit) — esperando %.0fs antes de seguir.",
+                    "X returned 429 (rate limit) — waiting %.0fs before continuing.",
                     wait / 1000,
                 )
                 await sleep(wait / 1000)
@@ -176,11 +176,11 @@ async def drain(
                 raise
             except TargetClosedError as exc:
                 raise RefetchBrowserClosed(
-                    "El navegador (o una pestaña) de X se cerró durante el re-fetch — "
-                    "detenido; las reparaciones hechas ya están guardadas."
+                    "The X browser (or a tab) closed during the re-fetch — "
+                    "stopped; the repairs already made are saved."
                 ) from exc
             except Exception:  # noqa: BLE001 - one bad post must not kill the pool
-                logger.debug("refetch: la pestaña %d falló en %s", index, url, exc_info=True)
+                logger.debug("refetch: tab %d failed on %s", index, url, exc_info=True)
                 text = None
             on_result(url, text)
 

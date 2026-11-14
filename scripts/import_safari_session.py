@@ -52,14 +52,14 @@ X_DOMAINS = ("x.com", "twitter.com")
 
 # Printed when no Safari cookies could be read at all -- almost always a
 # missing Full Disk Access grant on the terminal app.
-_FDA_MESSAGE = """No se pudieron leer las cookies de Safari.
+_FDA_MESSAGE = """Could not read Safari's cookies.
 
-macOS protege las cookies de Safari tras "Acceso a todo el disco" (Full Disk Access).
-Para arreglarlo:
-  1. Ajustes del Sistema -> Privacidad y seguridad -> Acceso a todo el disco
-  2. Añade tu app de terminal (Terminal, iTerm, Ghostty, ...) y actívala
-  3. Reinicia la terminal (o abre una ventana nueva)
-  4. Vuelve a ejecutar: uv run python scripts/import_safari_session.py"""
+macOS keeps Safari's cookies behind "Full Disk Access".
+To fix it:
+  1. System Settings -> Privacy & Security -> Full Disk Access
+  2. Add your terminal app (Terminal, iTerm, Ghostty, ...) and switch it on
+  3. Restart the terminal (or open a new window)
+  4. Run again: uv run python scripts/import_safari_session.py"""
 
 
 def import_session(output: Path) -> int:

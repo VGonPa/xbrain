@@ -159,13 +159,13 @@ from xbrain.video_digest import (
 )
 from xbrain.worksheet import export_worksheet, import_worksheet
 
-app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
+app = typer.Typer(help="XBrain — X bookmarks and tweets into an Obsidian wiki")
 
 _BOOKMARKS_URL = "https://x.com/i/bookmarks"
 
 _HEADLESS_HELP = (
-    "Navegador oculto. Por defecto headful (visible) — más difícil de "
-    "fingerprintear como bot. Usa --headless en runs desatendidos sin display."
+    "Hidden browser. Headful (visible) by default — harder to fingerprint "
+    "as a bot. Use --headless for unattended runs without a display."
 )
 
 
@@ -274,7 +274,7 @@ def _handle_cli_errors(func: Callable) -> Callable:
 
 def _report_invalid(invalid: list[tuple[str, list[str]]]) -> None:
     if invalid:
-        typer.echo(f"Rechazados por el validador: {len(invalid)}", err=True)
+        typer.echo(f"Rejected by the validator: {len(invalid)}", err=True)
         for item_id, errors in invalid:
             typer.echo(f"  {item_id}: {'; '.join(errors)}", err=True)
 
@@ -314,7 +314,7 @@ def _run_extract(
                 # (and advancing the cursor) would seal a permanent gap in the
                 # incremental store, so persist NOTHING for this source and fail
                 # loud; the next run re-scrolls the window cleanly.
-                typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
+                typer.echo(f"ERROR: {exc} (nothing was saved for {src})", err=True)
                 truncated.append(src)
                 continue
             except OperationNotCaptured as exc:
@@ -322,27 +322,27 @@ def _run_extract(
                 # source. Advancing `last_run` would make the next run look fresh
                 # and hide the breakage, so leave the cursor untouched and fail
                 # loud. Other sources still save: a rename hits one operation.
-                typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
+                typer.echo(f"ERROR: {exc} (nothing was saved for {src})", err=True)
                 truncated.append(src)
                 continue
             if not items and first_run:
                 typer.echo(
-                    f"AVISO: {src} devolvió 0 items en una extracción inicial — "
-                    "revisa la sesión de X o el parser GraphQL (spec §6).",
+                    f"WARNING: {src} returned 0 items on an initial extraction — "
+                    "check the X session or the GraphQL parser (spec §6).",
                     err=True,
                 )
             added = merge_items(store, items)
             if items:
                 cursor.last_seen_id = max(items, key=lambda i: int(i.id)).id
             cursor.last_run = datetime.now(timezone.utc)
-            typer.echo(f"{src}: {added} nuevos items")
+            typer.echo(f"{src}: {added} new items")
     save_store(store, cfg.items_path)
     save_state(state, cfg.state_path)
     if truncated:
         raise RuntimeError(
-            f"Extracción incompleta en: {', '.join(truncated)} (rate-limit, bloqueo, o "
-            "la operación GraphQL de X cambió de nombre — el mensaje de arriba lo dice). "
-            "Las fuentes completadas se guardaron; reanuda más tarde para el resto."
+            f"Incomplete extraction for: {', '.join(truncated)} (rate limit, block, or "
+            "X renamed the GraphQL operation — the message above says which). "
+            "The completed sources were saved; resume later for the rest."
         )
 
 
@@ -443,13 +443,13 @@ def _guard_empty_recapture(
     if not (store and items_seen == 0):
         return
     warning = (
-        f"{label} re-vio 0 de los {len(store)} items ya conocidos — "
-        "la sesión de X probablemente caducó o el parser GraphQL ha derivado "
-        "(spec §6); no se actualizó nada."
+        f"{label} re-saw 0 of the {len(store)} already-known items — "
+        "the X session probably expired or the GraphQL parser has drifted "
+        "(spec §6); nothing was updated."
     )
     if not force:
-        raise RuntimeError(f"{warning} Usa --force para guardar igualmente.")
-    typer.echo(f"AVISO: {warning}", err=True)
+        raise RuntimeError(f"{warning} Use --force to save anyway.")
+    typer.echo(f"WARNING: {warning}", err=True)
 
 
 def _run_refresh_quoted_from_store(cfg: Config) -> None:
@@ -473,9 +473,9 @@ def _run_refresh_quoted_from_store(cfg: Config) -> None:
     )
     if report.readable:
         typer.echo(
-            f"Ahora: `xbrain enrich` re-genera los {report.readable} summaries con la "
-            "evidencia nueva (solo esos avanzan `content.fetched_at`; un post citado "
-            "ilegible se registra pero no re-enriquece)."
+            f"Next: `xbrain enrich` regenerates the {report.readable} summaries with the "
+            "new evidence (only those advance `content.fetched_at`; an unreadable quoted "
+            "post is recorded but does not re-enrich)."
         )
 
 
@@ -506,9 +506,9 @@ def _run_refresh_quoted(cfg: Config, source: str, *, force: bool, headless: bool
     )
     if report.readable:
         typer.echo(
-            f"Ahora: `xbrain enrich` re-genera los {report.readable} summaries con la "
-            "evidencia nueva (solo esos avanzan `content.fetched_at`; un post citado "
-            "ilegible se registra pero no re-enriquece)."
+            f"Next: `xbrain enrich` regenerates the {report.readable} summaries with the "
+            "new evidence (only those advance `content.fetched_at`; an unreadable quoted "
+            "post is recorded but does not re-enrich)."
         )
 
 
@@ -572,7 +572,7 @@ def _run_fetch(
         # Persist whatever was fetched even if a later stage raised — a stage
         # error (e.g. an expired X session) must not discard in-memory work.
         save_store(store, cfg.items_path)
-    typer.echo(f"Contenido descargado: {articles} artículos, {x_articles} de X, {threads} hilos")
+    typer.echo(f"Content fetched: {articles} articles, {x_articles} from X, {threads} threads")
 
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
@@ -588,13 +588,13 @@ def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -
         media_root=cfg.media_dir,
         topic_pages=topic_pages,
     )
-    typer.echo(f"Markdown generado en {cfg.output_dir}")
+    typer.echo(f"Markdown generated in {cfg.output_dir}")
 
 
 @app.command()
 @_handle_cli_errors
 def login() -> None:
-    """Abre un navegador para iniciar sesión en X y guarda la sesión."""
+    """Open a browser to log in to X and save the session."""
     run_login(_config().storage_state_path)
 
 
@@ -606,7 +606,7 @@ def extract(
     until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
-    """Extrae bookmarks y/o tweets propios desde X."""
+    """Extract bookmarks and/or your own tweets from X."""
     _run_extract(
         _config(),
         source.value,
@@ -619,7 +619,7 @@ def extract(
 @app.command(name="import-archive")
 @_handle_cli_errors
 def import_archive(zip_path: Path) -> None:
-    """Backfill del histórico de tweets desde el archivo oficial de X."""
+    """Backfill the tweet history from the official X archive."""
     cfg = _config()
     store = load_store(cfg.items_path)
     state = load_state(cfg.state_path)
@@ -628,28 +628,28 @@ def import_archive(zip_path: Path) -> None:
     state.archive_imported = ArchiveImport(file=zip_path.name, at=datetime.now(timezone.utc))
     save_store(store, cfg.items_path)
     save_state(state, cfg.state_path)
-    typer.echo(f"Archivo importado: {added} tweets nuevos")
+    typer.echo(f"Archive imported: {added} new tweets")
 
 
 def _echo_retry_plan(plan: RetryPlan, *, has_key: bool) -> None:
     """Report the plan — including, loudly, what it will NOT attempt and why."""
     reasons = ", ".join(f"{n} {reason}" for reason, n in sorted(plan.reasons.items()))
-    typer.echo(f"Reintentables: {len(plan.retryable)} items" + (f" ({reasons})" if reasons else ""))
+    typer.echo(f"Retryable: {len(plan.retryable)} items" + (f" ({reasons})" if reasons else ""))
     if plan.blocked_on_firecrawl:
         looked_in = "\n".join(f"    - {p}" for p in FIRECRAWL_CREDENTIAL_PATHS)
         typer.echo(
-            f"BLOQUEADOS por falta de clave Firecrawl: {len(plan.blocked_on_firecrawl)} items "
-            "con fallos js_required/empty_content que NUNCA llegaron a pasar por el fallback "
-            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo.\n"
-            "  Se ha buscado en $FIRECRAWL_API_KEY y en las credenciales del CLI:\n"
+            f"BLOCKED for lack of a Firecrawl key: {len(plan.blocked_on_firecrawl)} items "
+            "with js_required/empty_content failures that NEVER went through the fallback "
+            "(attempts=1). Without the key, retrying them repeats the same failure.\n"
+            "  Looked in $FIRECRAWL_API_KEY and in the CLI credentials:\n"
             f"{looked_in}\n"
-            "  Configúrala (o ejecuta `firecrawl login`) y vuelve a ejecutar."
+            "  Configure it (or run `firecrawl login`) and run again."
         )
     elif has_key:
-        typer.echo("Clave Firecrawl resuelta — el fallback JS entra en los reintentos.")
+        typer.echo("Firecrawl key resolved — the JS fallback joins the retries.")
     typer.echo(
-        f"Terminales (ningún extractor los arregla): {len(plan.terminal)} items. "
-        "Su nota de guardarraíl ya nombra la causa."
+        f"Terminal (no extractor can fix them): {len(plan.terminal)} items. "
+        "Their guardrail note already names the cause."
     )
 
 
@@ -667,7 +667,7 @@ def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
     plan = plan_retry_failed(store, firecrawl_configured=has_key)
     _echo_retry_plan(plan, has_key=has_key)
     if dry_run:
-        typer.echo("--dry-run: no se ha tocado el store.")
+        typer.echo("--dry-run: the store was not touched.")
         return
     if not plan.retryable:
         return
@@ -682,10 +682,10 @@ def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
     after = plan_retry_failed(store, firecrawl_configured=has_key)
     repaired = [i for i in plan.retryable if i not in set(after.retryable) | set(after.terminal)]
     typer.echo(
-        f"Reintentados: {refetched} items → {cfg.items_path}\n"
-        f"  reparados (ya tienen artículo): {len(repaired)}\n"
-        f"  siguen sin contenido: {refetched - len(repaired)} "
-        "(su nota de guardarraíl sigue activa y nombra la causa)"
+        f"Retried: {refetched} items → {cfg.items_path}\n"
+        f"  repaired (now have an article): {len(repaired)}\n"
+        f"  still without content: {refetched - len(repaired)} "
+        "(their guardrail note stays active and names the cause)"
     )
 
 
@@ -704,23 +704,23 @@ def _run_revalidate(cfg: Config, *, write: bool) -> None:
     found = revalidate_stored_bodies(store)
     domains = Counter(urlparse(u).hostname or u for u in found.urls)
     typer.echo(
-        f"Cuerpos que NO son artículos: {len(found.items)} items. Su 'artículo' es en realidad un "
-        "muro (cookies/login), un reto anti-bot o puro chrome de página — hoy se le sirven al "
-        "juez como `[Linked article]` y el guardarraíl NO se dispara para ellos."
+        f"Bodies that are NOT articles: {len(found.items)} items. Their 'article' is really a "
+        "wall (cookies/login), an anti-bot challenge or pure page chrome — today they are served "
+        "to the judge as `[Linked article]` and the guardrail does NOT fire for them."
     )
     for domain, count in domains.most_common(12):
         typer.echo(f"  {count:>3}  {domain}")
     if not write:
         typer.echo(
-            "\nInforme solamente — el store NO se ha tocado. Repite con --write para degradarlos "
-            "a fallo `blocked_interstitial` (se hace snapshot antes)."
+            "\nReport only — the store was NOT touched. Re-run with --write to demote them "
+            "to a `blocked_interstitial` failure (a snapshot is taken first)."
         )
         return
     if not found.items:
         return
     _auto_snapshot(cfg, "fetch-revalidate")
     save_store(store, cfg.items_path)
-    typer.echo(f"\nDegradados a `blocked_interstitial` → {cfg.items_path}")
+    typer.echo(f"\nDemoted to `blocked_interstitial` → {cfg.items_path}")
 
 
 @app.command()
@@ -728,31 +728,31 @@ def _run_revalidate(cfg: Config, *, write: bool) -> None:
 def fetch(
     since: str = typer.Option(None),
     until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
-    force: bool = typer.Option(False, help="Volver a descargar lo ya descargado"),
+    force: bool = typer.Option(False, help="Re-download what was already downloaded"),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
     retry_failed: bool = typer.Option(
         False,
         "--retry-failed",
-        help="Reintenta SOLO los enlaces cuyo fallo registrado un reintento puede reparar "
-        "(transitorios, y js_required/empty_content si hay FIRECRAWL_API_KEY). No re-descarga "
-        "lo que ya funcionó, a diferencia de --force.",
+        help="Retry ONLY the links whose recorded failure a retry can repair "
+        "(transient ones, plus js_required/empty_content when FIRECRAWL_API_KEY is set). "
+        "Unlike --force, it does not re-download what already worked.",
     ),
     revalidate: bool = typer.Option(
         False,
         "--revalidate",
-        help="Re-juzga los cuerpos YA guardados y degrada los que son muros de cookies/login o "
-        "chrome de página (28 medidos en el corpus real). Local, sin red.",
+        help="Re-judge the bodies ALREADY stored and demote the ones that are cookie/login walls "
+        "or page chrome (28 measured on the real corpus). Local, no network.",
     ),
     write: bool = typer.Option(
         False,
         "--write",
-        help="Con --revalidate: aplica las degradaciones (por defecto solo informa).",
+        help="With --revalidate: apply the demotions (by default it only reports).",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Con --retry-failed: informa del plan sin tocar el store."
+        False, "--dry-run", help="With --retry-failed: report the plan without touching the store."
     ),
 ) -> None:
-    """Descarga el contenido de los artículos enlazados."""
+    """Download the content of linked articles."""
     if dry_run and not retry_failed:
         raise typer.BadParameter("--dry-run requires --retry-failed.")
     if write and not revalidate:
@@ -815,8 +815,8 @@ def _run_media(
         missing = target - store_ids
         if missing and not (target & store_ids):
             typer.echo(
-                f"AVISO: --items {','.join(items_filter)} no coincide con ningún item "
-                f"del store ({len(store_ids)} items). El run será un no-op.",
+                f"WARNING: --items {','.join(items_filter)} matches no item "
+                f"in the store ({len(store_ids)} items). The run will be a no-op.",
                 err=True,
             )
     _auto_snapshot(cfg, "media")
@@ -842,11 +842,11 @@ def _run_media(
     media_emit_summary_line(report)
     article_failed = report.article_images_failed_permanent + report.article_images_failed_transient
     typer.echo(
-        f"Media: descargadas {report.photos_downloaded}, "
-        f"fallidas {report.photos_failed_permanent + report.photos_failed_transient}, "
-        f"saltadas {report.photos_skipped_already_downloaded} "
-        f"(imágenes de artículo: descargadas {report.article_images_downloaded}, "
-        f"fallidas {article_failed}, saltadas {report.article_images_skipped})"
+        f"Media: downloaded {report.photos_downloaded}, "
+        f"failed {report.photos_failed_permanent + report.photos_failed_transient}, "
+        f"skipped {report.photos_skipped_already_downloaded} "
+        f"(article images: downloaded {report.article_images_downloaded}, "
+        f"failed {article_failed}, skipped {report.article_images_skipped})"
     )
     if verbose and report.per_item_failures:
         typer.echo("Failed media:", err=True)
@@ -861,30 +861,30 @@ def media(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Re-descargar todas las fotos, incluso las ya descargadas o permanentemente "
-        "fallidas (HTTP 4xx, format_error).",
+        help="Re-download every photo, even those already downloaded or permanently "
+        "failed (HTTP 4xx, format_error).",
     ),
     limit: int | None = typer.Option(
         None,
         "--limit",
-        help="Máximo número de descargas a intentar en esta ejecución.",
+        help="Maximum number of downloads to attempt in this run.",
     ),
     items: str | None = typer.Option(
         None,
         "--items",
-        help="IDs de items separados por comas para limitar el alcance del run.",
+        help="Comma-separated item IDs to limit the scope of the run.",
     ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
-        help="Imprime cada foto fallida (item_id, motivo, URL) al final del run.",
+        help="Print every failed photo (item_id, reason, URL) at the end of the run.",
     ),
 ) -> None:
-    """Descarga las fotos de los X-posts referenciadas en `items.json`.
+    """Download the photos of the X posts referenced in `items.json`.
 
-    Solo descarga fotos (`MediaPhotoPending` + reintentos transient). Los
-    vídeos quedan en su variante `MediaVideoPending` para una fase posterior
-    — la opción `--force` NO los descarga.
+    Only photos are downloaded (`MediaPhotoPending` + transient retries).
+    Videos stay in their `MediaVideoPending` variant for a later stage
+    — `--force` does NOT download them.
     """
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
@@ -898,24 +898,24 @@ def refresh_media(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Guardar aunque se re-vean 0 items conocidos (sesión caducada / "
-        "drift de GraphQL). Por defecto ese caso aborta sin escribir.",
+        help="Save even if 0 known items are re-seen (expired session / "
+        "GraphQL drift). By default that case aborts without writing.",
     ),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
-    """Re-captura X y refresca la URL/metadata de vídeo de items ya guardados.
+    """Re-capture X and refresh the video URL/metadata of already-stored items.
 
-    Recorre el histórico COMPLETO (sin saltarse ids conocidos) y reescribe las
-    entradas de vídeo poster-era con el stream reproducible + bitrate +
-    duración. No toca fotos ni el estado de enriquecimiento/descripción, y no
-    degrada un vídeo bueno a su póster si X deja de servir el stream.
+    Walks the FULL history (without skipping known ids) and rewrites the
+    poster-era video entries with the playable stream + bitrate + duration.
+    It does not touch photos or the enrichment/description state, and it
+    never demotes a good video to its poster if X stops serving the stream.
 
-    Es destructivo (reescribe `items.json` in situ) → auto-snapshot antes de
-    escribir. Si se re-ven 0 items conocidos sobre un store no vacío (probable
-    sesión caducada o drift del parser), aborta sin guardar salvo `--force`.
-    NO descarga vídeo (eso es una fase posterior): solo imprime una estimación
-    del tamaño total de descarga. El scroll es lento y a ritmo humano; puede
-    tardar varios minutos.
+    Destructive (rewrites `items.json` in place) → auto-snapshot before
+    writing. If 0 known items are re-seen against a non-empty store (likely
+    an expired session or parser drift), it aborts without saving unless
+    `--force`. It does NOT download video (that is a later stage): it only
+    prints an estimate of the total download size. The scroll is slow and
+    human-paced; it can take several minutes.
     """
     _run_refresh_media(_config(), source.value, force=force, headless=headless)
 
@@ -927,38 +927,38 @@ def refresh_quoted(
     from_store: bool = typer.Option(
         False,
         "--from-store",
-        help="Sin red: adjunta el post citado SOLO cuando ya está en el store como "
-        "item propio (medido: 199 de 762). Instantáneo y re-ejecutable.",
+        help="No network: attach the quoted post ONLY when it is already in the store as "
+        "an item of its own (measured: 199 of 762). Instant and re-runnable.",
     ),
     force: bool = typer.Option(
         False,
         "--force",
-        help="Guardar aunque se re-vean 0 items conocidos (sesión caducada / "
-        "drift de GraphQL). Por defecto ese caso aborta sin escribir.",
+        help="Save even if 0 known items are re-seen (expired session / "
+        "GraphQL drift). By default that case aborts without writing.",
     ),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
-    """Re-captura X y adjunta el POST CITADO a los quote-tweets ya guardados.
+    """Re-capture X and attach the QUOTED POST to already-stored quote-tweets.
 
-    Con `--from-store` NO abre el navegador: hace el join `quoted_id → item` contra el
-    propio store, que ya contiene el post citado en 199 de los 762 casos (26,1%).
-    Empieza siempre por ahí — es gratis — y luego re-captura para el resto.
+    With `--from-store` it does NOT open the browser: it joins `quoted_id → item`
+    against the store itself, which already holds the quoted post in 199 of the
+    762 cases (26.1%). Always start there — it is free — then re-capture for the rest.
 
-    Los items existentes solo guardan `quoted_id`: el cuerpo del post citado y su
-    autor se perdían, así que el generador veía una reacción a secas ("Read this
-    and you'll understand") y no tenía qué resumir — el hueco lo rellenaba
-    inventando. X incrusta el post citado en el MISMO payload del timeline, así que
-    esto NO hace ni una petición extra por item: recorre el histórico completo (sin
-    saltarse ids conocidos) y re-parsea.
+    Existing items only store `quoted_id`: the quoted post's body and its author
+    were lost, so the generator saw a bare reaction ("Read this and you'll
+    understand") with nothing to summarise — and filled the gap by inventing.
+    X embeds the quoted post in the SAME timeline payload, so this makes NOT ONE
+    extra request per item: it walks the full history (without skipping known
+    ids) and re-parses.
 
-    Solo toca las fuentes `quoted_tweet`: artículos, transcripciones, hilos y todo
-    el enriquecimiento se preservan. Idempotente (un post citado ya legible se deja
-    intacto; uno fallido se re-intenta). Los items que ganan evidencia avanzan su
-    `content.fetched_at`, de modo que el siguiente `xbrain enrich` re-genera
-    exactamente esos summaries.
+    It only touches `quoted_tweet` sources: articles, transcripts, threads and all
+    enrichment are preserved. Idempotent (an already-readable quoted post is left
+    intact; a failed one is retried). Items that gain evidence advance their
+    `content.fetched_at`, so the next `xbrain enrich` regenerates exactly those
+    summaries.
 
-    Es destructivo (reescribe `items.json` in situ) → auto-snapshot antes de
-    escribir. El scroll es lento y a ritmo humano; puede tardar varios minutos.
+    Destructive (rewrites `items.json` in place) → auto-snapshot before writing.
+    The scroll is slow and human-paced; it can take several minutes.
     """
     if from_store:
         _run_refresh_quoted_from_store(_config())
@@ -993,8 +993,8 @@ def _run_describe(
         missing = target - store_ids
         if missing and not (target & store_ids):
             typer.echo(
-                f"AVISO: --items {','.join(items_filter)} no coincide con ningún item "
-                f"del store ({len(store_ids)} items). El run será un no-op.",
+                f"WARNING: --items {','.join(items_filter)} matches no item "
+                f"in the store ({len(store_ids)} items). The run will be a no-op.",
                 err=True,
             )
     _auto_snapshot(cfg, "describe")
@@ -1023,9 +1023,9 @@ def _run_describe(
         save_store(store, cfg.items_path)
     describe_emit_summary_line(report)
     typer.echo(
-        f"Describe: descritas {report.photos_described}, "
-        f"fallidas {report.photos_failed}, "
-        f"saltadas {report.photos_skipped_already_described}"
+        f"Describe: described {report.photos_described}, "
+        f"failed {report.photos_failed}, "
+        f"skipped {report.photos_skipped_already_described}"
     )
     if verbose and report.per_item_failures:
         typer.echo("Failed photos:", err=True)
@@ -1040,54 +1040,53 @@ def describe(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Re-describir todas las fotos, incluso las ya descritas en la versión actual.",
+        help="Re-describe every photo, even those already described at the current version.",
     ),
     limit: int | None = typer.Option(
         None,
         "--limit",
-        help="Máximo número de fotos a describir en esta ejecución.",
+        help="Maximum number of photos to describe in this run.",
     ),
     items: str | None = typer.Option(
         None,
         "--items",
-        help="IDs de items separados por comas para limitar el alcance del run.",
+        help="Comma-separated item IDs to limit the scope of the run.",
     ),
     model: str | None = typer.Option(
         None,
         "--model",
-        help="Modelo de visión a usar. Si no se pasa, se usa el del config (`describe.model`).",
+        help="Vision model to use. If omitted, the config's (`describe.model`) is used.",
     ),
     batch_size: int = typer.Option(
         5,
         "--batch-size",
         min=1,
-        help="Número de imágenes por llamada a la API. 5 es el sweet spot (12-15%% ahorro de tokens).",
+        help="Images per API call. 5 is the sweet spot (12-15%% token savings).",
     ),
     executor: str | None = typer.Option(
         None,
         "--executor",
-        help="api | manual | claude-code (default: api). manual/claude-code exportan un "
-        "worksheet para describir sin API key (como enrich/topics).",
+        help="api | manual | claude-code (default: api). manual/claude-code export a "
+        "worksheet to describe without an API key (like enrich/topics).",
     ),
     apply: Path | None = typer.Option(
         None,
         "--apply",
-        help="Importa un worksheet de descripciones relleno y lo aplica (sin API key).",
+        help="Import a filled description worksheet and apply it (no API key).",
     ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
-        help="Imprime cada foto fallida (item_id, URL, error) al final del run.",
+        help="Print every failed photo (item_id, URL, error) at the end of the run.",
     ),
 ) -> None:
-    """Describe las fotos descargadas con un LLM de visión.
+    """Describe the downloaded photos with a vision LLM.
 
-    Solo describe fotos con bytes en disco (`MediaPhotoDownloaded`).
-    Las entradas ya descritas en la versión actual se saltan; bumpear
-    `[describe].version` en `config.toml` fuerza un re-describe
-    automático sin `--force`. Las descripciones se persisten en
-    `items.json` y son consumidas por `xbrain enrich` y `xbrain topics`
-    en las llamadas LLM subsiguientes.
+    Only photos with bytes on disk (`MediaPhotoDownloaded`) are described.
+    Entries already described at the current version are skipped; bumping
+    `[describe].version` in `config.toml` forces an automatic re-describe
+    without `--force`. Descriptions are persisted in `items.json` and
+    consumed by `xbrain enrich` and `xbrain topics` in later LLM calls.
     """
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
@@ -1097,11 +1096,11 @@ def describe(
         store = load_store(cfg.items_path)
         applied, invalid = apply_describe_worksheet(store, apply)
         save_store(store, cfg.items_path)
-        typer.echo(f"Describe worksheet aplicada: {applied} fotos descritas")
+        typer.echo(f"Describe worksheet applied: {applied} photos described")
         _report_invalid(invalid)
         return
     if executor is not None and executor not in ("api", "manual", "claude-code"):
-        raise ValueError(f"Ejecutor desconocido: {executor!r}")
+        raise ValueError(f"Unknown executor: {executor!r}")
     if executor in ("manual", "claude-code"):
         store = load_store(cfg.items_path)
         n = export_describe_worksheet(
@@ -1115,8 +1114,8 @@ def describe(
             items_filter=items_filter,
         )
         typer.echo(
-            f"{n} fotos exportadas a {worksheet_path}\n"
-            "Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
+            f"{n} photos exported to {worksheet_path}\n"
+            "Fill in the `judgments` array (with Claude Code or by hand) and run:\n"
             f"  xbrain describe --apply {worksheet_path}"
         )
         return
@@ -1138,8 +1137,8 @@ def _warn_items_filter_no_match(cfg: Config, items_filter: list[str]) -> None:
     store_ids = set(load_store(cfg.items_path))
     if (target - store_ids) and not (target & store_ids):
         typer.echo(
-            f"AVISO: --items {','.join(items_filter)} no coincide con ningún item "
-            f"del store ({len(store_ids)} items). El run será un no-op.",
+            f"WARNING: --items {','.join(items_filter)} matches no item "
+            f"in the store ({len(store_ids)} items). The run will be a no-op.",
             err=True,
         )
 
@@ -1202,18 +1201,18 @@ def _run_download_videos(
     )
     if plan.n_to_download == 0:
         typer.echo(
-            f"No hay vídeos mp4 que descargar "
-            f"({plan.n_hls_skipped} HLS pendientes de ffmpeg, "
+            f"No mp4 videos to download "
+            f"({plan.n_hls_skipped} HLS awaiting ffmpeg, "
             f"{plan.n_poster_skipped} poster-era, "
-            f"{plan.n_already_downloaded} ya descargados, "
+            f"{plan.n_already_downloaded} already downloaded, "
             f"{plan.n_too_large} > --max-size, "
-            f"{plan.n_size_unknown_skipped} sin tamaño)."
+            f"{plan.n_size_unknown_skipped} without a size)."
         )
         emit_video_summary_line(_skip_only_report(plan))
         return
     typer.echo(format_size_gate(plan))
     if not yes:
-        typer.confirm("¿Continuar con la descarga?", abort=True)
+        typer.confirm("Proceed with the download?", abort=True)
     _auto_snapshot(cfg, "download-videos")
 
     def _persist() -> None:
@@ -1236,13 +1235,13 @@ def _run_download_videos(
         save_store(store, cfg.items_path)
     emit_video_summary_line(report)
     typer.echo(
-        f"Vídeos: descargados {report.videos_downloaded}, "
-        f"fallidos {report.videos_failed_permanent + report.videos_failed_transient}, "
-        f"HLS saltados {report.videos_skipped_hls}, "
-        f"poster-era saltados {report.videos_skipped_poster_era}, "
-        f"ya descargados {report.videos_skipped_already_downloaded}, "
+        f"Videos: downloaded {report.videos_downloaded}, "
+        f"failed {report.videos_failed_permanent + report.videos_failed_transient}, "
+        f"HLS skipped {report.videos_skipped_hls}, "
+        f"poster-era skipped {report.videos_skipped_poster_era}, "
+        f"already downloaded {report.videos_skipped_already_downloaded}, "
         f"> --max-size {report.videos_skipped_too_large}, "
-        f"sin tamaño {report.videos_skipped_size_unknown}"
+        f"without a size {report.videos_skipped_size_unknown}"
     )
 
 
@@ -1253,41 +1252,41 @@ def download_videos(
     limit: int | None = typer.Option(
         None,
         "--limit",
-        help="Máximo número de vídeos a descargar en esta ejecución.",
+        help="Maximum number of videos to download in this run.",
     ),
     items: str | None = typer.Option(
         None,
         "--items",
-        help="IDs de items separados por comas para limitar el alcance del run.",
+        help="Comma-separated item IDs to limit the scope of the run.",
     ),
     force: bool = typer.Option(
         False,
         "--force",
-        help="Re-descargar vídeos ya descargados y reintentar los fallos permanentes.",
+        help="Re-download already-downloaded videos and retry permanent failures.",
     ),
     yes: bool = typer.Option(
         False,
         "--yes",
-        help="No pedir confirmación del tamaño de descarga (modo no interactivo).",
+        help="Do not ask to confirm the download size (non-interactive mode).",
     ),
     max_size: str | None = typer.Option(
         None,
         "--max-size",
-        help="Saltar vídeos cuyo tamaño estimado supere este cap. Acepta 500MB / 2GB "
-        "(unidades decimales); un número sin unidad se interpreta como MB. Con el cap "
-        "puesto, los vídeos de tamaño desconocido (sin bitrate/duración) también se saltan.",
+        help="Skip videos whose estimated size exceeds this cap. Accepts 500MB / 2GB "
+        "(decimal units); a number without a unit is read as MB. With the cap set, "
+        "videos of unknown size (no bitrate/duration) are skipped too.",
     ),
 ) -> None:
-    """Descarga los bytes mp4 de los vídeos referenciados en `items.json`.
+    """Download the mp4 bytes of the videos referenced in `items.json`.
 
-    Solo descarga streams mp4 reproducibles (entradas `MediaVideoPending` con
-    URL real, más reintentos transient). Antes de descargar imprime una
-    estimación del tamaño total (~X.X GB) y pide confirmación salvo `--yes`. Los
-    manifiestos HLS (`.m3u8`) necesitan ffmpeg y se posponen a un follow-up: se
-    cuentan y se saltan, no se descargan aquí. Las entradas poster-era (sin
-    backfill: usa antes `xbrain refresh-media`) también se saltan. `--max-size`
-    (p.ej. `500MB` / `2GB`) salta los vídeos demasiado grandes por estimación.
-    Es destructivo (reescribe `items.json`) → auto-snapshot antes de escribir.
+    Only playable mp4 streams are downloaded (`MediaVideoPending` entries with a
+    real URL, plus transient retries). Before downloading it prints an estimate
+    of the total size (~X.X GB) and asks for confirmation unless `--yes`. HLS
+    manifests (`.m3u8`) need ffmpeg and are deferred to a follow-up: they are
+    counted and skipped, not downloaded here. Poster-era entries (not backfilled:
+    run `xbrain refresh-media` first) are skipped too. `--max-size`
+    (e.g. `500MB` / `2GB`) skips videos estimated to be too large.
+    Destructive (rewrites `items.json`) → auto-snapshot before writing.
     """
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
@@ -1307,30 +1306,30 @@ def download_videos(
 @_handle_cli_errors
 def list_videos(
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
-    topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
+    topic: str | None = typer.Option(None, "--topic", help="Filter by the item's primary_topic."),
     status: VideoStatus | None = typer.Option(
         None,
         "--status",
-        help="Filtra por estado: downloaded | failed | pending | poster-era.",
+        help="Filter by state: downloaded | failed | pending | poster-era.",
     ),
     max_size: str | None = typer.Option(
         None,
         "--max-size",
-        help="Solo vídeos con tamaño conocido <= cap (500MB / 2GB; sin unidad = MB).",
+        help="Only videos with a known size <= cap (500MB / 2GB; no unit = MB).",
     ),
-    limit: int | None = typer.Option(None, "--limit", help="Máximo número de filas."),
+    limit: int | None = typer.Option(None, "--limit", help="Maximum number of rows."),
     json_out: bool = typer.Option(
-        False, "--json", help="Salida como array JSON estable en vez de tabla humana."
+        False, "--json", help="Output a stable JSON array instead of a human table."
     ),
 ) -> None:
-    """Cataloga (solo lectura) los vídeos referenciados en `items.json`.
+    """Catalogue (read-only) the videos referenced in `items.json`.
 
-    Una fila por entrada de vídeo, con estado (downloaded / failed / pending /
-    poster-era), tamaño estimado (exacto si ya está descargado, "unknown" si no
-    hay bitrate/duración), el `primary_topic` del item y un snippet del texto.
-    NO escribe nada ni toma snapshot. Con `--json` emite un array estable con los
-    campos `id, url, state, topic, size_bytes|null, mp4_url, text` que un agente
-    puede parsear para elegir qué vídeos pasar a `fetch-video`.
+    One row per video entry, with its state (downloaded / failed / pending /
+    poster-era), estimated size (exact if already downloaded, "unknown" when
+    there is no bitrate/duration), the item's `primary_topic` and a text snippet.
+    It writes NOTHING and takes no snapshot. With `--json` it emits a stable
+    array with the fields `id, url, state, topic, size_bytes|null, mp4_url, text`
+    that an agent can parse to choose which videos to pass to `fetch-video`.
     """
     cfg = _config()
     store = load_store(cfg.items_path)
@@ -1364,7 +1363,7 @@ def _resolve_fetch_ids(
     if topic:
         id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
     if not id_list:
-        raise ValueError("fetch-video: indica --ids y/o --topic para seleccionar vídeos.")
+        raise ValueError("fetch-video: pass --ids and/or --topic to select videos.")
     return list(dict.fromkeys(id_list))
 
 
@@ -1383,10 +1382,10 @@ def _emit_fetch_report(report: FetchReport, *, json_out: bool) -> None:
         if result.outcome == "fetched":
             typer.echo(f"{result.id}: {result.path}")
         elif result.outcome == "skipped":
-            typer.echo(f"{result.id}: saltado ({result.reason})")
+            typer.echo(f"{result.id}: skipped ({result.reason})")
         else:
             typer.echo(
-                f"{result.id}: fallo ({result.reason}) {result.error or ''}".rstrip(), err=True
+                f"{result.id}: failed ({result.reason}) {result.error or ''}".rstrip(), err=True
             )
     typer.echo(format_fetch_summary(report))
 
@@ -1395,34 +1394,34 @@ def _emit_fetch_report(report: FetchReport, *, json_out: bool) -> None:
 @_handle_cli_errors
 def fetch_video(
     to: Path = typer.Option(
-        ..., "--to", help="Directorio destino (REQUERIDO). Escribe <dir>/<id>.mp4."
+        ..., "--to", help="Destination directory (REQUIRED). Writes <dir>/<id>.mp4."
     ),
-    ids: str | None = typer.Option(None, "--ids", help="IDs de items separados por comas."),
+    ids: str | None = typer.Option(None, "--ids", help="Comma-separated item IDs."),
     topic: str | None = typer.Option(
-        None, "--topic", help="Selecciona vídeos por el primary_topic del item."
+        None, "--topic", help="Select videos by the item's primary_topic."
     ),
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     max_size: str | None = typer.Option(
         None,
         "--max-size",
-        help="Salta vídeos cuyo tamaño estimado supere el cap (500MB / 2GB; sin unidad = MB).",
+        help="Skip videos whose estimated size exceeds the cap (500MB / 2GB; no unit = MB).",
     ),
     limit: int | None = typer.Option(
-        None, "--limit", help="Máximo número de descargas en esta ejecución."
+        None, "--limit", help="Maximum number of downloads in this run."
     ),
     json_out: bool = typer.Option(
-        False, "--json", help="Salida como array JSON estable en vez de líneas humanas."
+        False, "--json", help="Output a stable JSON array instead of human lines."
     ),
 ) -> None:
-    """Descarga (efímera) el mp4 real de los vídeos elegidos a `--to`/<id>.mp4.
+    """Download (ephemerally) the real mp4 of the chosen videos to `--to`/<id>.mp4.
 
-    Selecciona por `--ids` y/o `--topic` (+ `--max-size`, `--limit`). Reutiliza
-    las primitivas de `download-videos` (validación de contenido, clasificación
-    de fallos, escritura atómica, discriminador mp4/HLS/poster). Los HLS y
-    poster-era se saltan y se cuentan. Es DELIBERADAMENTE no persistente: NO muta
-    `items.json`, NO toma snapshot y NO escribe en `data/media/` — solo escribe
-    bajo `--to`. Pensado para que un agente transcriba/analice el vídeo y luego
-    descarte los bytes.
+    Select with `--ids` and/or `--topic` (+ `--max-size`, `--limit`). Reuses the
+    `download-videos` primitives (content validation, failure classification,
+    atomic write, mp4/HLS/poster discriminator). HLS and poster-era entries are
+    skipped and counted. DELIBERATELY non-persisting: it does NOT mutate
+    `items.json`, takes NO snapshot and does NOT write to `data/media/` — it only
+    writes under `--to`. Meant for an agent to transcribe/analyse the video and
+    then discard the bytes.
     """
     cfg = _config()
     store = load_store(cfg.items_path)
@@ -1464,9 +1463,7 @@ def _resolve_digest_ids(
     if topic:
         id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
     if not id_list:
-        raise ValueError(
-            "digest-video: indica --ids, --topic o --all-pending para seleccionar vídeos."
-        )
+        raise ValueError("digest-video: pass --ids, --topic or --all-pending to select videos.")
     unique = list(dict.fromkeys(id_list))
     return unique[:limit] if limit is not None else unique
 
@@ -1484,7 +1481,7 @@ def _build_describe_frame_fn(
     `operation` names the CALLER in the guard's error message (#90 review M7),
     e.g. `"digest-video --frames"` or `"redescribe-frames"` — a refactor once
     replaced a caller-specific message ("digest-video --frames requires an
-    external vision model: …") with a generic "esta operación necesita…", and
+    external vision model: …") with a generic "this operation needs…", and
     the operator lost the one clue telling them WHICH command failed. Required
     (no default) so BOTH call sites must identify themselves.
 
@@ -1493,8 +1490,8 @@ def _build_describe_frame_fn(
     """
     if not cfg.vision_command.strip():
         raise ValueError(
-            f"{operation} necesita un modelo de visión externo: configura "
-            "[vision].command en config.toml (no hay default incorporado)."
+            f"{operation} needs an external vision model: set "
+            "[vision].command in config.toml (there is no built-in default)."
         )
     model = vision_model or cfg.vision_model
 
@@ -1627,79 +1624,82 @@ def _run_digest_video(
 @app.command(name="digest-video")
 @_handle_cli_errors
 def digest_video(
-    ids: str | None = typer.Option(None, "--ids", help="IDs de items separados por comas."),
+    ids: str | None = typer.Option(None, "--ids", help="Comma-separated item IDs."),
     topic: str | None = typer.Option(
-        None, "--topic", help="Selecciona vídeos por el primary_topic del item."
+        None, "--topic", help="Select videos by the item's primary_topic."
     ),
     all_pending: bool = typer.Option(
-        False, "--all-pending", help="Selecciona todos los vídeos en estado pending (fetchables)."
+        False, "--all-pending", help="Select every video in the pending (fetchable) state."
     ),
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     limit: int | None = typer.Option(
-        None, "--limit", help="Máximo número de items a procesar en esta ejecución."
+        None, "--limit", help="Maximum number of items to process in this run."
     ),
     force: bool = typer.Option(
         False,
         "--force",
-        help="Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
-        "con --keep-transcript.",
+        help="Re-process items that already have an x_video source; they are re-transcribed "
+        "unless --keep-transcript.",
     ),
     language: str | None = typer.Option(
         None,
         "--language",
-        help="Idioma a registrar en el transcript si el transcriptor no lo reporta "
-        "(p.ej. en, es). El transcriptor autodetecta; no se le pasa como flag.",
+        help="Language to record on the transcript if the transcriber does not report one "
+        "(e.g. en, es). The transcriber auto-detects; it is not passed to it as a flag.",
     ),
     frames: bool = typer.Option(
         False,
         "--frames",
-        help="Capa visual (opt-in): extrae key-frames, los describe con el modelo de "
-        "visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
-        "Las slides se describen; un talking-head CON voz se salta (el transcript ya lo "
-        "cubre; se registra); un vídeo mudo sin slides se describe como metraje, con "
-        "tope `\\[frames].footage_max_frames`.",
+        help="Visual layer (opt-in): extract key frames, describe them with the EXTERNAL "
+        "vision model (`\\[vision].command`) and embed them in the note. "
+        "Slides are described; a talking head WITH speech is skipped (the transcript already "
+        "covers it; it is logged); a silent video without slides is described as footage, "
+        "capped by `\\[frames].footage_max_frames`.",
     ),
     vision_model: str | None = typer.Option(
         None,
         "--vision-model",
-        help="Sobrescribe `\\[vision].model` para este run: el nombre se pasa como "
-        "--model al comando de visión. Con un wrapper multi-backend permite elegir "
-        "modelo por run (p.ej. opus → nube, qwen-7b → local). Requiere --frames.",
+        help="Override `\\[vision].model` for this run: the name is passed as "
+        "--model to the vision command. With a multi-backend wrapper this picks the "
+        "model per run (e.g. opus → cloud, qwen-7b → local). Requires --frames.",
     ),
     keep_transcript: bool = typer.Option(
         False,
         "--keep-transcript",
-        help="Con --frames --force: rehace la capa visual y reutiliza la transcripción "
-        "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
-        "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
+        help="With --frames --force: redo the visual layer and reuse the stored transcript "
+        "(the ASR is not run again). Like every --force, it clears the long-form digest "
+        "and the item goes back through enrich and video-digest. Use it to recover hollow "
+        "videos.",
     ),
 ) -> None:
-    """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
+    """Transcribe stored videos and attach the transcript as an `x_video` source.
 
-    Para cada vídeo seleccionado: descarga efímera (reutiliza `fetch-video`) →
-    transcribe con un transcriptor EXTERNO local (config `transcribe.command`,
-    por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
-    item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
-    vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
-    URL firmada): en el flujo por defecto, N bookmarks del mismo vídeo se
-    descargan y transcriben UNA vez y todos reciben el mismo transcript. Con
-    `--keep-transcript`, los items se separan por su transcript guardado: una
-    descarga por valor distinto (más el lote sin transcript), cero ASR para los
-    lotes guardados. Un vídeo sin voz/audio se adjunta con texto
-    vacío + `has_speech=False` (nunca es un fallo duro); si además queda sin
-    frames, el resumen lo cuenta en `Huecos (sin voz ni frames): N`. Idempotente:
-    salta items que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
-    `items.json`) → auto-snapshot antes de escribir. Nunca hay más de un vídeo en
-    disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
+    For each selected video: ephemeral download (reuses `fetch-video`) →
+    transcribe with a local EXTERNAL transcriber (config `transcribe.command`,
+    `parakeet-mlx` by default; the ML does NOT live in xbrain) → attach the
+    transcript to the item as `ContentSourceSuccess(kind="x_video")` → discard
+    the bytes. Videos are **deduplicated by identity** (the stable id in the mp4
+    path, not the signed URL): on the default path, N bookmarks of the same video
+    are downloaded and transcribed ONCE and all get the same transcript. With
+    `--keep-transcript`, items are split by their stored transcript: one download
+    per distinct value (plus the batch without a transcript), zero ASR for the
+    stored batches. A video without speech/audio is attached with empty text +
+    `has_speech=False` (never a hard failure); if it also ends up without frames,
+    the summary counts it in `Hollow (no speech, no frames): N`. Idempotent:
+    skips items that already have an x_video source unless `--force`. Destructive
+    (rewrites `items.json`) → auto-snapshot before writing. There is never more
+    than one video on disk at a time (ephemeral). Select with `--ids`, `--topic`
+    or `--all-pending`.
 
-    `--frames` (opt-in, capa visual PR4): extrae key-frames con ffmpeg (EXTERNO),
-    los describe con el modelo de visión EXTERNO (`\\[vision].command`), adjunta las
-    descripciones al source `x_video` y embebe los frames en la nota como fotos.
-    Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
-    (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
-    se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
-    `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
-    `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
+    `--frames` (opt-in, visual layer PR4): extract key frames with ffmpeg
+    (EXTERNAL), describe them with the EXTERNAL vision model
+    (`\\[vision].command`), attach the descriptions to the `x_video` source and
+    embed the frames in the note as photos. Slides are described. A talking head
+    is skipped only when the video has speech (the transcript already covers it;
+    the reason is logged). A silent video without slides is described as footage,
+    capped by `\\[frames].footage_max_frames`. Without `--frames` the flow is the
+    PR2/PR3 one, except that the summary may end with
+    `Hollow (no speech, no frames): N` (silent videos are left without frames).
     """
     cfg = _config()
     if vision_model and not frames:
@@ -1752,7 +1752,7 @@ def _warn_missing_ids(store: dict[str, Item], explicit_ids: list[str]) -> None:
     missing = list(dict.fromkeys(i for i in explicit_ids if i not in store))
     if missing:
         typer.echo(
-            f"redescribe-frames: aviso, id(s) no encontrados en el store: {', '.join(missing)}",
+            f"redescribe-frames: warning, id(s) not found in the store: {', '.join(missing)}",
             err=True,
         )
 
@@ -1864,7 +1864,7 @@ def _resolve_explicit_redescribe_ids(store: dict[str, Item], ids: str) -> list[s
     explicit = [part.strip() for part in ids.split(",") if part.strip()]
     if not explicit:
         typer.echo(
-            "redescribe-frames: aviso, --ids no contiene ningún id válido tras quitar espacios.",
+            "redescribe-frames: warning, --ids holds no valid id after stripping whitespace.",
             err=True,
         )
     _warn_missing_ids(store, explicit)
@@ -1880,7 +1880,7 @@ def _resolve_topic_scoped_redescribe_ids(
     topic_ids = _stale_item_ids(store, topic=topic, source=source, force=force)
     if topic is not None and not topic_ids:
         typer.echo(
-            f"redescribe-frames: aviso, --topic {topic!r} no coincide con ningún vídeo.",
+            f"redescribe-frames: warning, --topic {topic!r} matches no video.",
             err=True,
         )
     return topic_ids
@@ -1908,42 +1908,44 @@ def _dry_run_describe_fn(path: Path) -> str:
 @app.command(name="redescribe-frames")
 @_handle_cli_errors
 def redescribe_frames_command(
-    ids: str | None = typer.Option(None, "--ids", help="IDs separados por comas."),
-    topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
+    ids: str | None = typer.Option(None, "--ids", help="Comma-separated IDs."),
+    topic: str | None = typer.Option(None, "--topic", help="Filter by the item's primary_topic."),
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     limit: int | None = typer.Option(
-        None, "--limit", help="Máximo número de items a re-describir en esta ejecución."
+        None, "--limit", help="Maximum number of items to re-describe in this run."
     ),
-    force: bool = typer.Option(False, "--force", help="Re-describe también los frames ya al día."),
+    force: bool = typer.Option(
+        False, "--force", help="Also re-describe frames already up to date."
+    ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Muestra qué se re-describiría sin escribir nada."
+        False, "--dry-run", help="Show what would be re-described without writing anything."
     ),
     vision_model: str | None = typer.Option(
-        None, "--vision-model", help="Modelo de visión para este run (ver scripts/xbrain-vision)."
+        None, "--vision-model", help="Vision model for this run (see scripts/xbrain-vision)."
     ),
 ) -> None:
-    """Re-describe los key frames YA guardados con el rubric de captions vigente.
+    """Re-describe the ALREADY-stored key frames with the current caption rubric.
 
-    Lee los píxeles de `data/media/<id>/frames/`: NO descarga vídeos, NO llama a
-    X y NO usa ffmpeg. Salta los vídeos cuyas captions ya se generaron con el
-    contrato actual (`--force` las regenera igualmente), así que re-ejecutarlo
-    sobre un corpus al día no cuesta ni una llamada al modelo.
+    Reads the pixels in `data/media/<id>/frames/`: it does NOT download videos,
+    does NOT call X and does NOT use ffmpeg. It skips videos whose captions were
+    already generated under the current contract (`--force` regenerates them
+    anyway), so re-running it on an up-to-date corpus costs zero model calls.
 
-    Cuando alguna caption cambia de verdad, sube `content.fetched_at` del item,
-    que es el disparador que hace que `enrich`, `video-digest` y `generate`
-    vuelvan a correr con la evidencia nueva. Si ninguna cambia, no toca nada.
+    When a caption actually changes, it bumps the item's `content.fetched_at`,
+    the trigger that makes `enrich`, `video-digest` and `generate` run again
+    with the new evidence. If none changes, it touches nothing.
 
-    Es destructivo (reescribe `items.json`), así que auto-snapshota ANTES de
-    guardar — pero sólo cuando hay algo que guardar. Un abort a mitad de camino
-    (`RuntimeError` del circuit breaker, `VisionNotFound`, un `OSError`, Ctrl-C)
-    persiste igualmente lo que ya se re-describió antes del fallo — no se tira
-    el trabajo de visión ya pagado — y el error se sigue propagando con exit
-    code distinto de 0 (#90 review I1).
+    Destructive (rewrites `items.json`), so it auto-snapshots BEFORE saving —
+    but only when there is something to save. An abort midway (`RuntimeError`
+    from the circuit breaker, `VisionNotFound`, an `OSError`, Ctrl-C) still
+    persists what was re-described before the failure — vision work already paid
+    for is not thrown away — and the error still propagates with a non-zero exit
+    code (#90 review I1).
 
-    `--dry-run` NO requiere `\\[vision].command` configurado: previsualiza el
-    backfill (vídeos seleccionados, captions que se regenerarían/fallarían) sin
-    llamar al modelo ni una sola vez. `Re-propagados` en la previsualización NO
-    es una predicción — sólo se sabe corriendo el modelo de verdad.
+    `--dry-run` does NOT require `\\[vision].command` to be configured: it previews
+    the backfill (selected videos, captions that would be regenerated/fail)
+    without calling the model even once. `Re-propagated` in the preview is NOT
+    a prediction — it is only known by actually running the model.
     """
     cfg = _config()
     if vision_model and dry_run:
@@ -2005,7 +2007,7 @@ def _finish_redescribe_run(
     """
     typer.echo(format_redescribe_summary(report, dry_run=dry_run))
     if dry_run:
-        typer.echo("--dry-run: no se ha tocado el store.")
+        typer.echo("--dry-run: the store was not touched.")
         return
     if report.frames_described == 0:
         return
@@ -2019,7 +2021,7 @@ def _finish_redescribe_run(
         if original_error is None:
             raise
         typer.echo(
-            f"AVISO: además del error anterior, falló guardar el store: {save_exc}",
+            f"WARNING: on top of the error above, saving the store failed: {save_exc}",
             err=True,
         )
 
@@ -2036,18 +2038,18 @@ def enrich(
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
 ) -> None:
-    """Enriquece los items con resumen + topics."""
+    """Enrich the items with a summary + topics."""
     cfg = _config()
     store = load_store(cfg.items_path)
     vocab_topics = load_vocab(cfg.data_dir / "vocab.yaml")
     if not vocab_topics:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+        raise RuntimeError("No vocabulary — run `xbrain vocab` first.")
 
     if apply is not None:
         executor_name, judgments = import_worksheet(apply)
         enriched, invalid = apply_worksheet_judgments(store, judgments, vocab_topics, executor_name)
         save_store(store, cfg.items_path)
-        typer.echo(f"Worksheet aplicada: {enriched} items enriquecidos")
+        typer.echo(f"Worksheet applied: {enriched} items enriched")
         _report_invalid(invalid)
         return
 
@@ -2058,19 +2060,19 @@ def enrich(
             store, _parse_date(since), _parse_date(until, end_of_day=True)
         )
         if not pending:
-            typer.echo("No hay items pendientes de enriquecer.")
+            typer.echo("No items pending enrichment.")
             return
         worksheet = cfg.data_dir / "enrich-worksheet.json"
         export_worksheet(pending, vocab_topics, worksheet, chosen, cfg.output_language)
         typer.echo(
-            f"{len(pending)} items exportados a {worksheet}\n"
-            f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
+            f"{len(pending)} items exported to {worksheet}\n"
+            f"Fill in the `judgments` array (with Claude Code or by hand) and run:\n"
             f"  xbrain enrich --apply {worksheet}"
         )
         return
 
     if chosen != "api":
-        raise ValueError(f"Ejecutor desconocido: {chosen!r}")
+        raise ValueError(f"Unknown executor: {chosen!r}")
 
     enriched, invalid = enrich_with_executor(
         store,
@@ -2080,7 +2082,7 @@ def enrich(
         _parse_date(until, end_of_day=True),
     )
     save_store(store, cfg.items_path)
-    typer.echo(f"Enriquecidos: {enriched} items")
+    typer.echo(f"Enriched: {enriched} items")
     _report_invalid(invalid)
 
 
@@ -2094,7 +2096,7 @@ def video_digest_command(
         None, "--apply", help="Import a filled worksheet and apply it"
     ),
 ) -> None:
-    """Genera un digest legible (largo) por vídeo, desde su transcripción + frames."""
+    """Generate a readable long-form digest per video, from its transcript + frames."""
     cfg = _config()
     store = load_store(cfg.items_path)
 
@@ -2106,24 +2108,24 @@ def video_digest_command(
         judgments = import_video_digest_worksheet(apply)
         applied, invalid = apply_video_digest_judgments(store, judgments)
         save_store(store, cfg.items_path)
-        typer.echo(f"Worksheet aplicada: {applied} digests de vídeo")
+        typer.echo(f"Worksheet applied: {applied} video digests")
         _report_invalid(invalid)
         return
 
     chosen = executor or cfg.enrich_executor
     if chosen not in ("manual", "claude-code"):
         raise ValueError(
-            f"Ejecutor {chosen!r} no soportado para video-digest — usa manual|claude-code."
+            f"Executor {chosen!r} is not supported for video-digest — use manual|claude-code."
         )
     pending = items_pending_video_digest(store)
     if not pending:
-        typer.echo("No hay vídeos pendientes de digest.")
+        typer.echo("No videos pending a digest.")
         return
     worksheet = cfg.data_dir / "video-digest-worksheet.json"
     export_video_digest_worksheet(pending, worksheet, chosen, cfg.output_language)
     typer.echo(
-        f"{len(pending)} vídeos exportados a {worksheet}\n"
-        f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
+        f"{len(pending)} videos exported to {worksheet}\n"
+        f"Fill in the `judgments` array (with Claude Code or by hand) and run:\n"
         f"  xbrain video-digest --apply {worksheet}"
     )
 
@@ -2132,7 +2134,9 @@ def _resolve_verify_executor(executor: str | None, cfg: Config) -> str:
     """The worksheet track for `verify`, defaulting to config; only manual/claude-code."""
     chosen = executor or cfg.enrich_executor
     if chosen not in ("manual", "claude-code"):
-        raise ValueError(f"Ejecutor {chosen!r} no soportado para verify — usa manual|claude-code.")
+        raise ValueError(
+            f"Executor {chosen!r} is not supported for verify — use manual|claude-code."
+        )
     return chosen
 
 
@@ -2141,7 +2145,7 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
     (cfg.data_dir / "verify-report.json").write_text(json_report, encoding="utf-8")
     (cfg.data_dir / "verify-report.md").write_text(md_report, encoding="utf-8")
     lines = md_report.splitlines()
-    typer.echo(lines[2] if len(lines) > 2 else "Report escrito")
+    typer.echo(lines[2] if len(lines) > 2 else "Report written")
     typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
 
 
@@ -2184,9 +2188,9 @@ def _echo_invalidated_verdicts(cfg: Config, store: dict[str, Item]) -> None:
     invalidated, stored = count_invalidated_verdicts(store, cfg.output_language)
     if invalidated:
         typer.echo(
-            f"⚠️  {invalidated} de {stored} verdicts almacenados quedaron OBSOLETOS: se "
-            "juzgaron bajo otro contrato (otro output, otra fuente u otra rúbrica). No "
-            "pintan badge; hay que re-verificarlos."
+            f"⚠️  {invalidated} of {stored} stored verdicts are now STALE: they were "
+            "judged under another contract (another output, source or rubric). They "
+            "paint no badge; they must be re-verified."
         )
 
 
@@ -2227,15 +2231,15 @@ def _verify_audit_apply(
     """
     if len(apply) > 1:
         raise ValueError(
-            "El audit es de un único auditor independiente — pasa un solo --apply "
-            f"(recibidos {len(apply)})."
+            "The audit comes from a single independent auditor — pass exactly one --apply "
+            f"(got {len(apply)})."
         )
     if not force and any(isinstance(r, dict) and r.get("audited") for r in aggregated):
         raise ValueError(
-            "verify-report.json ya contiene un audit aplicado. Re-agrega los jueces "
-            "(xbrain verify --apply ...) antes de re-auditar, o pasa --force para "
-            "sobrescribir a sabiendas (evita bypass de la guarda anti-revocación-masiva "
-            "repartiendo revocaciones entre pasadas)."
+            "verify-report.json already contains an applied audit. Re-aggregate the judges "
+            "(xbrain verify --apply ...) before re-auditing, or pass --force to "
+            "overwrite knowingly (this prevents bypassing the mass-revocation guard "
+            "by spreading revocations across passes)."
         )
     audits = import_audit_judgments(apply[0])
     records, audit_log = merge_audit(aggregated, audits)
@@ -2259,14 +2263,10 @@ def _echo_audit_log(audit_log: dict) -> None:
     """The one-line summary of what the merge did — matched, washed, unmatched, guard."""
     unmatched = audit_log["unmatched"]
     typer.echo(
-        f"Audit: {audit_log['matched']}/{audit_log['supplied']} aplicados, "
-        f"{len(audit_log['washed'])} revertidos a menor severidad"
-        + (f", {len(unmatched)} sin correspondencia" if unmatched else "")
-        + (
-            " · GUARDA anti-revocación-masiva ACTIVADA"
-            if audit_log["mass_revocation_guard"]
-            else ""
-        )
+        f"Audit: {audit_log['matched']}/{audit_log['supplied']} applied, "
+        f"{len(audit_log['washed'])} reverted to a lower severity"
+        + (f", {len(unmatched)} unmatched" if unmatched else "")
+        + (" · mass-revocation GUARD TRIGGERED" if audit_log["mass_revocation_guard"] else "")
     )
 
 
@@ -2275,7 +2275,7 @@ def _reject_unaudited_write(aggregated: list[dict], audit_log: dict) -> None:
 
     An `audits` block that matches no record is an audit that never happened: `merge_audit` passes
     every record through untouched, so the write would persist the PRE-audit aggregate — the set
-    this path exists to keep out of the store — while echoing `0/N aplicados` and exiting 0. The
+    this path exists to keep out of the store — while echoing `0/N applied` and exiting 0. The
     report-only run stays allowed (it is a human-read artifact); the STORE write is refused.
     """
     if audit_log["matched"]:
@@ -2283,10 +2283,10 @@ def _reject_unaudited_write(aggregated: list[dict], audit_log: dict) -> None:
     pending = consequential_records(aggregated)
     if pending:
         raise ValueError(
-            f"El audit no casó con ningún record, pero hay {len(pending)} verdicts consecuentes "
-            "(FAIL/divergentes) sin auditar. Escribirlos persistiría el agregado PRE-audit. "
-            "Rellena `audits` en la worksheet (o quita --write-verdicts para re-renderizar solo "
-            "el informe)."
+            f"The audit matched no record, but there are {len(pending)} consequential verdicts "
+            "(FAIL/divergent) left unaudited. Writing them would persist the PRE-audit aggregate. "
+            "Fill in `audits` in the worksheet (or drop --write-verdicts to re-render only "
+            "the report)."
         )
 
 
@@ -2307,18 +2307,18 @@ def _verify_audit(
     chosen = _resolve_verify_executor(executor, cfg)
     records = consequential_records(aggregated)
     if not records:
-        typer.echo("No hay verdicts consecuentes (FAIL/divergentes) que auditar.")
+        typer.echo("No consequential verdicts (FAIL/divergent) to audit.")
         return
     worksheet = cfg.data_dir / "verify-audit-worksheet.json"
     exported, skipped = export_audit_worksheet(
         records, load_store(cfg.items_path), worksheet, chosen, cfg.output_language
     )
     skip_note = (
-        f" ({len(skipped)} omitidos sin item en el store: {', '.join(skipped)})" if skipped else ""
+        f" ({len(skipped)} skipped, no item in the store: {', '.join(skipped)})" if skipped else ""
     )
     typer.echo(
-        f"{exported} verdicts consecuentes exportados a {worksheet}{skip_note}\n"
-        f"Rellena `audits` (auditor independiente, juez ≠ parte) y ejecuta:\n"
+        f"{exported} consequential verdicts exported to {worksheet}{skip_note}\n"
+        f"Fill in `audits` (independent auditor, judge ≠ party) and run:\n"
         f"  xbrain verify --audit --apply {worksheet.name}"
     )
 
@@ -2351,7 +2351,7 @@ def verify_command(
         "Requires --apply; snapshots data/ first.",
     ),
 ) -> None:
-    """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
+    """Verify the enrichment outputs (faithfulness + adherence) with LLM judges."""
     cfg = _config()
 
     if write_verdicts and not apply:
@@ -2395,13 +2395,13 @@ def verify_command(
     _echo_invalidated_verdicts(cfg, store)
     pairs = items_for_verification(store, parse_targets(target))
     if not pairs:
-        typer.echo("No hay outputs que verificar.")
+        typer.echo("No outputs to verify.")
         return
     worksheet = cfg.data_dir / "verify-worksheet.json"
     export_verify_worksheet(pairs, worksheet, chosen, cfg.output_language)
     typer.echo(
-        f"{len(pairs)} outputs exportados a {worksheet}\n"
-        f"Copia N veces (una por juez), rellena `judgments` en cada una, y ejecuta:\n"
+        f"{len(pairs)} outputs exported to {worksheet}\n"
+        f"Copy it N times (one per judge), fill in `judgments` in each, and run:\n"
         f"  xbrain verify --apply ws1.json --apply ws2.json ..."
     )
 
@@ -2412,7 +2412,7 @@ def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:
         for item in store.values():
             item.enriched = None
         save_store(store, cfg.items_path)
-        typer.echo("Todos los items marcados para re-enriquecer.")
+        typer.echo("All items marked for re-enrichment.")
 
 
 def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> None:
@@ -2420,14 +2420,14 @@ def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> Non
     topics, invalid = apply_vocab_worksheet(import_vocab_worksheet(apply))
     _report_invalid(invalid)
     if not topics:
-        raise RuntimeError("La worksheet no produjo ningún topic válido.")
+        raise RuntimeError("The worksheet produced no valid topic.")
     if regenerate:
         _auto_snapshot(cfg, "vocab-regenerate")
     # Mark the store first: a crash here leaves items pending (a re-run re-marks
     # idempotently) — safer than vocab.yaml updated while items stay stale.
     _mark_for_regenerate(store, cfg, regenerate)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
-    typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    typer.echo(f"Vocabulary applied: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
 
 
 def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool) -> None:
@@ -2438,37 +2438,37 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
         export_vocab_worksheet(store, cfg.vocab_target_count, worksheet, cfg.output_language)
         regen = " --regenerate" if regenerate else ""
         typer.echo(
-            f"Corpus exportado a {worksheet}\n"
-            f"Induce la taxonomía (con Claude Code o a mano) y ejecuta:\n"
+            f"Corpus exported to {worksheet}\n"
+            f"Induce the taxonomy (with Claude Code or by hand) and run:\n"
             f"  xbrain vocab --apply {worksheet}{regen}"
         )
         return
     if chosen != "api":
-        raise ValueError(f"Ejecutor desconocido: {chosen!r}")
+        raise ValueError(f"Unknown executor: {chosen!r}")
     if regenerate:
         _auto_snapshot(cfg, "vocab-regenerate")
     topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model, cfg.output_language)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     _mark_for_regenerate(store, cfg, regenerate)
-    typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    typer.echo(f"Vocabulary induced: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
 
 
 @app.command()
 @_handle_cli_errors
 def vocab(
     regenerate: bool = typer.Option(
-        False, help="Marca todos los items para re-enriquecer contra la taxonomía nueva"
+        False, help="Mark every item for re-enrichment against the new taxonomy"
     ),
     executor: str | None = typer.Option(
-        None, help="api | manual | claude-code (default: el de config.toml)"
+        None, help="api | manual | claude-code (default: the one in config.toml)"
     ),
-    apply: Path | None = typer.Option(None, "--apply", help="Importar una vocab worksheet rellena"),
+    apply: Path | None = typer.Option(None, "--apply", help="Import a filled vocab worksheet"),
 ) -> None:
-    """Induce el vocabulario de topics (data/vocab.yaml) desde el corpus."""
+    """Induce the topic vocabulary (data/vocab.yaml) from the corpus."""
     cfg = _config()
     store = load_store(cfg.items_path)
     if not store:
-        raise RuntimeError("El store está vacío — ejecuta `xbrain extract` antes.")
+        raise RuntimeError("The store is empty — run `xbrain extract` first.")
     if apply is not None:
         _vocab_apply(cfg, store, apply, regenerate)
     else:
@@ -2483,7 +2483,7 @@ def _topics_apply(cfg: Config, store: dict, vocab: list, apply: Path) -> None:
     merge_overviews(pages, valid, posts)
     save_topic_pages(pages, cfg.topics_path)
     written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
-    typer.echo(f"Worksheet aplicada: {len(valid)} overviews · {written} páginas escritas")
+    typer.echo(f"Worksheet applied: {len(valid)} overviews · {written} pages written")
     _report_invalid(invalid)
 
 
@@ -2498,7 +2498,7 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
 
     if not inputs:
         written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
-        typer.echo(f"Topic pages actualizadas: {written} páginas (sin overviews pendientes).")
+        typer.echo(f"Topic pages updated: {written} pages (no overviews pending).")
         return
 
     chosen = executor or cfg.enrich_executor
@@ -2507,38 +2507,36 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
         export_topic_worksheet(inputs, worksheet, cfg.output_language)
         written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
         typer.echo(
-            f"{len(inputs)} topics exportados a {worksheet} · {written} páginas escritas\n"
-            f"Rellena el array `judgments` y ejecuta:\n"
+            f"{len(inputs)} topics exported to {worksheet} · {written} pages written\n"
+            f"Fill in the `judgments` array and run:\n"
             f"  xbrain topics --apply {worksheet}"
         )
         return
     if chosen != "api":
-        raise ValueError(f"Ejecutor desconocido: {chosen!r}")
+        raise ValueError(f"Unknown executor: {chosen!r}")
 
     judgments = synthesize_overviews_api(inputs, cfg.enrich_model, cfg.output_language)
     merge_overviews(pages, judgments, posts)
     save_topic_pages(pages, cfg.topics_path)
     written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
-    typer.echo(f"Topics sintetizados: {len(judgments)}/{len(inputs)} · {written} páginas escritas")
+    typer.echo(f"Topics synthesized: {len(judgments)}/{len(inputs)} · {written} pages written")
 
 
 @app.command()
 @_handle_cli_errors
 def topics(
-    resynth: bool = typer.Option(False, help="Re-sintetizar todos los overviews obsoletos"),
-    apply: Path | None = typer.Option(
-        None, "--apply", help="Importar un worksheet de overviews relleno"
-    ),
+    resynth: bool = typer.Option(False, help="Re-synthesize every stale overview"),
+    apply: Path | None = typer.Option(None, "--apply", help="Import a filled overview worksheet"),
     executor: str | None = typer.Option(
-        None, help="api | manual | claude-code (default: el de config.toml)"
+        None, help="api | manual | claude-code (default: the one in config.toml)"
     ),
 ) -> None:
-    """Genera las páginas de topic: listas de posts + overviews sintetizados."""
+    """Generate the topic pages: post lists + synthesized overviews."""
     cfg = _config()
     store = load_store(cfg.items_path)
     vocab = load_vocab(cfg.data_dir / "vocab.yaml")
     if not vocab:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+        raise RuntimeError("No vocabulary — run `xbrain vocab` first.")
     if apply is not None:
         _topics_apply(cfg, store, vocab, apply)
     else:
@@ -2551,7 +2549,7 @@ def generate(
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
 ) -> None:
-    """Genera las notas markdown en el vault."""
+    """Generate the markdown notes in the vault."""
     _run_generate(_config(), _parse_date(since), _parse_date(until, end_of_day=True))
 
 
@@ -2560,7 +2558,7 @@ def generate(
 def sync(
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
-    """extract + fetch + generate en orden."""
+    """extract + fetch + generate, in order."""
     cfg = _config()
     _run_extract(cfg, "all", None, None, headless=headless)
     _run_fetch(cfg, None, None, False, headless=headless)
@@ -2570,19 +2568,19 @@ def sync(
 @app.command()
 @_handle_cli_errors
 def status() -> None:
-    """Muestra contadores y última ejecución."""
+    """Show counters and the last run."""
     cfg = _config()
     store = load_store(cfg.items_path)
     state = load_state(cfg.state_path)
     typer.echo(f"Items: {len(store)}")
-    typer.echo(f"  con enlace: {sum(1 for i in store.values() if i.links)}")
-    typer.echo(f"  con contenido: {sum(1 for i in store.values() if i.content)}")
-    typer.echo(f"  enriquecidos: {sum(1 for i in store.values() if i.enriched)}")
-    typer.echo(f"  última extracción bookmarks: {state.bookmarks.last_run}")
-    typer.echo(f"  última extracción tweets: {state.own_tweets.last_run}")
+    typer.echo(f"  with a link: {sum(1 for i in store.values() if i.links)}")
+    typer.echo(f"  with content: {sum(1 for i in store.values() if i.content)}")
+    typer.echo(f"  enriched: {sum(1 for i in store.values() if i.enriched)}")
+    typer.echo(f"  last bookmarks extraction: {state.bookmarks.last_run}")
+    typer.echo(f"  last tweets extraction: {state.own_tweets.last_run}")
 
 
-snapshot_app = typer.Typer(help="Gestionar snapshots de data/")
+snapshot_app = typer.Typer(help="Manage snapshots of data/")
 app.add_typer(snapshot_app, name="snapshot")
 
 
@@ -2722,15 +2720,15 @@ def payload_stats_command() -> None:
     cfg = _config()
     stats = payload_stats(cfg.payload_dir)
     if not stats["count"]:
-        typer.echo("No hay payloads en disco todavía. Ejecuta `xbrain sync` primero.")
+        typer.echo("No payloads on disk yet. Run `xbrain sync` first.")
         return
     mean = stats["mean_gzipped_bytes"]
     typer.echo(
-        f"{stats['count']} payloads · {stats['raw_bytes'] / 1e6:.1f} MB en crudo · "
-        f"{stats['gzipped_bytes'] / 1e6:.1f} MB comprimidos · media {mean:,} B/ítem"
+        f"{stats['count']} payloads · {stats['raw_bytes'] / 1e6:.1f} MB raw · "
+        f"{stats['gzipped_bytes'] / 1e6:.1f} MB compressed · mean {mean:,} B/item"
     )
     for n in (10_000, 100_000):
-        typer.echo(f"  proyección a {n:,} ítems: {n * mean / 1e6:,.0f} MB")
+        typer.echo(f"  projected to {n:,} items: {n * mean / 1e6:,.0f} MB")
 
 
 @app.command(name="reextract")
@@ -2755,7 +2753,7 @@ def reextract_command(
         typer.echo(f"  {item_id} {field_name}: {str(old)[:40]!r} → {str(new)[:40]!r}")
     if apply:
         save_store(store, cfg.items_path)
-        typer.echo(f"{len(report.changed)} campo(s) actualizados → {cfg.items_path}")
+        typer.echo(f"{len(report.changed)} field(s) updated → {cfg.items_path}")
     else:
         typer.echo("Dry run. Pass --apply to write.")
 
@@ -2768,18 +2766,15 @@ def refetch_truncated_command(
         None,
         "--tabs",
         help=(
-            "Pestañas reutilizadas en paralelo (por defecto 3, máximo 4). Cada una navega "
-            "EN LA MISMA pestaña de un post al siguiente, con una pausa aleatoria de 5-30 s "
-            "entre cargas: ni se abre un navegador por item ni se carga a ritmo de máquina."
+            "Reused tabs in parallel (default 3, max 4). Each one navigates "
+            "IN THE SAME tab from one post to the next, with a random 5-30 s pause "
+            "between loads: no browser per item and no machine-paced loading."
         ),
     ),
     headless: bool = typer.Option(
         False,
         "--headless/--no-headless",
-        help=(
-            "Navegador oculto. Por defecto headful (visible) — más difícil de "
-            "fingerprintear como bot."
-        ),
+        help=("Hidden browser. Headful (visible) by default — harder to fingerprint as a bot."),
     ),
 ) -> None:
     """List (or re-fetch) items whose tweet text was TRUNCATED at ingest.
@@ -2813,9 +2808,9 @@ def refetch_truncated_command(
 
     opened = clamp_tabs(tabs)
     typer.echo(
-        f"Re-fetch en {opened} pestaña(s) reutilizada(s), pausa aleatoria de "
-        f"{PAUSE_MIN_MS // 1000}-{PAUSE_MAX_MS // 1000}s entre cargas. "
-        "Ctrl-C conserva lo reparado hasta el último checkpoint."
+        f"Re-fetch in {opened} reused tab(s), random pause of "
+        f"{PAUSE_MIN_MS // 1000}-{PAUSE_MAX_MS // 1000}s between loads. "
+        "Ctrl-C keeps what was repaired up to the last checkpoint."
     )
     # `RefetchRateLimited` is a RuntimeError, so `_handle_cli_errors` already prints it as
     # a clean exit-1. All this has to guarantee is that the repairs made before X started
@@ -2832,8 +2827,8 @@ def refetch_truncated_command(
     finally:
         save_store(store, cfg.items_path)
     typer.echo(
-        f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}\n"
-        f"{repaired} resúmenes invalidados: vuelve a ejecutar `xbrain enrich`."
+        f"{repaired}/{len(targets)} full texts recovered → {cfg.items_path}\n"
+        f"{repaired} summaries invalidated: run `xbrain enrich` again."
     )
 
 
@@ -2866,9 +2861,9 @@ def verify_entities_command(
     (cfg.data_dir / "entity-report.json").write_text(json_report, encoding="utf-8")
     (cfg.data_dir / "entity-report.md").write_text(md_report, encoding="utf-8")
     typer.echo(
-        f"{summary['flagged']} outputs con entidades sin soporte "
-        f"({summary['entities']} entidades); "
-        f"{summary['unanimous_pass_but_ungrounded']} de ellas con PASS UNÁNIME de los jueces."
+        f"{summary['flagged']} outputs with unsupported entities "
+        f"({summary['entities']} entities); "
+        f"{summary['unanimous_pass_but_ungrounded']} of them with a UNANIMOUS PASS from the judges."
     )
     # The uncertain tier gets its own line rather than being folded into the headline:
     # it has lower precision, and merging it would let a reader quote one number for two
@@ -2876,9 +2871,9 @@ def verify_entities_command(
     # made and the terminal never showed is the failure mode this exists to close.
     if summary["uncertain_only_flagged"]:
         typer.echo(
-            f"+ {summary['uncertain_only_flagged']} outputs cuyo ÚNICO indicio es del tier "
-            f"incierto (mayúscula ambigua, típicamente a principio de frase): menor "
-            f"precisión, y es donde se esconde un nombre inventado al abrir un resumen."
+            f"+ {summary['uncertain_only_flagged']} outputs whose ONLY signal is in the "
+            f"uncertain tier (ambiguous capital, typically at the start of a sentence): lower "
+            f"precision, and it is where an invented name hides at the opening of a summary."
         )
     typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
 
@@ -2887,7 +2882,7 @@ def verify_entities_command(
 # knowledge — the read contract (Plan 01)
 # ============================================================================
 
-knowledge_app = typer.Typer(help="Inspeccionar el contrato de conocimiento (solo lectura).")
+knowledge_app = typer.Typer(help="Inspect the knowledge contract (read-only).")
 app.add_typer(knowledge_app, name="knowledge")
 
 
@@ -2920,8 +2915,8 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
     item = corpus.items.get(item_id)
     if item is None:
         raise ValueError(
-            f"No existe el item {item_id!r} en {cfg.items_path}. "
-            "Comprueba el id con `xbrain knowledge inspect <id>`."
+            f"No item {item_id!r} in {cfg.items_path}. "
+            "Check the id with `xbrain knowledge inspect <id>`."
         )
     from xbrain.knowledge.surfaces import knowledge_item
 
@@ -2987,7 +2982,7 @@ def _inspect_topic(corpus, slug: str, *, want_surfaces: bool) -> dict:
 
     topic = next((t for t in corpus.vocab if t.slug == slug), None)
     if topic is None:
-        raise ValueError(f"No existe el topic {slug!r} en data/vocab.yaml.")
+        raise ValueError(f"No topic {slug!r} in data/vocab.yaml.")
     page = corpus.topic_pages.get(slug)
     primary, secondary = _topic_membership(corpus, slug)
     from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
@@ -3004,21 +2999,21 @@ def _inspect_topic(corpus, slug: str, *, want_surfaces: bool) -> dict:
 @knowledge_app.command("inspect")
 @_handle_cli_errors
 def knowledge_inspect(
-    item_id: str | None = typer.Argument(None, help="Id del item a inspeccionar."),
-    topic: str | None = typer.Option(None, "--topic", help="Inspecciona un topic en su lugar."),
-    surfaces: bool = typer.Option(False, "--surfaces", help="Incluye las superficies emitidas."),
-    chunks: bool = typer.Option(False, "--chunks", help="Incluye los chunks (implica --surfaces)."),
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    item_id: str | None = typer.Argument(None, help="Id of the item to inspect."),
+    topic: str | None = typer.Option(None, "--topic", help="Inspect a topic instead."),
+    surfaces: bool = typer.Option(False, "--surfaces", help="Include the emitted surfaces."),
+    chunks: bool = typer.Option(False, "--chunks", help="Include the chunks (implies --surfaces)."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Muestra el corpus unificado de un item o un topic: superficies, procedencia y chunks.
+    """Show the unified corpus of an item or a topic: surfaces, provenance and chunks.
 
-    SOLO LECTURA: no escribe en el store, no toma snapshot y no llama a ningún modelo. Es la
-    forma de comprobar a mano lo que la capa de conocimiento ofrece — y, por la regla 7 de
-    CLAUDE.md, enseñar la evidencia al lado de la afirmación es la capa de verificación más
-    barata que existe: el autor real de un post citado se ve de un vistazo.
+    READ-ONLY: it does not write to the store, takes no snapshot and calls no model. It is
+    the way to check by hand what the knowledge layer offers — and, per rule 7 of
+    CLAUDE.md, showing the evidence next to the claim is the cheapest verification layer
+    there is: the real author of a quoted post is visible at a glance.
     """
     if (item_id is None) == (topic is None):
-        raise ValueError("Indica un id de item O `--topic <slug>`, no ambos ni ninguno.")
+        raise ValueError("Pass an item id OR `--topic <slug>`, not both and not neither.")
     _cfg, corpus = _knowledge_corpus()
     payload = (
         _inspect_topic(corpus, topic, want_surfaces=surfaces or chunks)
@@ -3039,23 +3034,23 @@ def _render_inspect(payload: dict) -> str:
         lines += [
             f"{item['item_id']}  @{item['author']['handle']} ({item['author']['name']})",
             f"  {item['url']}",
-            f"  creado {item['created_at'][:10]} · fuente {item['source']}"
+            f"  created {item['created_at'][:10]} · source {item['source']}"
             f" · topics {', '.join(item['topics']) or '—'}",
-            f"  superficies: {', '.join(item['available_surfaces']) or '—'}",
+            f"  surfaces: {', '.join(item['available_surfaces']) or '—'}",
         ]
         for failure in item["failed_sources"]:
             lines.append(
-                f"  ⚠ fetch falló: {failure['kind']} {failure['url']} ({failure['failure_reason']})"
+                f"  ⚠ fetch failed: {failure['kind']} {failure['url']} ({failure['failure_reason']})"
             )
         for link in item["unfetched_links"]:
-            lines.append(f"  ⚠ sin cuerpo: {link['url']} ({link['reason']})")
+            lines.append(f"  ⚠ no body: {link['url']} ({link['reason']})")
     else:
         topic = payload["topic"]
         lines += [
             f"topic:{topic['slug']} — {topic['description']['text']}",
-            f"  primarios {len(topic['primary_item_ids'])}"
-            f" · secundarios {len(topic['secondary_item_ids'])}"
-            f" · {'DESACTUALIZADO' if topic['stale'] else 'al día'}",
+            f"  primary {len(topic['primary_item_ids'])}"
+            f" · secondary {len(topic['secondary_item_ids'])}"
+            f" · {'STALE' if topic['stale'] else 'up to date'}",
         ]
     for surface in payload.get("surfaces", []):
         excerpt = surface["text"][:120].replace("\n", " ")
@@ -3077,7 +3072,7 @@ def _render_inspect(payload: dict) -> str:
 # del servicio y del JSON, que es justo la divergencia de la regla 5.
 # ============================================================================
 
-index_app = typer.Typer(help="Construir y consultar el índice persistente (data/index/).")
+index_app = typer.Typer(help="Build and query the persistent index (data/index/).")
 app.add_typer(index_app, name="index")
 
 
@@ -3163,20 +3158,16 @@ def _echo_json(payload: object) -> None:
 @_handle_cli_errors
 @_handle_index_errors
 def index_build_command(
-    force: bool = typer.Option(
-        False, "--force", help="Reconstruye desde cero un índice ya existente."
-    ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Cuenta lo que haría; no toca ningún fichero."
-    ),
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    force: bool = typer.Option(False, "--force", help="Rebuild an existing index from scratch."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count what it would do; touch no file."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Construye `data/index/` desde cero y lo sella.
+    """Build `data/index/` from scratch and seal it.
 
-    NO ES DESTRUCTIVO SOBRE EL STORE y por eso no toma snapshot: lo único que escribe es
-    `data/index/`, que es derivado y reconstruible (Plan 02 §6). `--force` sí tira el índice
-    anterior —manifest primero, base después— así que una reconstrucción interrumpida no
-    deja un manifest en pie sobre una base vacía.
+    IT IS NOT DESTRUCTIVE TO THE STORE, which is why it takes no snapshot: the only thing it
+    writes is `data/index/`, which is derived and rebuildable (Plan 02 §6). `--force` does
+    drop the previous index — manifest first, database second — so an interrupted rebuild
+    never leaves a manifest standing over an empty database.
     """
     from dataclasses import asdict
 
@@ -3197,14 +3188,14 @@ def index_build_command(
 @_handle_cli_errors
 @_handle_index_errors
 def index_update_command(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Cuenta el delta; no escribe nada."),
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count the delta; write nothing."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Pone el índice al día tocando solo lo que cambió (spec §5.6).
+    """Bring the index up to date, touching only what changed (spec §5.6).
 
-    Una sola transacción para toda la corrida: un update a medias dejaría una aplicación
-    parcial de un cambio que nadie puede nombrar, y el índice parecería sano porque todos
-    los ids que contiene siguen resolviendo.
+    One single transaction for the whole run: a half-done update would leave a partial
+    application of a change nobody can name, and the index would look healthy because
+    every id it holds still resolves.
     """
     from dataclasses import asdict
 
@@ -3223,19 +3214,19 @@ def index_update_command(
 @_handle_cli_errors
 @_handle_index_errors
 def index_status_command(
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Qué contiene el índice y cuánto se ha quedado atrás respecto al store.
+    """What the index contains and how far behind the store it has fallen.
 
-    ES EL COMANDO QUE RESPONDE CUANDO LOS DEMÁS SE NIEGAN. `search`, `get`, `build` y
-    `update` rechazan un índice ausente o incompatible; este lo REPORTA, porque es el
-    instrumento que se corre precisamente para averiguarlo. Dos instrumentos con respuestas
-    opuestas sobre un mismo estado es la regla 9, y la salida no es que el diagnóstico se
-    niegue también: es que diga el mismo comando que dicen las puertas.
+    IT IS THE COMMAND THAT ANSWERS WHEN THE OTHERS REFUSE. `search`, `get`, `build` and
+    `update` reject a missing or incompatible index; this one REPORTS it, because it is the
+    instrument you run precisely to find out. Two instruments giving opposite answers about
+    the same state is rule 9, and the way out is not for the diagnosis to refuse too: it is
+    for it to name the same command the doors name.
 
-    El manifest se publica con `to_dict()`, el MISMO documento que `data/index/manifest.json`
-    contiene, nunca un volcado paralelo del dataclass (que además no sería serializable: lleva
-    un `datetime` y una `StoreSignal` anidada).
+    The manifest is published with `to_dict()`, the SAME document `data/index/manifest.json`
+    contains, never a parallel dump of the dataclass (which would not even be serialisable:
+    it carries a `datetime` and a nested `StoreSignal`).
     """
     from xbrain.knowledge.index_build import status
     from xbrain.knowledge.render import render_status
@@ -3285,7 +3276,7 @@ def _search_filters(
     from xbrain.knowledge.contracts import SearchFilters
 
     if mine and source is not None:
-        raise ValueError("`--mine` ya fija `--source own_tweet`; no los combines.")
+        raise ValueError("`--mine` already sets `--source own_tweet`; do not combine them.")
     # `model_validate`, no el constructor, y la diferencia es de TIPADO, no de estilo.
     # `--kind`, `--origin`, `--has-surface` y `--source` llegan como texto libre del
     # usuario y los campos que los reciben son `Literal`s del contrato: pasarlos al
@@ -3312,31 +3303,31 @@ def _search_filters(
 @_handle_cli_errors
 @_handle_index_errors
 def search_command(
-    query: str = typer.Argument(..., help="Qué buscar. Texto libre."),
-    limit: int = typer.Option(10, "--limit", help="Resultados por página."),
-    created_from: str | None = typer.Option(None, "--from", help="Items creados desde (ISO)."),
-    created_to: str | None = typer.Option(None, "--to", help="Items creados hasta (ISO)."),
+    query: str = typer.Argument(..., help="What to search for. Free text."),
+    limit: int = typer.Option(10, "--limit", help="Results per page."),
+    created_from: str | None = typer.Option(None, "--from", help="Items created from (ISO)."),
+    created_to: str | None = typer.Option(None, "--to", help="Items created until (ISO)."),
     source: str | None = typer.Option(None, "--source", help="bookmark | own_tweet."),
-    mine: bool = typer.Option(False, "--mine", help="Atajo de `--source own_tweet`."),
-    author: str | None = typer.Option(None, "--author", help="Handle del autor."),
-    topic: list[str] = typer.Option([], "--topic", help="Slug del vocabulario (repetible)."),
-    kind: list[str] = typer.Option([], "--kind", help="Tipo de contenido (repetible)."),
-    origin: list[str] = typer.Option([], "--origin", help="Procedencia del texto (repetible)."),
+    mine: bool = typer.Option(False, "--mine", help="Shortcut for `--source own_tweet`."),
+    author: str | None = typer.Option(None, "--author", help="Author handle."),
+    topic: list[str] = typer.Option([], "--topic", help="Vocabulary slug (repeatable)."),
+    kind: list[str] = typer.Option([], "--kind", help="Content kind (repeatable)."),
+    origin: list[str] = typer.Option([], "--origin", help="Text provenance (repeatable)."),
     has_surface: list[str] = typer.Option(
-        [], "--has-surface", help="Solo items con esta superficie (repetible)."
+        [], "--has-surface", help="Only items with this surface (repeatable)."
     ),
-    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia de recuperación."),
-    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una página truncada."),
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    strategy: str = typer.Option("lexical", "--strategy", help="Retrieval strategy."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continue a truncated page."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Busca en el índice y devuelve items con sus fragmentos citables.
+    """Search the index and return items with their citable fragments.
 
-    SOLO LECTURA: la base se abre `mode=ro`, el store no se toca y no hay red ni modelo —
-    el spec §13.12 exige que `search` funcione sin una sola llamada a un LLM.
+    READ-ONLY: the database is opened `mode=ro`, the store is not touched and there is no
+    network and no model — spec §13.12 requires `search` to work without a single LLM call.
 
-    Sin `--json` imprime la vista humana del spec §7.6 (item, autor, fecha, URL, superficie,
-    procedencia, excerpt, canales del match, advertencias, y el `xbrain get` que trae la
-    fuente); con `--json`, el MISMO `SearchResponse` como documento.
+    Without `--json` it prints the human view of spec §7.6 (item, author, date, URL, surface,
+    provenance, excerpt, match channels, warnings, and the `xbrain get` that fetches the
+    source); with `--json`, the SAME `SearchResponse` as a document.
     """
     from typing import cast
 
@@ -3371,24 +3362,24 @@ def search_command(
 @_handle_cli_errors
 @_handle_index_errors
 def get_command(
-    item_id: str = typer.Argument(..., help="Id del item."),
+    item_id: str = typer.Argument(..., help="Item id."),
     surface: list[str] = typer.Option(
-        [], "--surface", help="Superficie a entregar entera (repetible)."
+        [], "--surface", help="Surface to deliver whole (repeatable)."
     ),
     query: str | None = typer.Option(
-        None, "--query", help="Prioriza los fragmentos que puntúan para esta consulta."
+        None, "--query", help="Prioritise the fragments that score for this query."
     ),
-    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una respuesta truncada."),
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continue a truncated response."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
+    """Deliver an item's evidence, read from the STORE, never from the index.
 
-    Es el invariante 7 del spec §3.7: `get` funciona con `data/index/` borrado, porque un
-    índice capaz de contestar `get` sería una copia del corpus que nada invalida, y el día
-    que las dos discreparan no habría forma de saber cuál se le enseñó al lector.
+    This is invariant 7 of spec §3.7: `get` works with `data/index/` deleted, because an
+    index able to answer `get` would be a copy of the corpus that nothing invalidates, and
+    the day the two disagreed there would be no way to know which one the reader was shown.
 
-    El presupuesto por respuesta sale de `[index].get_char_budget`; por encima de él la
-    respuesta se trunca DECLARÁNDOLO y entrega un cursor (spec §9.3), nunca en silencio.
+    The per-response budget comes from `[index].get_char_budget`; above it the response is
+    truncated, SAYING SO, and hands back a cursor (spec §9.3), never silently.
     """
     from typing import Sequence, cast
 
@@ -3462,20 +3453,20 @@ def _run_sweep(
     # this exact flag: «a threshold that reached no bucket is a FAILURE, not a pass».
     if min_recall is not None:
         raise ValueError(
-            "`--min-recall` no se aplica a `--sweep-chunker`: el umbral juzga los buckets de "
-            "UNA evaluación y el barrido publica una TABLA de combinaciones, así que no hay "
-            "bucket contra el que compararlo. Corre `xbrain eval --min-recall …` sin el "
-            "barrido para la puerta, y el barrido aparte para la tabla."
+            "`--min-recall` does not apply to `--sweep-chunker`: the threshold judges the buckets "
+            "of ONE evaluation and the sweep publishes a TABLE of combinations, so there is no "
+            "bucket to compare it against. Run `xbrain eval --min-recall …` without the "
+            "sweep for the gate, and the sweep separately for the table."
         )
     # `--k` is repeatable because the ordinary report carries a column per k; the sweep RANKS,
     # and a ranking happens at one k. Choosing `max(ks)` would discard the rest in silence,
     # which is the very defect this path is being repaired for.
     if len(ks) > 1:
         raise ValueError(
-            "`--sweep-chunker` ordena por un solo `recall@k` y recibió "
-            f"{len(ks)} valores de `--k` ({', '.join(str(value) for value in ks)}). "
-            "Elegir uno descartaría los demás en silencio: repite el barrido con un `--k` "
-            "por corrida."
+            "`--sweep-chunker` ranks by a single `recall@k` and received "
+            f"{len(ks)} `--k` values ({', '.join(str(value) for value in ks)}). "
+            "Picking one would silently discard the rest: repeat the sweep with one `--k` "
+            "per run."
         )
 
     grid = parse_sweep(axes)
@@ -3500,7 +3491,7 @@ def _run_sweep(
         _echo_json(payload)
     else:
         typer.echo(render_sweep_markdown(result))
-        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+        typer.echo(f"Report: {json_path} · {json_path.with_suffix('.md')}")
     # PUBLISHED FIRST, THEN FAILED. A sweep with no winner — nothing scorable, or no
     # combination at all — is not a success, and it used to exit 0 while announcing «PLANO:
     # todas las combinaciones puntúan igual», a positive claim about a ranking that never
@@ -3514,44 +3505,44 @@ def _run_sweep(
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
-    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia a evaluar."),
+    strategy: str = typer.Option("lexical", "--strategy", help="Strategy to evaluate."),
     limit: int = typer.Option(
         10,
         "--limit",
-        help="Profundidad de recuperación por caso, en OWNERS (nunca por debajo del mayor k).",
+        help="Retrieval depth per case, in OWNERS (never below the largest k).",
     ),
     k: list[int] = typer.Option(
-        [], "--k", help="Valores de k a reportar (repetible; el barrido admite uno solo)."
+        [], "--k", help="k values to report (repeatable; the sweep accepts only one)."
     ),
     min_recall: float | None = typer.Option(
         None,
         "--min-recall",
         help=(
-            "Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa. "
-            "No se combina con `--sweep-chunker`."
+            "Threshold: if any bucket falls below it, the command fails. Without it, it only "
+            "reports. Does not combine with `--sweep-chunker`."
         ),
     ),
     golden_set: Path = typer.Option(
-        Path("eval/golden-set.yaml"), "--golden-set", help="Ruta del golden set."
+        Path("eval/golden-set.yaml"), "--golden-set", help="Path to the golden set."
     ),
     report: Path | None = typer.Option(
-        None, "--report", help="Dónde escribir el informe (por defecto data/eval-report.json)."
+        None, "--report", help="Where to write the report (default data/eval-report.json)."
     ),
     sweep_chunker: list[str] = typer.Option(
         [],
         "--sweep-chunker",
-        help="Barrido del troceo: `target=800,1200 overlap=0,150` (repetible o entrecomillado).",
+        help="Chunking sweep: `target=800,1200 overlap=0,150` (repeatable or quoted).",
     ),
-    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    json_out: bool = typer.Option(False, "--json", help="Stable JSON document on stdout."),
 ) -> None:
-    """Evalúa la recuperación contra el golden set y publica el informe.
+    """Evaluate retrieval against the golden set and publish the report.
 
-    SOLO INFORME: no escribe en `items.json` ni toma snapshot, igual que `verify` por defecto.
+    REPORT ONLY: it does not write to `items.json` or take a snapshot, like `verify` by default.
 
-    Sin `--min-recall` informa y no juzga: el spec §8.6 fija los umbrales de merge DESPUÉS de
-    correr el baseline, así que un número por defecto aquí sería exactamente la métrica que no
-    puede salir de otra manera (regla 2 de CLAUDE.md). Con umbral, el comando es una puerta y
-    nombra el bucket que falló.
+    Without `--min-recall` it reports and does not judge: spec §8.6 sets the merge thresholds
+    AFTER running the baseline, so a default number here would be exactly the metric that
+    cannot come out any other way (rule 2 of CLAUDE.md). With a threshold, the command is a
+    gate and names the bucket that failed.
     """
     from xbrain.knowledge.evaluation import DEFAULT_KS, evaluate, render_markdown
     from xbrain.knowledge.goldenset import load_cases, load_scenarios, resolve_cases
@@ -3594,11 +3585,13 @@ def eval_command(
         typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         typer.echo(render_markdown(result))
-        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+        typer.echo(f"Report: {json_path} · {json_path.with_suffix('.md')}")
     if not result.passed:
         # A gate that reports its own failure on stdout and exits 0 is the `gh pr checks`
         # trap of CLAUDE.md rule 9, reproduced locally. The non-zero exit is the signal.
-        raise ValueError("La evaluación no alcanza el umbral:\n  " + "\n  ".join(result.failures))
+        raise ValueError(
+            "The evaluation does not reach the threshold:\n  " + "\n  ".join(result.failures)
+        )
 
 
 if __name__ == "__main__":

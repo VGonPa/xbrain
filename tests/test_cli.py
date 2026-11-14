@@ -47,15 +47,15 @@ def _write_tally(output: str) -> str:
     """The verdict-write tally the CLI echoed, without its ` → <path>` suffix — for EQUALITY
     assertions against `VerdictWriteResult(...).summary()`, the very builder the CLI echoes.
 
-    A substring check is UNSAFE on this line. The success rendering (`1 verdicts escritos`) is a
-    literal substring of the failure rendering (`0 de 1 verdicts escritos (1 omitidos:
-    fingerprint-missing)`), so `assert "1 verdicts escritos" in output` is satisfied verbatim by
+    A substring check is UNSAFE on this line. The success rendering (`1 verdicts written`) is a
+    literal substring of the failure rendering (`0 of 1 verdicts written (1 skipped:
+    fingerprint-missing)`), so `assert "1 verdicts written" in output` is satisfied verbatim by
     the message saying the exact opposite — zero written, one skipped. Comparing the whole line
     to the builder's own output pins the test to the source of truth by reference, instead of to
     a phrase a contradictory message also contains.
     """
     for line in _ANSI_RE.sub("", output).splitlines():
-        if "verdicts escritos" in line:
+        if "verdicts written" in line:
             return line.split("→")[0].strip()
     raise AssertionError(f"no verdict-write tally was echoed in: {output!r}")
 
@@ -110,7 +110,7 @@ def test_status_reports_non_empty_store(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "Items: 1" in result.stdout
-    assert "con enlace: 1" in result.stdout
+    assert "with a link: 1" in result.stdout
 
 
 def test_generate_writes_item_note_for_linked_item(tmp_path: Path, monkeypatch):
@@ -421,7 +421,7 @@ def test_media_command_warns_when_items_filter_matches_nothing(tmp_path: Path, m
     assert result.exit_code == 0
     # The CLI mixes stdout and stderr in CliRunner output; the AVISO is on stderr
     # — combined output is fine for the substring check.
-    assert "AVISO" in result.output
+    assert "WARNING" in result.output
     assert "ghost-id-1" in result.output
 
 
@@ -882,7 +882,7 @@ def test_cli_enrich_until_date_only_includes_whole_final_day(tmp_path, monkeypat
     save_vocab([Topic(slug="misc", description="d")], tmp_path / "data" / "vocab.yaml")
     result = runner.invoke(app, ["enrich", "--executor", "manual", "--until", "2026-01-15"])
     assert result.exit_code == 0
-    assert "1 items exportados" in result.output
+    assert "1 items exported" in result.output
     assert (tmp_path / "data" / "enrich-worksheet.json").exists()
 
 
@@ -1010,7 +1010,7 @@ def test_enrich_rejects_unknown_executor(tmp_path, monkeypatch):
     result = runner.invoke(app, ["enrich", "--executor", "bogus"])
     assert result.exit_code == 1
     assert "bogus" in result.output
-    assert "desconocido" in result.output
+    assert "Unknown executor" in result.output
 
 
 def _photo_item(item_id: str = "1") -> Item:
@@ -1043,7 +1043,7 @@ def test_describe_rejects_unknown_executor(tmp_path, monkeypatch):
     result = runner.invoke(app, ["describe", "--executor", "bogus"])
     assert result.exit_code == 1
     assert "bogus" in result.output
-    assert "desconocido" in result.output
+    assert "Unknown executor" in result.output
 
 
 def test_describe_claude_code_exports_a_worksheet(tmp_path, monkeypatch):
@@ -1084,7 +1084,7 @@ def test_describe_apply_dispatches_and_reports_unmatched(tmp_path, monkeypatch):
     )
     result = runner.invoke(app, ["describe", "--apply", str(ws)])
     assert result.exit_code == 0
-    assert "1 fotos descritas" in result.output
+    assert "1 photos described" in result.output
     assert "ghost#0" in result.output  # unmatched judgment surfaced, not dropped silently
     store = load_store(tmp_path / "data" / "items.json")
     assert isinstance(store["1"].media[0], MediaPhotoDescribed)
@@ -1097,7 +1097,7 @@ def test_enrich_manual_without_vocab_fails(tmp_path, monkeypatch):
     save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["enrich", "--executor", "manual"])
     assert result.exit_code == 1
-    assert "vocabulario" in result.output
+    assert "No vocabulary" in result.output
 
 
 def test_enrich_apply_without_vocab_fails(tmp_path, monkeypatch):
@@ -1111,7 +1111,7 @@ def test_enrich_apply_without_vocab_fails(tmp_path, monkeypatch):
     ws.write_text(json.dumps({"judgments": []}), encoding="utf-8")
     result = runner.invoke(app, ["enrich", "--apply", str(ws)])
     assert result.exit_code == 1
-    assert "vocabulario" in result.output
+    assert "No vocabulary" in result.output
 
 
 def test_enrich_manual_with_no_pending_items_writes_no_worksheet(tmp_path, monkeypatch):
@@ -1134,7 +1134,7 @@ def test_enrich_manual_with_no_pending_items_writes_no_worksheet(tmp_path, monke
     save_vocab([Topic(slug="misc", description="d")], tmp_path / "data" / "vocab.yaml")
     result = runner.invoke(app, ["enrich", "--executor", "manual"])
     assert result.exit_code == 0
-    assert "No hay items pendientes" in result.output
+    assert "No items pending" in result.output
     assert not (tmp_path / "data" / "enrich-worksheet.json").exists()
 
 
@@ -1148,7 +1148,7 @@ def test_cli_fetch_reports_x_articles(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "expand_threads", lambda *a, **k: 0)
     result = runner.invoke(app, ["fetch"])
     assert result.exit_code == 0
-    assert "3 de X" in result.output
+    assert "3 from X" in result.output
 
 
 def test_cli_fetch_persists_partial_work_when_a_stage_raises(tmp_path, monkeypatch):
@@ -1178,7 +1178,7 @@ def test_cli_fetch_persists_partial_work_when_a_stage_raises(tmp_path, monkeypat
         return 1
 
     def _fake_fetch_x_articles(*a, **k):
-        raise RuntimeError("Sesión de X caducada")
+        raise RuntimeError("X session expired")
 
     monkeypatch.setattr(cli, "fetch_pending", _fake_fetch_pending)
     monkeypatch.setattr(cli, "fetch_x_articles", _fake_fetch_x_articles)
@@ -1268,7 +1268,7 @@ def test_topics_without_vocab_fails(tmp_path, monkeypatch):
     save_store({"1": _enriched_item("1")}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["topics"])
     assert result.exit_code == 1
-    assert "vocabulario" in result.output
+    assert "No vocabulary" in result.output
 
 
 def test_topics_run_with_no_stale_overviews(tmp_path, monkeypatch):
@@ -1295,7 +1295,7 @@ def test_topics_run_with_no_stale_overviews(tmp_path, monkeypatch):
     )
     result = runner.invoke(app, ["topics"])
     assert result.exit_code == 0
-    assert "sin overviews pendientes" in result.output
+    assert "no overviews pending" in result.output
 
 
 def test_topics_resynth_succeeds(tmp_path, monkeypatch):
@@ -1529,7 +1529,7 @@ def test_describe_command_warns_when_items_filter_matches_nothing(tmp_path, monk
     _setup_describe_repo(tmp_path, monkeypatch)
     result = runner.invoke(app, ["describe", "--items", "no-such-id"])
     assert result.exit_code == 0
-    assert "AVISO" in result.output or "AVISO" in (result.stderr or "")
+    assert "WARNING" in result.output or "WARNING" in (result.stderr or "")
 
 
 def test_describe_command_propagates_total_failure_as_exit_1(tmp_path, monkeypatch):
@@ -1906,7 +1906,7 @@ def test_refresh_media_blocks_on_empty_capture_against_nonempty_store(tmp_path: 
     result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
 
     assert result.exit_code != 0
-    assert "no se actualizó nada" in result.output
+    assert "nothing was updated" in result.output
     # No success summary was printed.
     assert "videos updated" not in result.output
     # The store is intact and still poster-era (nothing was overwritten).
@@ -1925,7 +1925,7 @@ def test_refresh_media_force_proceeds_on_empty_capture(tmp_path: Path, monkeypat
     result = runner.invoke(app, ["refresh-media", "--source", "bookmarks", "--force"])
 
     assert result.exit_code == 0, result.output
-    assert "AVISO" in result.output
+    assert "WARNING" in result.output
     # It proceeds: the END summary is printed (0 re-seen).
     assert "0 known items re-seen" in result.output
 
@@ -1938,8 +1938,8 @@ def test_refresh_media_empty_store_does_not_warn(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
 
     assert result.exit_code == 0, result.output
-    assert "AVISO" not in result.output
-    assert "no se actualizó nada" not in result.output
+    assert "WARNING" not in result.output
+    assert "nothing was updated" not in result.output
 
 
 def test_refresh_media_reports_unknown_size_without_zero_gb(tmp_path: Path, monkeypatch):
@@ -1983,13 +1983,13 @@ def test_refresh_media_surfaces_logged_out_runtimeerror(tmp_path: Path, monkeypa
     save_store({"42": _poster_era_item("42")}, tmp_path / "data" / "items.json")
 
     def _raise(*a, **k):
-        raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+        raise RuntimeError("X session expired. Run `xbrain login`.")
 
     _mock_browser(monkeypatch, _raise)
 
     result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
     assert result.exit_code == 1
-    assert "Sesión de X caducada" in result.output
+    assert "X session expired" in result.output
 
 
 def test_extract_advances_cursor_to_integer_max_id(tmp_path: Path, monkeypatch):
@@ -2026,7 +2026,7 @@ def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, m
 
 
 def test_extract_empty_capture_fails_loud_and_freezes_the_cursor(tmp_path: Path, monkeypatch):
-    """Capturing NOTHING must never read as "0 nuevos items" with exit 0.
+    """Capturing NOTHING must never read as "0 new items" with exit 0.
 
     The X operation rename (30-ago-2026) made every response fall through the
     capture filter. The run reported success, the cursor kept its old value, and
@@ -2038,15 +2038,15 @@ def test_extract_empty_capture_fails_loud_and_freezes_the_cursor(tmp_path: Path,
     _setup_repo(tmp_path, monkeypatch)
 
     def _nothing_captured(*_a, **_k):
-        raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline/UserTweets")
+        raise OperationNotCaptured("own_tweet: 0 responses from UserOriginalsTimeline/UserTweets")
 
     _mock_browser(monkeypatch, _nothing_captured)
 
     result = runner.invoke(app, ["extract", "--source", "tweets"])
 
     assert result.exit_code == 1, result.output
-    assert "0 respuestas" in result.output
-    assert "0 nuevos items" not in result.output
+    assert "0 responses" in result.output
+    assert "0 new items" not in result.output
     assert load_store(tmp_path / "data" / "items.json") == {}
     # The cursor must be untouched: advancing it would make the next run look
     # fresh and bury the breakage under a second false negative.
@@ -2062,7 +2062,7 @@ def test_extract_one_broken_source_still_saves_the_healthy_one(tmp_path: Path, m
 
     def _by_source(_context, source, *_a, **_k):
         if source == "own_tweet":
-            raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline")
+            raise OperationNotCaptured("own_tweet: 0 responses from UserOriginalsTimeline")
         return [_linked_item("100")]
 
     _mock_browser(monkeypatch, _by_source)
@@ -2156,7 +2156,7 @@ def test_list_videos_empty_store(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     result = runner.invoke(app, ["list-videos"])
     assert result.exit_code == 0
-    assert "No hay" in result.stdout
+    assert "No videos." in result.stdout
 
 
 def test_list_videos_rejects_bad_status(tmp_path: Path, monkeypatch):
@@ -2417,8 +2417,8 @@ def test_digest_video_dedups_same_video(tmp_path: Path, monkeypatch):
     store = load_store(items_path)
     assert store["a"].content.sources[0].text == "shared"
     assert store["b"].content.sources[0].text == "shared"
-    assert "1 items ← 1 vídeos" not in result.stdout  # 2 items, 1 video
-    assert "2 items ← 1 vídeos" in result.stdout
+    assert "1 items ← 1 videos" not in result.stdout  # 2 items, 1 video
+    assert "2 items ← 1 videos" in result.stdout
 
 
 def test_digest_video_no_speech_summary(tmp_path: Path, monkeypatch):
@@ -2431,7 +2431,7 @@ def test_digest_video_no_speech_summary(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
     assert result.exit_code == 0, result.output
-    assert "sin voz 1" in result.stdout
+    assert "no speech 1" in result.stdout
     store = load_store(items_path)
     assert store["42"].content.sources[0].has_speech is False
 
@@ -2447,7 +2447,7 @@ def test_digest_video_idempotent(tmp_path: Path, monkeypatch):
     assert first.exit_code == 0, first.output
     second = runner.invoke(app, ["digest-video", "--ids", "42"])
     assert second.exit_code == 0, second.output
-    assert "ya digeridos 1" in second.stdout
+    assert "already digested 1" in second.stdout
     assert len(calls) == 1  # the idempotent re-run did NOT re-transcribe
 
 
@@ -2532,7 +2532,7 @@ def test_digest_video_limit_caps_items(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["digest-video", "--ids", "a,b", "--limit", "1"])
     assert result.exit_code == 0, result.output
-    assert "transcritos 1" in result.stdout
+    assert "transcribed 1" in result.stdout
     store = load_store(items_path)
     digested = [i for i in ("a", "b") if store[i].content is not None]
     assert len(digested) == 1  # exactly one, not both
@@ -2677,7 +2677,7 @@ def test_digest_video_frames_describes_and_persists_slides(tmp_path: Path, monke
     assert frames[0].description == "slide frame-00000"
     assert len(describe_calls) == 2  # vision ran on both slides
     assert (tmp_path / "data" / "media" / "42" / "frames" / "0.png").exists()
-    assert "con slides" in result.stdout  # the visual segment of the summary
+    assert "with slides" in result.stdout  # the visual segment of the summary
 
 
 def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
@@ -2791,7 +2791,7 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
     assert result.exit_code == 0, result.output
     assert describe_calls == []  # NO vision call wasted on a talking-head
     assert load_store(items_path)["42"].content.sources[0].frames == []  # nothing attached
-    assert "talking-head (saltados)" in result.stdout  # the skip is surfaced
+    assert "talking-head (skipped)" in result.stdout  # the skip is surfaced
 
     assert runner.invoke(app, ["generate"]).exit_code == 0
     note = next((vault / "x-knowledge" / "items").glob("*42*.md")).read_text(encoding="utf-8")
@@ -2802,9 +2802,9 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
 
 def _summary_line(output: str) -> str:
     """The `digest-video` summary line the CLI echoed — for EQUALITY assertions, so a
-    count is pinned where it sits (`Visual: 0 con slides` is not `Visual: 10 con …`)."""
+    count is pinned where it sits (`Visual: 0 with slides` is not `Visual: 10 with …`)."""
     for line in _ANSI_RE.sub("", output).splitlines():
-        if line.startswith("Vídeos:"):
+        if line.startswith("Videos:"):
             return line
     raise AssertionError(f"no digest-video summary was echoed in: {output!r}")
 
@@ -2820,9 +2820,9 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
             _silent_transcript,
             _BUDGETS + "dedupe = false\n",
             2,
-            "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
-            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
-            "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
+            "Videos: transcribed 0, no speech 1, already digested 0, failed 0, no video 0, "
+            "unknown 0. Dedup: 1 items ← 1 videos (1 transcribed this run). "
+            "Visual: 0 with slides, 1 silent footage described, 0 talking-head (skipped).",
             (
                 "INFO",
                 "digest-video: capped 5 distinct frames to footage_max_frames=2 — raise "
@@ -2835,9 +2835,9 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
             _speech_transcript,
             _BUDGETS + "dedupe = false\n",
             4,
-            "Vídeos: transcritos 1, sin voz 0, ya digeridos 0, fallidos 0, sin vídeo 0, "
-            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
-            "Visual: 1 con slides, 0 metraje mudo descrito, 0 talking-head (saltados).",
+            "Videos: transcribed 1, no speech 0, already digested 0, failed 0, no video 0, "
+            "unknown 0. Dedup: 1 items ← 1 videos (1 transcribed this run). "
+            "Visual: 1 with slides, 0 silent footage described, 0 talking-head (skipped).",
             (
                 "WARNING",
                 "digest-video: capped 5 distinct frames to max_frames=4 — raise "
@@ -2850,9 +2850,9 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
             _silent_transcript,
             _BUDGETS,  # dedupe left at its default (on)
             1,
-            "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
-            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
-            "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
+            "Videos: transcribed 0, no speech 1, already digested 0, failed 0, no video 0, "
+            "unknown 0. Dedup: 1 items ← 1 videos (1 transcribed this run). "
+            "Visual: 0 with slides, 1 silent footage described, 0 talking-head (skipped).",
             None,  # one distinct frame is under the cap: nothing was dropped to warn about
             id="silent-footage-deduped-before-the-cap",
         ),
@@ -2910,11 +2910,11 @@ def test_digest_video_frames_help_states_the_footage_rule():
 
     command = get_command(app).commands["digest-video"]
     help_text = next(param.help for param in command.params if param.name == "frames")
-    assert "los talking-head se saltan (se registra)" not in help_text
+    assert "talking heads are skipped (logged)" not in help_text
     assert help_text.endswith(
-        "Las slides se describen; un talking-head CON voz se salta (el transcript ya lo "
-        "cubre; se registra); un vídeo mudo sin slides se describe como metraje, con "
-        "tope `\\[frames].footage_max_frames`."
+        "Slides are described; a talking head WITH speech is skipped (the transcript already "
+        "covers it; it is logged); a silent video without slides is described as footage, "
+        "capped by `\\[frames].footage_max_frames`."
     )
 
 
@@ -3002,10 +3002,10 @@ def test_digest_video_keep_transcript_recovers_a_hollow_item_without_the_asr(
         ("42/frames/0.png", "slide frame-00000")
     ]
     assert _summary_line(result.output) == (
-        "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
-        "desconocidos 0. Dedup: 1 items ← 1 vídeos "
-        "(0 transcritos este run, 1 con transcripción guardada). "
-        "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados)."
+        "Videos: transcribed 0, no speech 1, already digested 0, failed 0, no video 0, "
+        "unknown 0. Dedup: 1 items ← 1 videos "
+        "(0 transcribed this run, 1 with stored transcript). "
+        "Visual: 0 with slides, 1 silent footage described, 0 talking-head (skipped)."
     )
 
 
@@ -3038,10 +3038,10 @@ def test_digest_video_keep_transcript_gives_a_pending_sibling_its_own_transcript
         ("42/frames/0.png", "slide frame-00000")
     ]
     assert _summary_line(result.output) == (
-        "Vídeos: transcritos 1, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
-        "desconocidos 0. Dedup: 2 items ← 1 vídeos "
-        "(1 transcritos este run, 1 con transcripción guardada). "
-        "Visual: 0 con slides, 1 metraje mudo descrito, 1 talking-head (saltados)."
+        "Videos: transcribed 1, no speech 1, already digested 0, failed 0, no video 0, "
+        "unknown 0. Dedup: 2 items ← 1 videos "
+        "(1 transcribed this run, 1 with stored transcript). "
+        "Visual: 0 with slides, 1 silent footage described, 1 talking-head (skipped)."
     )
 
 
@@ -3050,15 +3050,16 @@ def test_digest_video_keep_transcript_gives_a_pending_sibling_its_own_transcript
     [
         pytest.param(
             "keep_transcript",
-            "Con --frames --force: rehace la capa visual y reutiliza la transcripción "
-            "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
-            "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
+            "With --frames --force: redo the visual layer and reuse the stored transcript "
+            "(the ASR is not run again). Like every --force, it clears the long-form digest "
+            "and the item goes back through enrich and video-digest. Use it to recover hollow "
+            "videos.",
             id="keep-transcript",
         ),
         pytest.param(
             "force",
-            "Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
-            "con --keep-transcript.",
+            "Re-process items that already have an x_video source; they are re-transcribed "
+            "unless --keep-transcript.",
             id="force",
         ),
     ],
@@ -3262,7 +3263,7 @@ def test_verify_audit_rejects_multiple_apply(tmp_path: Path, monkeypatch):
         p.write_text(json.dumps({"audits": []}), encoding="utf-8")
     result = runner.invoke(app, ["verify", "--audit", "--apply", str(a), "--apply", str(b)])
     assert result.exit_code != 0
-    assert "único auditor" in result.output
+    assert "single independent auditor" in result.output
 
 
 def _write_revoke_audit_ws(path: Path) -> None:
@@ -3306,7 +3307,7 @@ def test_verify_audit_apply_refuses_second_run_on_audited_report(tmp_path: Path,
 
     second = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
     assert second.exit_code != 0
-    assert "ya contiene un audit" in second.output
+    assert "already contains an applied audit" in second.output
 
     forced = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--force"])
     assert forced.exit_code == 0, forced.output
@@ -3328,7 +3329,7 @@ def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):
     )
     result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
     assert result.exit_code == 0, result.output
-    assert "consecuentes" in result.output
+    assert "consequential" in result.output
     assert not (tmp_path / "data" / "verify-audit-worksheet.json").exists()
 
 
@@ -3542,8 +3543,8 @@ def test_verify_audit_write_verdicts_persists_the_revoked_verdict_not_the_prejud
     # Same safety envelope as the plain write path: auto-snapshot + an echoed tally.
     snapshots = list((tmp_path / "data" / "snapshots").iterdir())
     assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
-    # EQUALITY against the builder: `"1 verdicts escritos"` is a substring of the failure
-    # rendering `"0 de 1 verdicts escritos (1 omitidos: …)"`, so `in` would pass on a run
+    # EQUALITY against the builder: `"1 verdicts written"` is a substring of the failure
+    # rendering `"0 of 1 verdicts written (1 skipped: …)"`, so `in` would pass on a run
     # that wrote NOTHING. See `_write_tally`.
     assert _write_tally(result.output) == VerdictWriteResult(written=1, skipped=[]).summary()
 
@@ -4000,14 +4001,14 @@ def test_fetch_retry_failed_dry_run_reports_the_plan_and_never_touches_the_store
     assert result.exit_code == 0, result.output
     out = _plain_output(result.output)
 
-    assert "Reintentables: 1 items" in out  # only the transient one
-    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in out
+    assert "Retryable: 1 items" in out  # only the transient one
+    assert "BLOCKED for lack of a Firecrawl key: 1 items" in out
     # It must say WHERE it looked: the key already existed on this machine once,
     # stored by the `firecrawl` CLI, and a message naming only the env var sent
     # the operator hunting for a key they already had.
     assert "$FIRECRAWL_API_KEY" in out
     assert "credentials.json" in out
-    assert "Terminales" in out and "1 items" in out
+    assert "Terminal (no extractor" in out and "1 items" in out
     assert items_path.read_bytes() == before  # not a byte touched
     assert not (tmp_path / "data" / "snapshots").exists()
 
@@ -4028,7 +4029,7 @@ def test_fetch_retry_failed_without_the_key_does_not_replay_the_identical_failur
 
     result = runner.invoke(app, ["fetch", "--retry-failed"])
     assert result.exit_code == 0, result.output
-    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in _plain_output(result.output)
+    assert "BLOCKED for lack of a Firecrawl key: 1 items" in _plain_output(result.output)
     assert calls == []  # the fetch never ran — nothing to gain, so nothing was requested
 
 
@@ -4192,7 +4193,7 @@ def test_fetch_revalidate_is_report_only_until_write(tmp_path: Path, monkeypatch
     result = runner.invoke(app, ["fetch", "--revalidate"])
     assert result.exit_code == 0, result.output
     out = _plain_output(result.output)
-    assert "Cuerpos que NO son artículos: 1 items" in out
+    assert "Bodies that are NOT articles: 1 items" in out
     assert "youtu.be" in out  # the DOMAIN is reported, not just a count
     assert items_path.read_bytes() == before  # not a byte touched without --write
 
@@ -4250,8 +4251,8 @@ def test_verify_reports_how_many_verdicts_the_contract_change_invalidated(
 
     result = runner.invoke(app, ["verify"])
     assert result.exit_code == 0, result.output
-    assert "OBSOLETOS" in result.stdout
-    assert "1 de 1" in result.stdout
+    assert "STALE" in result.stdout
+    assert "1 of 1" in result.stdout
 
 
 def test_verify_refuses_to_write_a_verdict_from_a_pre_contract_worksheet(
@@ -4388,11 +4389,11 @@ def test_redescribe_frames_dry_run_needs_no_vision_command(tmp_path: Path, monke
     assert not (data_dir / "snapshots").exists()
     # The preview still reports real counts (it stats the frame files, it just
     # never calls the vision model) — not a silent "0 vídeos" placeholder. The
-    # wording is PREDICTIVE ("se regenerarían"), not past-tense ("regeneradas")
+    # wording is PREDICTIVE ("would regenerate"), not past-tense ("regenerated")
     # — #90 review I3: a dry run must not claim, in the past tense, work it
     # never did.
-    assert "2 se regenerarían" in result.output
-    assert "--dry-run: no se ha tocado el store." in result.output
+    assert "2 would regenerate" in result.output
+    assert "--dry-run: the store was not touched." in result.output
     source = load_store(data_dir / "items.json")["42"].content.sources[0]
     assert [f.description for f in source.frames] == ["vieja", "vieja"]  # untouched
 
@@ -4611,7 +4612,7 @@ def test_redescribe_frames_persists_partial_work_on_a_mid_run_abort(tmp_path: Pa
         "vieja",
     ]
     # The summary still prints, reflecting what actually landed.
-    assert "2 regeneradas" in result.output
+    assert "2 regenerated" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -4665,7 +4666,7 @@ def test_redescribe_frames_save_failure_during_abort_surfaces_both_errors(
     # ...but the save failure must ALSO be visible, not silently dropped.
     assert "DISK FULL" in result.output
     # The summary — reflecting item 1's completed work — still printed.
-    assert "2 regeneradas" in result.output
+    assert "2 regenerated" in result.output
 
 
 def test_redescribe_frames_save_failure_on_a_clean_run_propagates(tmp_path: Path, monkeypatch):
@@ -4687,7 +4688,7 @@ def test_redescribe_frames_save_failure_on_a_clean_run_propagates(tmp_path: Path
     assert result.exit_code == 1
     assert "Error: DISK FULL" in result.output
     # The summary still printed even though the save blew up right after.
-    assert "2 regeneradas" in result.output
+    assert "2 regenerated" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -4718,11 +4719,11 @@ def test_redescribe_frames_dry_run_output_is_unmistakably_different_from_real(
     assert real.exit_code == 0, real.output
 
     assert dry.output != real.output
-    assert "--dry-run: no se ha tocado el store." in dry.output
+    assert "--dry-run: the store was not touched." in dry.output
     assert "--dry-run" not in real.output
-    assert "se regenerarían" in dry.output
-    assert "regeneradas" in real.output
-    assert "predic" in dry.output.lower()  # the Re-propagados caveat
+    assert "would regenerate" in dry.output
+    assert "regenerated" in real.output
+    assert "predic" in dry.output.lower()  # the Re-propagated caveat
     source = load_store(data_dir / "items.json")["42"].content.sources[0]
     assert [f.description for f in source.frames] == ["nueva", "nueva"]
 
@@ -4900,7 +4901,7 @@ def test_redescribe_frames_unknown_topic_warns(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "no-such-topic" in result.output
-    assert "0 vídeos seleccionados" in result.output
+    assert "0 videos selected" in result.output
 
 
 def test_redescribe_frames_whitespace_only_ids_warns(tmp_path: Path, monkeypatch):
@@ -4912,8 +4913,8 @@ def test_redescribe_frames_whitespace_only_ids_warns(tmp_path: Path, monkeypatch
     result = runner.invoke(app, ["redescribe-frames", "--ids", "   "])
 
     assert result.exit_code == 0, result.output
-    assert "aviso" in result.output
-    assert "0 vídeos seleccionados" in result.output
+    assert "warning" in result.output
+    assert "0 videos selected" in result.output
 
 
 # ---------------------------------------------------------------------------

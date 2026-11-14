@@ -233,7 +233,7 @@ def test_search_json_is_the_response_model_and_nothing_else(workspace: Path) -> 
     assert response.query == "retrieval"
     assert response.strategy == "lexical"
     assert [r.item_id for r in response.results]
-    assert "Estrategia léxica" not in result.stdout
+    assert "Lexical strategy" not in result.stdout
 
 
 def test_search_human_view_is_the_renderer_over_the_same_response(workspace: Path) -> None:
@@ -304,7 +304,7 @@ def test_search_rejects_mine_together_with_an_explicit_source(workspace: Path) -
     ("argv", "needle"),
     [
         (["search", "retrieval", "--limit", "0"], "--limit"),
-        (["search", "   "], "vacía"),
+        (["search", "   "], "query is empty"),
         (["search", "retrieval", "--topic", "no-such-topic"], "agent-evaluation"),
     ],
 )

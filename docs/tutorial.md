@@ -14,7 +14,7 @@ authenticate), then come back — this tutorial picks up from a logged-in instal
 ```bash
 uv run xbrain status
 # → Items: 0
-# →   con enlace: 0
+# →   with a link: 0
 # →   ...
 ```
 
@@ -29,8 +29,8 @@ about config, copy `config.toml.example` to `config.toml` and set your vault pat
 uv run xbrain sync        # extract (scrape X) + fetch (article bodies) + generate
 uv run xbrain status
 # → Items: 812
-# →   con enlace: 143
-# →   última extracción bookmarks: 2026-07-04 ...
+# →   with a link: 143
+# →   last bookmarks extraction: 2026-07-04 ...
 ```
 
 `sync` scrapes your bookmarks + own tweets into `data/items.json`, fetches the
@@ -127,8 +127,8 @@ writes `data/verify-report.md` worst-first. It is a worksheet flow, like
 
 ```bash
 uv run xbrain verify --target all --executor claude-code
-# → <N> outputs exportados a data/verify-worksheet.json
-# →   Copia N veces (una por juez), rellena `judgments` en cada una, y ejecuta:
+# → <N> outputs exported to data/verify-worksheet.json
+# →   Copy it N times (one per judge), fill in `judgments` in each, and run:
 # →     xbrain verify --apply ws1.json --apply ws2.json ...
 ```
 
@@ -151,8 +151,8 @@ nouns that appear on none of the evidence surfaces:
 
 ```bash
 uv run xbrain verify-entities --target digest
-# → 51 outputs con entidades sin soporte (64 entidades); 0 de ellas con PASS UNÁNIME de los jueces.
-# → + 116 outputs cuyo ÚNICO indicio es del tier incierto (mayúscula ambigua, …)
+# → 51 outputs with unsupported entities (64 entities); 0 of them with a UNANIMOUS PASS from the judges.
+# → + 116 outputs whose ONLY signal is in the uncertain tier (ambiguous capital, …)
 # → Report: data/entity-report.md
 ```
 
@@ -194,8 +194,8 @@ from the store, so it costs nothing you cannot rebuild:
 
 ```bash
 uv run xbrain index build
-# → 2474 items · 45 topics · 10570 superficies · 22933 chunks · 2474 perfiles
-# →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
+# → 2474 items · 45 topics · 10570 surfaces · 22933 chunks · 2474 profiles
+# →   skipped: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
 # →   3.1s
 ```
 
@@ -207,11 +207,11 @@ uv run xbrain search "transformer attention" --limit 5
 # → 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
 # →    · [video_transcript] origin=asr trust=machine_extracted · via lexical
 # →      ly talking about changing here is you know, where the norms go, …
-# →    → verifica con: xbrain get 2051242195298968041 --surface video_transcript
+# →    → verify with: xbrain get 2051242195298968041 --surface video_transcript
 ```
 
 That last line is the habit worth forming. `origin=llm` on a match means **xbrain
-wrote it**, not the author — so when a summary is what matched, `verifica con`
+wrote it**, not the author — so when a summary is what matched, `verify with`
 names the surface that can actually settle the claim, and `get` hands you the
 source in full:
 

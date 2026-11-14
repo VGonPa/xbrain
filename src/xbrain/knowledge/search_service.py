@@ -264,8 +264,8 @@ def _refuse_cursor_past_the_ranking(cursor: str | None, offset: int, available: 
     """
     if cursor and offset >= available:
         raise ValueError(
-            f"Cursor inválido: {cursor!r} apunta más allá de los resultados disponibles. "
-            "Usa el que devolvió la respuesta anterior."
+            f"Invalid cursor: {cursor!r} points past the available results. "
+            "Use the one the previous response returned."
         )
 
 
@@ -586,17 +586,17 @@ def _decode_search_cursor(cursor: str | None) -> int:
     head, _, tail = cursor.partition(":")
     if head != _SEARCH_CURSOR_PREFIX:
         raise ValueError(
-            f"Cursor inválido: {cursor!r} no es un cursor de `search` (esos son `s:<offset>`); "
-            "los cursores de `get` no indexan esta secuencia."
+            f"Invalid cursor: {cursor!r} is not a `search` cursor (those are `s:<offset>`); "
+            "`get` cursors do not index this sequence."
         )
     try:
         offset = int(tail)
     except ValueError as error:
         raise ValueError(
-            f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior."
+            f"Invalid cursor: {cursor!r}. Use the one the previous response returned."
         ) from error
     if offset < 0:
-        raise ValueError(f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior.")
+        raise ValueError(f"Invalid cursor: {cursor!r}. Use the one the previous response returned.")
     return offset
 
 
@@ -631,19 +631,19 @@ def _validate(query: str, filters: SearchFilters, limit: int, context: QueryCont
     slugs as "none matched".
     """
     if not query.strip():
-        raise ValueError("La consulta está vacía. Escribe algo que buscar.")
+        raise ValueError("The query is empty. Type something to search for.")
     if limit <= 0:
-        raise ValueError(f"--limit debe ser >= 1, recibido {limit}.")
+        raise ValueError(f"--limit must be >= 1, got {limit}.")
     if filters.topics:
         known = {topic.slug for topic in context.vocab}
         unknown = [slug for slug in filters.topics if slug not in known]
         if unknown:
             valid = (
-                f"Los válidos son: {', '.join(sorted(known))}."
+                f"Valid ones are: {', '.join(sorted(known))}."
                 if known
-                else ("El vocabulario está vacío: no hay ningún topic válido todavía.")
+                else ("The vocabulary is empty: there is no valid topic yet.")
             )
-            raise ValueError(f"Topic(s) desconocido(s): {', '.join(unknown)}. {valid}")
+            raise ValueError(f"Unknown topic(s): {', '.join(unknown)}. {valid}")
 
 
 # ---------------------------------------------------------------------------
@@ -793,7 +793,7 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
     """
     if hit.surface_locator is None:
         raise IndexIncompatibleError(
-            f"El chunk {hit.chunk_id} no resuelve a su superficie. {REBUILD_ADVICE}"
+            f"Chunk {hit.chunk_id} does not resolve to its surface. {REBUILD_ADVICE}"
         )
     return SearchMatch(
         chunk_id=hit.chunk_id,

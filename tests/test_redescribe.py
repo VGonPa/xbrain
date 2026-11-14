@@ -424,7 +424,7 @@ def test_dry_run_never_bumps_fetched_at(tmp_path: Path):
 def test_videos_current_is_counted_from_a_real_mixed_run(tmp_path: Path):
     """I2 (review): `report.videos_current = 0` left all 17 tests green — nothing
     exercised the counter substantiating the module's headline claim ("re-running
-    on a current corpus costs zero vision calls", rendered as "N ya al día"). Build
+    on a current corpus costs zero vision calls", rendered as "N already current"). Build
     a store where a DIFFERENT answer was reachable: one stale source, one
     already-current source, and one source with no frames at all (never counted
     either way — a real corpus has audio-only videos)."""
@@ -458,9 +458,9 @@ def test_summary_line_reports_the_counters():
     )
     line = format_redescribe_summary(report)
     assert line == (
-        "Frames: 3 vídeos seleccionados, 140 ya al día. "
-        "Captions: 44 regeneradas, 7 fallidas. "
-        "Re-propagados: 2 items."
+        "Frames: 3 videos selected, 140 already current. "
+        "Captions: 44 regenerated, 7 failed. "
+        "Re-propagated: 2 items."
     )
 
 
@@ -692,10 +692,10 @@ def test_stale_video_sources_ignores_an_unknown_id_instead_of_raising():
 
 def test_videos_current_is_scoped_to_the_item_ids_selection(tmp_path: Path):
     """Re-review item 5: `--ids 1` against a corpus that also has OTHER
-    already-current videos must not count those others as "ya al día" — the
+    already-current videos must not count those others as "already current" — the
     counter is user-visible (`format_redescribe_summary`) and must be scoped to
     the SELECTION, not the whole store. Computing it over the whole store would
-    make `--ids 1` print "1 ya al día" here (and "141 ya al día" on the real
+    make `--ids 1` print "1 already current" here (and "141 already current" on the real
     142-video corpus) instead of "0"."""
     stale = _item("1", contract="")
     current = _item("2", contract=FRAME_CAPTION_CONTRACT)
@@ -887,7 +887,7 @@ def test_report_counters_all_accumulate_across_repeated_calls_sharing_one_report
 
 
 def test_dry_run_summary_wording_is_predictive_not_past_tense():
-    """The real-run summary says "regeneradas"/"fallidas" — PAST TENSE, things
+    """The real-run summary says "regenerated"/"failed" — PAST TENSE, things
     that HAPPENED. A dry run happened nothing, so its wording must not claim
     otherwise (#90 review I3)."""
     report = RedescribeReport(
@@ -897,13 +897,13 @@ def test_dry_run_summary_wording_is_predictive_not_past_tense():
     real_line = format_redescribe_summary(report, dry_run=False)
 
     assert dry_line != real_line
-    assert "regeneradas" not in dry_line
-    assert "fallidas" not in dry_line
-    assert "regeneradas" in real_line
+    assert "regenerated" not in dry_line
+    assert "failed" not in dry_line
+    assert "regenerated" in real_line
 
 
 def test_dry_run_summary_flags_repropagated_as_not_a_prediction():
-    """`Re-propagados` is explicitly NOT a prediction (the module docstring says
+    """`Re-propagated` is explicitly NOT a prediction (the module docstring says
     so) — that caveat must reach the OUTPUT itself, not just a docstring the
     operator never reads (#90 review I3)."""
     report = RedescribeReport(videos_selected=1, frames_described=2)

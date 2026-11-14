@@ -430,7 +430,7 @@ def test_an_index_directory_outside_the_data_root_is_rejected(tmp_path: Path) ->
     (data_dir / "escape").symlink_to(outside)
 
     assert resolve_index_dir(data_dir, "index") == (data_dir / "index").resolve()
-    with pytest.raises(ValueError, match="fuera de"):
+    with pytest.raises(ValueError, match="outside"):
         resolve_index_dir(data_dir, "escape")
     with pytest.raises(ValueError, match="relativ"):
         resolve_index_dir(data_dir, "/etc")

@@ -199,7 +199,7 @@ def test_eval_emits_metrics_per_stratum_and_declares_gaps(workspace: Path) -> No
     """Acceptance 9: per strategy x stratum x provenance, gaps declared, no invented zeros."""
     payload = _json_stdout(runner.invoke(app, ["eval", "--strategy", "lexical", "--json"]))
     assert payload["strategy"] == "lexical"
-    assert payload["by_stratum"]["expansion"] == {"coverage": "sin cobertura"}
+    assert payload["by_stratum"]["expansion"] == {"coverage": "no coverage"}
     assert "recall@10" not in payload
     assert set(payload["by_provenance"]) == {"construido", "real"}
 
@@ -214,7 +214,7 @@ def test_eval_writes_its_report_where_it_is_gitignored(workspace: Path) -> None:
     result = runner.invoke(app, ["eval", "--report", "data/eval-report.json"])
     assert result.exit_code == 0
     assert json.loads((workspace / "data" / "eval-report.json").read_text())["strategy"]
-    assert "sin cobertura" in (workspace / "data" / "eval-report.md").read_text()
+    assert "no coverage" in (workspace / "data" / "eval-report.md").read_text()
 
 
 def test_eval_can_fail_and_says_which_bucket(workspace: Path) -> None:
@@ -299,7 +299,7 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(
     assert result.exit_code != 0, (
         "a threshold of 1.0 passed having scored zero cases:\n" + result.output
     )
-    assert "0" in result.output and "medid" in result.output, result.output
+    assert "0" in result.output and "measured" in result.output, result.output
 
 
 def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path) -> None:
@@ -331,8 +331,8 @@ def test_the_sweep_ARTEFACTS_on_disk_name_the_retriever_that_ranked_them(
     `data/eval-sweep.{json,md}` is the artefact Plan 03 has to beat, and it named no retriever
     anywhere — `xbrain eval --strategy vector --sweep-chunker …` wrote a ranked table produced
     entirely by bm25, with `strategy` absent from the JSON and absent from the markdown, while
-    the SAME command without `--sweep-chunker` headed its report «`lexical` · solicitada
-    `vector`, sin backend». One command, two branches, one of them silent about its instrument
+    the SAME command without `--sweep-chunker` headed its report «`lexical` · requested
+    `vector`, no backend». One command, two branches, one of them silent about its instrument
     (F-2). The report object is asserted in `tests/test_knowledge_evaluation.py`; this asserts
     the bytes, because a field that never reaches the file is a field nobody reads.
 
@@ -357,7 +357,7 @@ def test_the_sweep_ARTEFACTS_on_disk_name_the_retriever_that_ranked_them(
     assert on_disk["requested_strategy"] == "vector"
 
     markdown = (workspace / "data" / "eval-sweep.md").read_text(encoding="utf-8")
-    assert markdown.splitlines()[0].startswith("Recuperador: `lexical`")
+    assert markdown.splitlines()[0].startswith("Retriever: `lexical`")
     assert "vector_not_implemented" in markdown.splitlines()[0]
 
 
@@ -457,7 +457,7 @@ def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(
     workspace: Path, unscorable_strategy: str
 ) -> None:
     """F2-3 at the surface a caller reads. A sweep whose every combination was unscorable
-    printed «PLANO: todas las combinaciones puntúan igual» and exited 0 — a positive claim
+    printed «FLAT: every combination scores the same» and exited 0 — a positive claim
     about a ranking that never happened, reported as a success.
 
     The golden set is trimmed to FX7 and the run is pointed at an INJECTED backend that can
@@ -481,8 +481,8 @@ def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(
     )
 
     assert unmeasured.exit_code != 0, "a sweep that scored nothing exited 0:\n" + unmeasured.output
-    assert "SIN MEDICIÓN" in unmeasured.output, unmeasured.output
-    assert "PLANO" not in unmeasured.output, unmeasured.output
+    assert "NOT MEASURED" in unmeasured.output, unmeasured.output
+    assert "FLAT" not in unmeasured.output, unmeasured.output
     # The table is still published: the run failed, the evidence is not withheld.
     payload = json.loads((workspace / "data" / "eval-sweep.json").read_text(encoding="utf-8"))
     assert payload["winner"] is None and payload["measured"] is False
@@ -490,7 +490,7 @@ def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(
 
     empty = runner.invoke(app, ["eval", "--sweep-chunker", "target="])
     assert empty.exit_code != 0, empty.output
-    assert "SIN COMBINACIONES" in empty.output, empty.output
+    assert "NO COMBINATIONS" in empty.output, empty.output
 
 
 def test_eval_sweep_refuses_an_unknown_axis_through_the_command(workspace: Path) -> None:
@@ -500,7 +500,7 @@ def test_eval_sweep_refuses_an_unknown_axis_through_the_command(workspace: Path)
     result = runner.invoke(app, ["eval", "--sweep-chunker", "targt=800"])
 
     assert result.exit_code != 0, result.output
-    assert "desconocido" in result.output, result.output
+    assert "Unknown sweep axis" in result.output, result.output
 
 
 def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> None:
