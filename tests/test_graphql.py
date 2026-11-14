@@ -948,3 +948,21 @@ def test_ingest_warns_when_a_tweet_arrives_truncated(caplog):
     assert any(
         "truncad" in r.message.lower() or "truncat" in r.message.lower() for r in caplog.records
     )
+
+
+def test_ingest_does_not_warn_when_the_note_tweet_body_was_read(caplog):
+    """The warning says "the long-form body was not available". When `note_tweet` WAS read,
+    that sentence is false — and `looks_truncated` alone cannot know it, because it judges
+    LENGTH, and every long-form body is long. Measured on the 2026-10-10 extract: the
+    warning fired on bodies of 780 and 13,173 chars read straight from `note_tweet`, so a
+    run printed dozens of TRUNCATED lines for posts that arrived whole, and the one line
+    that meant something was unfindable among them."""
+    import logging
+
+    truncated = "x" * 279 + " https://t.co/abc"
+    body = "x" * 279 + " and the rest of the long-form body, which runs well past the cut"
+    with caplog.at_level(logging.WARNING):
+        items = parse_tweets(_long_post_response(truncated, body), "bookmark")
+
+    assert items[0].text == body
+    assert not [r for r in caplog.records if "TRUNCATED" in r.getMessage()]

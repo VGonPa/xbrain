@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -44,16 +45,19 @@ from xbrain.fetch import (
     retry_failed,
     revalidate_stored_bodies,
 )
-from xbrain.fetch_x import (
-    browser_text_fetcher,
-    fetch_x_articles,
-    refetch_full_texts,
-)
+from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
+from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
 from xbrain.models import ArchiveImport, Author, Item, SourceName
+from xbrain.redescribe import (
+    RedescribeReport,
+    format_redescribe_summary,
+    redescribe_frames,
+    stale_video_sources,
+)
 from xbrain.refresh import (
     backfill_quoted_from_store,
     backfill_quoted_sources,
@@ -91,6 +95,7 @@ from xbrain.video_fetch import (
     format_fetch_summary,
 )
 from xbrain.video_frames import (
+    FOOTAGE_CAP_SETTING,
     KeyFrame,
     extract_key_frames,
     select_frames,
@@ -104,7 +109,13 @@ from xbrain.video_media import (
     plan_video_downloads,
 )
 from xbrain.video_media import download_videos as run_download_videos
-from xbrain.video_select import format_video_table, list_video_entries, row_to_json
+from xbrain.video_select import (
+    _primary_topic,
+    _scope_by_source,
+    format_video_table,
+    list_video_entries,
+    row_to_json,
+)
 from xbrain.vision import describe_image
 from xbrain.vocab import (
     apply_vocab_worksheet,
@@ -1460,24 +1471,53 @@ def _resolve_digest_ids(
     return unique[:limit] if limit is not None else unique
 
 
-def _build_visual_config(cfg: Config, vision_model: str | None = None) -> VisualConfig:
-    """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
+def _build_describe_frame_fn(
+    cfg: Config, vision_model: str | None = None, *, operation: str
+) -> Callable[[Path], str]:
+    """Bind the EXTERNAL vision command into a `path -> caption` callable (#90).
 
-    Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and
-    `describe_image` (the EXTERNAL `[vision].command` / model) so `digest_videos`
-    calls them with just a path. An unconfigured `[vision].command` is a clear
-    operator error BEFORE any work — there is no bundled default vision model.
+    Shared by `digest-video --frames` and `redescribe-frames` so the two can never
+    drift on which model, which command or which rubric language they use. An
+    unconfigured `[vision].command` is a clear operator error raised BEFORE any
+    work — there is no bundled default vision model.
 
-    `vision_model` overrides `[vision].model` for this run (the `--vision-model`
-    flag): the model name is passed to `[vision].command` as `--model`, so a
-    multi-backend wrapper can route it (e.g. `opus` → cloud, `qwen-7b` → local).
+    `operation` names the CALLER in the guard's error message (#90 review M7),
+    e.g. `"digest-video --frames"` or `"redescribe-frames"` — a refactor once
+    replaced a caller-specific message ("digest-video --frames requires an
+    external vision model: …") with a generic "esta operación necesita…", and
+    the operator lost the one clue telling them WHICH command failed. Required
+    (no default) so BOTH call sites must identify themselves.
+
+    The rubric renders in `cfg.output_language` (the wiki's language), NOT in
+    `digest-video --language` (the audio language handed to the transcriber).
     """
     if not cfg.vision_command.strip():
         raise ValueError(
-            "digest-video --frames requires an external vision model: set "
-            "[vision].command in config.toml (there is no bundled default)."
+            f"{operation} necesita un modelo de visión externo: configura "
+            "[vision].command en config.toml (no hay default incorporado)."
         )
     model = vision_model or cfg.vision_model
+
+    def _describe(path: Path) -> str:
+        return describe_image(
+            path, command=cfg.vision_command, model=model, language=cfg.output_language
+        )
+
+    return _describe
+
+
+def _build_visual_config(cfg: Config, vision_model: str | None = None) -> VisualConfig:
+    """Build the `--frames` visual-layer config from `[vision]` + `[frames]` (#44 PR4).
+
+    Binds `extract_key_frames` (ffmpeg, threshold/interval from `[frames]`), the two
+    reducers — slides capped by `[frames].max_frames`, SILENT non-slide footage by
+    `[frames].footage_max_frames`, both after the same dedup — and the shared
+    `_build_describe_frame_fn` seam so `digest_videos` calls them with just a
+    path. The vision guard, the model override and the rubric language all live
+    in that shared helper, so `digest-video --frames` and `redescribe-frames`
+    cannot drift apart on any of the three.
+    """
+    describe_fn = _build_describe_frame_fn(cfg, vision_model, operation="digest-video --frames")
 
     def _extract(path: Path) -> list[KeyFrame]:
         # RAW frames (cap=False): classification runs on the full distribution; the
@@ -1497,11 +1537,21 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
             max_frames=cfg.frames_max_frames,
         )
 
-    def _describe(path: Path) -> str:
-        return describe_image(path, command=cfg.vision_command, model=model)
+    def _reduce_footage(frames: list[KeyFrame]) -> list[KeyFrame]:
+        return select_frames(
+            frames,
+            dedupe=cfg.frames_dedupe,
+            dedupe_distance=cfg.frames_dedupe_distance,
+            max_frames=cfg.frames_footage_max_frames,
+            cap_setting=FOOTAGE_CAP_SETTING,
+        )
 
     return VisualConfig(
-        media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe, reduce_fn=_reduce
+        media_root=cfg.media_dir,
+        extract_fn=_extract,
+        describe_fn=describe_fn,
+        reduce_fn=_reduce,
+        footage_reduce_fn=_reduce_footage,
     )
 
 
@@ -1517,18 +1567,36 @@ def _run_digest_video(
     language: str | None,
     frames: bool,
     vision_model: str | None = None,
+    keep_transcript: bool = False,
 ) -> None:
     """Digest selected videos into `x_video` transcript sources; persist + summarise.
 
     Flow: load → resolve selection → ephemeral fetch + EXTERNAL transcribe +
-    attach (dedup by video identity, in memory) → snapshot → persist. The
+    attach (dedup by video identity, in memory) → snapshot → persist. The default
+    path fetches + transcribes once per video identity. `--keep-transcript`
+    partitions one identity by stored transcript: one fetch per distinct stored
+    value (plus a missing-transcript batch), zero ASR for stored batches. The
     transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
     config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
-    extracts slide key frames and describes them via the EXTERNAL `[vision]`
-    command, attaching them to slide-heavy videos. It is destructive (rewrites
-    `items.json`), so it auto-snapshots BEFORE the save — but only when something
+    extracts key frames and describes them via the EXTERNAL `[vision]` command,
+    attaching them to slide videos and to silent non-slide footage (a talking-head
+    with speech is skipped). `--keep-transcript` reuses each item's own stored
+    transcript instead of re-running the transcriber. The visual layer is still
+    redone; a completed forced re-digest replaces old frames and clears the
+    long-form digest even if vision fails or the video is reclassified. The
+    `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+    `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+    removes a live one absent there), but never contains `data/media/` or frame PNGs.
+    The selected items' `data/media/<id>/frames/` directories have already been
+    deleted or overwritten by the time it is taken. Before re-digesting items that
+    currently have frames, copy those directories aside and restore them with the snapshot
+    if needed; otherwise restored metadata can point to missing files or different
+    pixels. Hollow items have no prior frames and are not exposed to this loss. The
+    command is destructive (rewrites `items.json`), so it auto-snapshots BEFORE
+    the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
-    takes no snapshot). A snapshot failure propagates and aborts before any write.
+    takes no snapshot). A snapshot failure propagates and aborts before any
+    `items.json` write.
     """
     store = load_store(cfg.items_path)
     id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
@@ -1542,7 +1610,14 @@ def _run_digest_video(
             language=language,
         )
 
-    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe, visual=visual)
+    report = digest_videos(
+        store,
+        id_list,
+        force=force,
+        keep_transcript=keep_transcript,
+        transcribe_fn=_transcribe,
+        visual=visual,
+    )
     if report.changed > 0:
         _auto_snapshot(cfg, "digest-video")
         save_store(store, cfg.items_path)
@@ -1564,7 +1639,10 @@ def digest_video(
         None, "--limit", help="Máximo número de items a procesar en esta ejecución."
     ),
     force: bool = typer.Option(
-        False, "--force", help="Re-transcribir items que ya tienen un source x_video."
+        False,
+        "--force",
+        help="Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
+        "con --keep-transcript.",
     ),
     language: str | None = typer.Option(
         None,
@@ -1575,16 +1653,25 @@ def digest_video(
     frames: bool = typer.Option(
         False,
         "--frames",
-        help="Capa visual (opt-in): extrae key-frames de slides, los describe con "
-        "el modelo de visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
-        "Solo para vídeos slide-heavy; los talking-head se saltan (se registra).",
+        help="Capa visual (opt-in): extrae key-frames, los describe con el modelo de "
+        "visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
+        "Las slides se describen; un talking-head CON voz se salta (el transcript ya lo "
+        "cubre; se registra); un vídeo mudo sin slides se describe como metraje, con "
+        "tope `\\[frames].footage_max_frames`.",
     ),
     vision_model: str | None = typer.Option(
         None,
         "--vision-model",
-        help="Sobrescribe `[vision].model` para este run: el nombre se pasa como "
+        help="Sobrescribe `\\[vision].model` para este run: el nombre se pasa como "
         "--model al comando de visión. Con un wrapper multi-backend permite elegir "
         "modelo por run (p.ej. opus → nube, qwen-7b → local). Requiere --frames.",
+    ),
+    keep_transcript: bool = typer.Option(
+        False,
+        "--keep-transcript",
+        help="Con --frames --force: rehace la capa visual y reutiliza la transcripción "
+        "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
+        "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
     ),
 ) -> None:
     """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
@@ -1594,22 +1681,37 @@ def digest_video(
     por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
     item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
-    URL firmada): N bookmarks del mismo vídeo se descargan y transcriben UNA vez y
-    todos reciben el mismo transcript. Un vídeo sin voz/audio se adjunta con texto
-    vacío + `has_speech=False` (nunca es un fallo duro). Idempotente: salta items
-    que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
+    URL firmada): en el flujo por defecto, N bookmarks del mismo vídeo se
+    descargan y transcriben UNA vez y todos reciben el mismo transcript. Con
+    `--keep-transcript`, los items se separan por su transcript guardado: una
+    descarga por valor distinto (más el lote sin transcript), cero ASR para los
+    lotes guardados. Un vídeo sin voz/audio se adjunta con texto
+    vacío + `has_speech=False` (nunca es un fallo duro); si además queda sin
+    frames, el resumen lo cuenta en `Huecos (sin voz ni frames): N`. Idempotente:
+    salta items que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
     `items.json`) → auto-snapshot antes de escribir. Nunca hay más de un vídeo en
     disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
 
-    `--frames` (opt-in, capa visual PR4): para vídeos slide-heavy extrae
-    key-frames con ffmpeg (EXTERNO), los describe con el modelo de visión EXTERNO
-    (`\\[vision].command`), adjunta las descripciones al source `x_video` y embebe
-    las slides en la nota como fotos. Los vídeos talking-head se saltan y se
-    registra el motivo. Sin `--frames` el flujo es idéntico al de PR2/PR3.
+    `--frames` (opt-in, capa visual PR4): extrae key-frames con ffmpeg (EXTERNO),
+    los describe con el modelo de visión EXTERNO (`\\[vision].command`), adjunta las
+    descripciones al source `x_video` y embebe los frames en la nota como fotos.
+    Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
+    (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
+    se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
+    `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
+    `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
     """
     cfg = _config()
     if vision_model and not frames:
         raise typer.BadParameter("--vision-model requires --frames (the visual layer is off)")
+    if keep_transcript and not frames:
+        raise typer.BadParameter(
+            "--keep-transcript requires --frames (it only re-runs the visual layer)"
+        )
+    if keep_transcript and not force:
+        raise typer.BadParameter(
+            "--keep-transcript requires --force (it re-digests already-digested videos)"
+        )
     _run_digest_video(
         cfg,
         ids=ids,
@@ -1621,7 +1723,305 @@ def digest_video(
         language=language,
         frames=frames,
         vision_model=vision_model,
+        keep_transcript=keep_transcript,
     )
+
+
+def _redescribe_wants_whole_corpus(
+    ids: str | None, topic: str | None, source: str, limit: int | None
+) -> bool:
+    """True when NOTHING narrows the `redescribe-frames` selection (#90 finding A).
+
+    Extracted so `_resolve_redescribe_ids` reads as one decision, not four ANDed
+    conditions: the "every stale video" shortcut is safe ONLY when no selector
+    (`--ids`/`--topic`) AND no cap/scope (`--limit`/`--source`) is set — otherwise
+    `--limit 10` or `--source bookmarks` would be silently ignored.
+    """
+    return not ids and not topic and limit is None and source == "all"
+
+
+def _warn_missing_ids(store: dict[str, Item], explicit_ids: list[str]) -> None:
+    """Echo which of an explicit `--ids` list are absent from the store.
+
+    A warning, not an error (#90 pre-flight finding C): the whole-corpus repair
+    must keep working even when one id in an `--ids` list is a typo. Without
+    this, an unknown id silently vanishes inside `stale_video_sources`'s
+    store-membership filter (`{i: store[i] for i in item_ids if i in store}`),
+    and "no such item" reads identically to "already at the contract".
+    """
+    missing = list(dict.fromkeys(i for i in explicit_ids if i not in store))
+    if missing:
+        typer.echo(
+            f"redescribe-frames: aviso, id(s) no encontrados en el store: {', '.join(missing)}",
+            err=True,
+        )
+
+
+def _stale_item_ids(
+    store: dict[str, Item], *, topic: str | None, source: str, force: bool
+) -> list[str]:
+    """Item ids carrying a re-caption candidate, scoped by `--topic`/`--source`
+    — resolved from the ENGINE's OWN population (#90 review I2).
+
+    `_resolve_redescribe_ids` used to narrow via `list_video_entries`, the
+    `list-videos` CATALOG (one row per video *media* entry). That catalog has no
+    staleness filter, so `--limit N` truncated it BEFORE `stale_video_sources`
+    (inside `redescribe_frames` itself) ever got a look — measured: on a store
+    with item 1 already current and item 2 stale, `--limit 1` selected item 1
+    (first in store order), the engine then found nothing stale in it, and
+    reported "0 vídeos seleccionados" — identically on every repeat, so a staged
+    backfill never advanced.
+
+    It also silently drifted from the engine's real population (#90 review M8):
+    the catalog is "one row per video *media* entry", while the engine walks
+    "every `x_video` success carrying frames" — an item with frames but an empty
+    `media` list is repaired by an unscoped run yet invisible to `--limit`/
+    `--source` here. Selecting straight from `stale_video_sources` (`force`
+    threaded through, so `--force` widens "stale" to "every frame-bearing
+    source", exactly like the engine itself) binds the two populations in code
+    instead of leaving them to agree by convention (this repo's rule 5).
+
+    `--topic`/`--source` are applied by reusing `video_select._primary_topic`
+    and `_scope_by_source` — the SAME functions `list_video_entries` uses
+    internally — so this can never drift from the catalog's own notion of
+    either filter.
+    """
+    scoped = _scope_by_source(store, source)
+    ids: list[str] = []
+    for item_id, _source in stale_video_sources(store, force=force):
+        item = scoped.get(item_id)
+        if item is None:
+            continue
+        if topic is not None and _primary_topic(item) != topic:
+            continue
+        ids.append(item_id)
+    return list(dict.fromkeys(ids))
+
+
+def _resolve_redescribe_ids(
+    store: dict[str, Item],
+    ids: str | None,
+    topic: str | None,
+    source: str,
+    limit: int | None,
+    *,
+    force: bool = False,
+) -> list[str] | None:
+    """Resolve the re-description selection, or `None` for "every stale video".
+
+    Unlike `digest-video`, NO selector means "the whole backfill" rather than an
+    error: this is a corpus-wide repair, it is idempotent by contract version, and
+    `--dry-run` previews it for free — BUT ONLY when NOTHING narrows the run.
+    `--limit`/`--source` must still apply on the whole-corpus path (#90 pre-flight
+    finding A): returning `None` the instant `--ids`/`--topic` are both absent —
+    without checking `limit`/`source` — would silently ignore `--limit 10`, the
+    obvious way to test the waters before a multi-thousand-frame backfill, and
+    `--source bookmarks`, describing the WHOLE corpus (every source) at full
+    vision cost instead. So the "every stale video" shortcut fires only when
+    `limit is None` and `source == "all"` too; otherwise the selection is
+    expanded via `_stale_item_ids` — the ENGINE's own stale population, not the
+    `list-videos` catalog (#90 review I2 — see `_stale_item_ids` for the bug this
+    replaced). `force` is threaded through so `--force` widens the population the
+    same way it widens the engine's own selection.
+
+    `--ids` stay verbatim, never re-scoped by `--source`/staleness (matching the
+    sibling `_resolve_digest_ids`) — but an id absent from the store, or the
+    whole `--ids` value collapsing to nothing after stripping whitespace (e.g.
+    `--ids "   "`), is now ECHOED, not silently dropped (#90 pre-flight finding C
+    + review M5): `stale_video_sources` filters `{i: store[i] for i in item_ids
+    if i in store}`, so a typo'd `--ids 999` would otherwise report zero videos
+    and the operator could not tell "no such item" from "already at the
+    contract" — and an unmatched `--topic` was the SAME silent blind spot
+    (`--topic no-such-topic` printed "0 vídeos seleccionados", indistinguishable
+    from an up-to-date corpus). All three stay WARNINGS, not hard errors —
+    unlike `_resolve_fetch_ids`'s all-selectors-empty case — because the
+    whole-corpus repair must keep working even when one id in an `--ids` list is
+    bad.
+    """
+    if _redescribe_wants_whole_corpus(ids, topic, source, limit):
+        return None
+    id_list: list[str] = []
+    if ids:
+        id_list.extend(_resolve_explicit_redescribe_ids(store, ids))
+    if topic or not ids:
+        # Either an explicit `--topic` filter, or NOTHING selected explicitly at
+        # all (the whole-corpus-but-scoped-by-limit/source path from finding A
+        # above) — either way, expand from the engine's own stale population.
+        # `topic=None` here just means "no topic filter", still scoped by
+        # `source`.
+        id_list.extend(_resolve_topic_scoped_redescribe_ids(store, topic, source, force))
+    unique = list(dict.fromkeys(id_list))
+    return unique[:limit] if limit is not None else unique
+
+
+def _resolve_explicit_redescribe_ids(store: dict[str, Item], ids: str) -> list[str]:
+    """Split/strip/dedupe an explicit `--ids` value, warning (#90 review M5)
+    when it collapses to nothing after stripping (e.g. `--ids "   "`) and when
+    any id is absent from the store (#90 pre-flight finding C, `_warn_missing_
+    ids`). Extracted out of `_resolve_redescribe_ids` to keep that function's
+    own branching at a glance (radon: this split is what keeps it at grade B).
+    """
+    explicit = [part.strip() for part in ids.split(",") if part.strip()]
+    if not explicit:
+        typer.echo(
+            "redescribe-frames: aviso, --ids no contiene ningún id válido tras quitar espacios.",
+            err=True,
+        )
+    _warn_missing_ids(store, explicit)
+    return explicit
+
+
+def _resolve_topic_scoped_redescribe_ids(
+    store: dict[str, Item], topic: str | None, source: str, force: bool
+) -> list[str]:
+    """Expand via `_stale_item_ids`, warning (#90 review M5) when an explicit
+    `--topic` matches nothing — the same silent blind spot an unknown `--ids`
+    used to have. `topic=None` just means "no topic filter" (no warning)."""
+    topic_ids = _stale_item_ids(store, topic=topic, source=source, force=force)
+    if topic is not None and not topic_ids:
+        typer.echo(
+            f"redescribe-frames: aviso, --topic {topic!r} no coincide con ningún vídeo.",
+            err=True,
+        )
+    return topic_ids
+
+
+def _dry_run_describe_fn(path: Path) -> str:
+    """Sentinel `describe_fn` for `redescribe-frames --dry-run` (#90 pre-flight
+    finding B).
+
+    `--dry-run` must preview a run WITHOUT `[vision].command` being configured at
+    all: `_build_describe_frame_fn` raises the moment it is CALLED when that is
+    unset, so building the real `describe_fn` eagerly — above the dry-run branch,
+    as the initial plan did — would make the FREE preview demand the same
+    configuration as the real run, contradicting this command's own docstring
+    promise that `--dry-run` costs nothing. `redescribe_frames`'s dry-run branch
+    (`_preview_source`) never calls `describe_fn`, so passing this sentinel is
+    also a live regression guard: if a future change ever makes the dry-run path
+    call the model after all, it fails loudly here instead of silently spending
+    one vision call per frame — 2077 of them, on the corpus that motivated this
+    module — on every "free" preview.
+    """
+    raise RuntimeError(f"redescribe-frames --dry-run must not call the vision model (got {path})")
+
+
+@app.command(name="redescribe-frames")
+@_handle_cli_errors
+def redescribe_frames_command(
+    ids: str | None = typer.Option(None, "--ids", help="IDs separados por comas."),
+    topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Máximo número de items a re-describir en esta ejecución."
+    ),
+    force: bool = typer.Option(False, "--force", help="Re-describe también los frames ya al día."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra qué se re-describiría sin escribir nada."
+    ),
+    vision_model: str | None = typer.Option(
+        None, "--vision-model", help="Modelo de visión para este run (ver scripts/xbrain-vision)."
+    ),
+) -> None:
+    """Re-describe los key frames YA guardados con el rubric de captions vigente.
+
+    Lee los píxeles de `data/media/<id>/frames/`: NO descarga vídeos, NO llama a
+    X y NO usa ffmpeg. Salta los vídeos cuyas captions ya se generaron con el
+    contrato actual (`--force` las regenera igualmente), así que re-ejecutarlo
+    sobre un corpus al día no cuesta ni una llamada al modelo.
+
+    Cuando alguna caption cambia de verdad, sube `content.fetched_at` del item,
+    que es el disparador que hace que `enrich`, `video-digest` y `generate`
+    vuelvan a correr con la evidencia nueva. Si ninguna cambia, no toca nada.
+
+    Es destructivo (reescribe `items.json`), así que auto-snapshota ANTES de
+    guardar — pero sólo cuando hay algo que guardar. Un abort a mitad de camino
+    (`RuntimeError` del circuit breaker, `VisionNotFound`, un `OSError`, Ctrl-C)
+    persiste igualmente lo que ya se re-describió antes del fallo — no se tira
+    el trabajo de visión ya pagado — y el error se sigue propagando con exit
+    code distinto de 0 (#90 review I1).
+
+    `--dry-run` NO requiere `\\[vision].command` configurado: previsualiza el
+    backfill (vídeos seleccionados, captions que se regenerarían/fallarían) sin
+    llamar al modelo ni una sola vez. `Re-propagados` en la previsualización NO
+    es una predicción — sólo se sabe corriendo el modelo de verdad.
+    """
+    cfg = _config()
+    if vision_model and dry_run:
+        raise typer.BadParameter(
+            "--vision-model requires a real run (--dry-run never calls the vision model)"
+        )
+    store = load_store(cfg.items_path)
+    selected = _resolve_redescribe_ids(store, ids, topic, source.value, limit, force=force)
+    # A dry run must not demand `[vision].command` at all — see `_dry_run_
+    # describe_fn` for why this can't just be the real describe_fn built eagerly.
+    describe_fn = (
+        _dry_run_describe_fn
+        if dry_run
+        else _build_describe_frame_fn(cfg, vision_model, operation="redescribe-frames")
+    )
+    # `report` is created HERE, before the engine call, so the `finally` below
+    # holds the SAME instance the engine populated frame by frame — even if the
+    # engine raises partway through (#90 review I1 + M2). Without this, a
+    # mid-run `RuntimeError`/`VisionNotFound`/`OSError`/Ctrl-C would discard
+    # every already-paid-for vision call: the store was only ever written AFTER
+    # `redescribe_frames` returned, and an exception means it never does.
+    report = RedescribeReport()
+    try:
+        redescribe_frames(
+            store,
+            media_root=cfg.media_dir,
+            describe_fn=describe_fn,
+            item_ids=selected,
+            force=force,
+            dry_run=dry_run,
+            report=report,
+        )
+    finally:
+        _finish_redescribe_run(cfg, store, report, dry_run=dry_run)
+
+
+def _finish_redescribe_run(
+    cfg: Config, store: dict[str, Item], report: RedescribeReport, *, dry_run: bool
+) -> None:
+    """The `redescribe-frames` `finally` body (#90 re-review item 4).
+
+    Two invariants must hold even when the snapshot/save step below RAISES:
+
+    1. The summary always prints — it is the FIRST thing this does, before
+       anything that can fail — so an abort (in the engine call above, OR
+       right here) still tells the operator what landed. Measured bug: with
+       the summary echoed AFTER the save, a `save_store` failure meant it
+       never ran at all, even though the run's actual counters were sitting
+       right there on `report`.
+    2. A save/snapshot failure must never REPLACE an exception already
+       propagating. That is Python's DEFAULT `finally` behaviour — a new
+       exception raised while one is in flight silently becomes the
+       reported one (the original demoted to `__context__` and never
+       surfaced to the operator) — so this checks `sys.exc_info()`
+       explicitly: with an original error in flight, the save failure is
+       reported (not swallowed) but the ORIGINAL keeps propagating
+       unmodified. With nothing in flight, the save/snapshot failure IS the
+       error, and propagates exactly as it did before this fix.
+    """
+    typer.echo(format_redescribe_summary(report, dry_run=dry_run))
+    if dry_run:
+        typer.echo("--dry-run: no se ha tocado el store.")
+        return
+    if report.frames_described == 0:
+        return
+    # Snapshot strictly BEFORE the write — the operator's only undo for a
+    # 2077-caption rewrite.
+    original_error = sys.exc_info()[1]
+    try:
+        _auto_snapshot(cfg, "redescribe-frames")
+        save_store(store, cfg.items_path)
+    except Exception as save_exc:
+        if original_error is None:
+            raise
+        typer.echo(
+            f"AVISO: además del error anterior, falló guardar el store: {save_exc}",
+            err=True,
+        )
 
 
 @app.command()
@@ -2364,6 +2764,23 @@ def reextract_command(
 @_handle_cli_errors
 def refetch_truncated_command(
     apply: bool = typer.Option(False, "--apply", help="Actually re-fetch from X (network)"),
+    tabs: int | None = typer.Option(
+        None,
+        "--tabs",
+        help=(
+            "Pestañas reutilizadas en paralelo (por defecto 3, máximo 4). Cada una navega "
+            "EN LA MISMA pestaña de un post al siguiente, con una pausa aleatoria de 5-30 s "
+            "entre cargas: ni se abre un navegador por item ni se carga a ritmo de máquina."
+        ),
+    ),
+    headless: bool = typer.Option(
+        False,
+        "--headless/--no-headless",
+        help=(
+            "Navegador oculto. Por defecto headful (visible) — más difícil de "
+            "fingerprintear como bot."
+        ),
+    ),
 ) -> None:
     """List (or re-fetch) items whose tweet text was TRUNCATED at ingest.
 
@@ -2394,11 +2811,26 @@ def refetch_truncated_command(
     def _checkpoint() -> None:
         save_store(store, cfg.items_path)
 
-    with x_context(cfg.storage_state_path, headless=False) as context:
-        repaired = refetch_full_texts(
-            store, targets, browser_text_fetcher(context), checkpoint=_checkpoint
+    opened = clamp_tabs(tabs)
+    typer.echo(
+        f"Re-fetch en {opened} pestaña(s) reutilizada(s), pausa aleatoria de "
+        f"{PAUSE_MIN_MS // 1000}-{PAUSE_MAX_MS // 1000}s entre cargas. "
+        "Ctrl-C conserva lo reparado hasta el último checkpoint."
+    )
+    # `RefetchRateLimited` is a RuntimeError, so `_handle_cli_errors` already prints it as
+    # a clean exit-1. All this has to guarantee is that the repairs made before X started
+    # limiting us are on disk when it does.
+    try:
+        repaired = refetch_full_texts_pooled(
+            store,
+            targets,
+            cfg.storage_state_path,
+            headless=headless,
+            tabs=opened,
+            checkpoint=_checkpoint,
         )
-    save_store(store, cfg.items_path)
+    finally:
+        save_store(store, cfg.items_path)
     typer.echo(
         f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}\n"
         f"{repaired} resúmenes invalidados: vuelve a ejecutar `xbrain enrich`."
@@ -2449,6 +2881,724 @@ def verify_entities_command(
             f"precisión, y es donde se esconde un nombre inventado al abrir un resumen."
         )
     typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
+
+
+# ============================================================================
+# knowledge — the read contract (Plan 01)
+# ============================================================================
+
+knowledge_app = typer.Typer(help="Inspeccionar el contrato de conocimiento (solo lectura).")
+app.add_typer(knowledge_app, name="knowledge")
+
+
+def _knowledge_corpus():
+    """The live corpus as the knowledge layer sees it. Read-only, no snapshot."""
+    from xbrain.knowledge.evaluation import load_corpus_from_store
+
+    cfg = _config()
+    return cfg, load_corpus_from_store(
+        cfg.items_path, load_vocab(cfg.data_dir / "vocab.yaml"), cfg.topics_path
+    )
+
+
+def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: bool) -> dict:
+    """The JSON document for one item: the read projection, its surfaces and its chunks.
+
+    `--chunks` implies `--surfaces` because a chunk is only checkable against the surface it
+    was cut from: `surface.text[char_start:char_end] == chunk.text` is the operational form
+    of spec §3.8, and it cannot be evaluated by a consumer that was handed only the chunks.
+    """
+    from xbrain.knowledge.chunking import chunk_surfaces
+    from xbrain.knowledge.surfaces import (
+        article_block_texts,
+        hydrate_verification,
+        item_surfaces,
+        item_topics,
+    )
+
+    cfg = _config()
+    item = corpus.items.get(item_id)
+    if item is None:
+        raise ValueError(
+            f"No existe el item {item_id!r} en {cfg.items_path}. "
+            "Comprueba el id con `xbrain knowledge inspect <id>`."
+        )
+    from xbrain.knowledge.surfaces import knowledge_item
+
+    surfaces = item_surfaces(item)
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
+    payload: dict = {
+        # The version of the shapes this payload dumps, read off the contract (U-1): the
+        # surfaces and chunks here are the `EvidenceBundle`'s, so they carry its number.
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "item": knowledge_item(item, vault_dir=cfg.output_dir).model_dump(mode="json"),
+        # Hydrated from the LIVE store, never persisted on a surface (M5): a stored copy
+        # could not be invalidated when the verdict changed, so a revoked FAIL would keep
+        # being served as the PASS it used to be.
+        "verification": {
+            target: verdict.model_dump(mode="json")
+            for target, verdict in hydrate_verification(item, cfg.output_language).items()
+        },
+    }
+    if want_surfaces or want_chunks:
+        payload["surfaces"] = [s.model_dump(mode="json") for s in surfaces]
+    if want_chunks:
+        payload["chunks"] = [
+            c.model_dump(mode="json")
+            for c in chunk_surfaces(
+                surfaces,
+                topics=item_topics(item),
+                url=item.url,
+                blocks_by_surface_id=article_block_texts(item),
+            )
+        ]
+    return payload
+
+
+def _topic_membership(corpus, slug: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(primary_item_ids, secondary_item_ids)` for a topic, both sorted.
+
+    Sorted because `TopicRecord` is compared and fingerprinted downstream, and an order that
+    followed dict iteration would make two runs over the same store differ. An item that is
+    PRIMARY is excluded from the secondary list rather than appearing in both — the two lists
+    answer different questions, and double-counting would inflate any membership figure taken
+    from them.
+    """
+    primary = tuple(
+        sorted(
+            item.id
+            for item in corpus.items.values()
+            if item.enriched and item.enriched.primary_topic == slug
+        )
+    )
+    secondary = tuple(
+        sorted(
+            item.id
+            for item in corpus.items.values()
+            if item.enriched and slug in item.enriched.topics and item.id not in primary
+        )
+    )
+    return primary, secondary
+
+
+def _inspect_topic(corpus, slug: str, *, want_surfaces: bool) -> dict:
+    from xbrain.knowledge.surfaces import topic_record, topic_surfaces
+
+    topic = next((t for t in corpus.vocab if t.slug == slug), None)
+    if topic is None:
+        raise ValueError(f"No existe el topic {slug!r} en data/vocab.yaml.")
+    page = corpus.topic_pages.get(slug)
+    primary, secondary = _topic_membership(corpus, slug)
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
+    payload: dict = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "topic": topic_record(topic, page, primary, secondary).model_dump(mode="json"),
+    }
+    if want_surfaces:
+        payload["surfaces"] = [s.model_dump(mode="json") for s in topic_surfaces(topic, page)]
+    return payload
+
+
+@knowledge_app.command("inspect")
+@_handle_cli_errors
+def knowledge_inspect(
+    item_id: str | None = typer.Argument(None, help="Id del item a inspeccionar."),
+    topic: str | None = typer.Option(None, "--topic", help="Inspecciona un topic en su lugar."),
+    surfaces: bool = typer.Option(False, "--surfaces", help="Incluye las superficies emitidas."),
+    chunks: bool = typer.Option(False, "--chunks", help="Incluye los chunks (implica --surfaces)."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Muestra el corpus unificado de un item o un topic: superficies, procedencia y chunks.
+
+    SOLO LECTURA: no escribe en el store, no toma snapshot y no llama a ningún modelo. Es la
+    forma de comprobar a mano lo que la capa de conocimiento ofrece — y, por la regla 7 de
+    CLAUDE.md, enseñar la evidencia al lado de la afirmación es la capa de verificación más
+    barata que existe: el autor real de un post citado se ve de un vistazo.
+    """
+    if (item_id is None) == (topic is None):
+        raise ValueError("Indica un id de item O `--topic <slug>`, no ambos ni ninguno.")
+    _cfg, corpus = _knowledge_corpus()
+    payload = (
+        _inspect_topic(corpus, topic, want_surfaces=surfaces or chunks)
+        if topic is not None
+        else _inspect_item(corpus, item_id or "", want_surfaces=surfaces, want_chunks=chunks)
+    )
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(_render_inspect(payload))
+
+
+def _render_inspect(payload: dict) -> str:
+    """The human rendering. Same model as `--json` (spec §7.6), never a second shape."""
+    lines: list[str] = []
+    if "item" in payload:
+        item = payload["item"]
+        lines += [
+            f"{item['item_id']}  @{item['author']['handle']} ({item['author']['name']})",
+            f"  {item['url']}",
+            f"  creado {item['created_at'][:10]} · fuente {item['source']}"
+            f" · topics {', '.join(item['topics']) or '—'}",
+            f"  superficies: {', '.join(item['available_surfaces']) or '—'}",
+        ]
+        for failure in item["failed_sources"]:
+            lines.append(
+                f"  ⚠ fetch falló: {failure['kind']} {failure['url']} ({failure['failure_reason']})"
+            )
+        for link in item["unfetched_links"]:
+            lines.append(f"  ⚠ sin cuerpo: {link['url']} ({link['reason']})")
+    else:
+        topic = payload["topic"]
+        lines += [
+            f"topic:{topic['slug']} — {topic['description']['text']}",
+            f"  primarios {len(topic['primary_item_ids'])}"
+            f" · secundarios {len(topic['secondary_item_ids'])}"
+            f" · {'DESACTUALIZADO' if topic['stale'] else 'al día'}",
+        ]
+    for surface in payload.get("surfaces", []):
+        excerpt = surface["text"][:120].replace("\n", " ")
+        lines.append(
+            f"  [{surface['surface_type']}] origin={surface['origin']}"
+            f" trust={surface['trust_class']}  {excerpt}"
+        )
+    return "\n".join(lines)
+
+
+# ============================================================================
+# El índice persistente, `search` y `get` (Plan 02 §6)
+#
+# ESTA CAPA ES UN ADAPTADOR Y NADA MÁS. Cada comando carga las entradas una vez,
+# llama a su servicio una vez, y elige UNA de dos salidas sobre el MISMO objeto:
+# el documento JSON que el modelo serializa, o la vista humana que `render.py`
+# compone desde ese mismo modelo (spec §7.6). Aquí no se formatea una línea: un
+# formateador local sería una tercera definición de qué es un resultado, después
+# del servicio y del JSON, que es justo la divergencia de la regla 5.
+# ============================================================================
+
+index_app = typer.Typer(help="Construir y consultar el índice persistente (data/index/).")
+app.add_typer(index_app, name="index")
+
+
+def _handle_index_errors(func: Callable) -> Callable:
+    """Convertir los errores accionables del índice en un mensaje limpio + exit 1.
+
+    `IndexError_` hereda de `Exception`, NO de `ValueError`, así que `_handle_cli_errors`
+    —que enumera `ValueError`, `KeyError`, `RuntimeError`, `OSError`…— no lo ve: sin esta
+    capa, «no hay índice» se imprime como un traceback crudo y el spec §9.3 pide lo
+    contrario. Se apila DEBAJO de `_handle_cli_errors`, de modo que cada excepción la
+    atiende exactamente uno de los dos y ninguno reimplementa al otro.
+
+    El import es local porque `index_schema` arrastra `sqlite3` y los modelos del contrato,
+    y `cli.py` se importa en cada invocación de `xbrain`, incluida `login`.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        from xbrain.knowledge.index_schema import IndexError_
+
+        try:
+            return func(*args, **kwargs)
+        except IndexError_ as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    return wrapper
+
+
+def _index_inputs(cfg: Config):
+    """Las tres entradas del índice, con la señal barata del snapshot que se leyó.
+
+    UN SOLO CARGADOR PARA LOS CINCO COMANDOS. `load_index_inputs` ata las filas y la señal
+    al mismo instante y a los mismos descriptores (P1b): dos cargadores distintos dejarían
+    que las filas describan un momento y el `stat` otro, y esa diferencia es invisible.
+    """
+    from xbrain.knowledge.index_build import load_index_inputs
+
+    return load_index_inputs(cfg.items_path, cfg.data_dir / "vocab.yaml", cfg.topics_path)
+
+
+def _index_options(cfg: Config):
+    """Lo que un build necesita y no es el corpus. Idéntico en build, update y status.
+
+    Idéntico a propósito: `item_fingerprint` las consume, así que tres comandos con opciones
+    distintas producirían tres huellas distintas del mismo item y `status` declararía
+    cambios que no existen.
+    """
+    from xbrain.knowledge.index_build import IndexOptions
+
+    return IndexOptions(vault_dir=cfg.output_dir)
+
+
+def _query_context(cfg: Config, inputs):
+    """Todo lo que una consulta necesita y no es la consulta (spec §7.2).
+
+    El STORE viaja dentro: `get` lee el store vivo (spec §3.7.7) y `search` hidrata la
+    verificación desde él (M5), así que las rutas que van aquí son las mismas que el
+    cargador acaba de leer.
+    """
+    from xbrain.knowledge.search_service import QueryContext
+
+    return QueryContext(
+        store=inputs.store,
+        vocab=inputs.vocab,
+        topic_pages=inputs.topic_pages,
+        index_dir=cfg.index_dir,
+        items_path=cfg.items_path,
+        vocab_path=cfg.data_dir / "vocab.yaml",
+        topics_path=cfg.topics_path,
+        vault_dir=cfg.output_dir,
+        language=cfg.output_language,
+        max_matches_per_item=cfg.index_max_matches_per_item,
+    )
+
+
+def _echo_json(payload: object) -> None:
+    """El documento estable en stdout, y nada más (spec §3.7.9)."""
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@index_app.command("build")
+@_handle_cli_errors
+@_handle_index_errors
+def index_build_command(
+    force: bool = typer.Option(
+        False, "--force", help="Reconstruye desde cero un índice ya existente."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Cuenta lo que haría; no toca ningún fichero."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Construye `data/index/` desde cero y lo sella.
+
+    NO ES DESTRUCTIVO SOBRE EL STORE y por eso no toma snapshot: lo único que escribe es
+    `data/index/`, que es derivado y reconstruible (Plan 02 §6). `--force` sí tira el índice
+    anterior —manifest primero, base después— así que una reconstrucción interrumpida no
+    deja un manifest en pie sobre una base vacía.
+    """
+    from dataclasses import asdict
+
+    from xbrain.knowledge.index_build import build
+    from xbrain.knowledge.render import render_build
+
+    cfg = _config()
+    report = build(
+        cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run, force=force
+    )
+    if json_out:
+        _echo_json(asdict(report))
+    else:
+        typer.echo(render_build(report))
+
+
+@index_app.command("update")
+@_handle_cli_errors
+@_handle_index_errors
+def index_update_command(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Cuenta el delta; no escribe nada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Pone el índice al día tocando solo lo que cambió (spec §5.6).
+
+    Una sola transacción para toda la corrida: un update a medias dejaría una aplicación
+    parcial de un cambio que nadie puede nombrar, y el índice parecería sano porque todos
+    los ids que contiene siguen resolviendo.
+    """
+    from dataclasses import asdict
+
+    from xbrain.knowledge.index_build import update
+    from xbrain.knowledge.render import render_update
+
+    cfg = _config()
+    report = update(cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run)
+    if json_out:
+        _echo_json(asdict(report))
+    else:
+        typer.echo(render_update(report))
+
+
+@index_app.command("status")
+@_handle_cli_errors
+@_handle_index_errors
+def index_status_command(
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Qué contiene el índice y cuánto se ha quedado atrás respecto al store.
+
+    ES EL COMANDO QUE RESPONDE CUANDO LOS DEMÁS SE NIEGAN. `search`, `get`, `build` y
+    `update` rechazan un índice ausente o incompatible; este lo REPORTA, porque es el
+    instrumento que se corre precisamente para averiguarlo. Dos instrumentos con respuestas
+    opuestas sobre un mismo estado es la regla 9, y la salida no es que el diagnóstico se
+    niegue también: es que diga el mismo comando que dicen las puertas.
+
+    El manifest se publica con `to_dict()`, el MISMO documento que `data/index/manifest.json`
+    contiene, nunca un volcado paralelo del dataclass (que además no sería serializable: lleva
+    un `datetime` y una `StoreSignal` anidada).
+    """
+    from xbrain.knowledge.index_build import status
+    from xbrain.knowledge.render import render_status
+
+    cfg = _config()
+    report = status(cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg))
+    if json_out:
+        _echo_json(
+            {
+                "manifest": report.manifest.to_dict() if report.manifest else None,
+                "counts": report.counts,
+                "items_added": report.items_added,
+                "items_changed": report.items_changed,
+                "items_removed": report.items_removed,
+                "topics_changed": report.topics_changed,
+                "behind": report.behind,
+                "incomplete": report.incomplete,
+                "advice": report.advice,
+            }
+        )
+    else:
+        typer.echo(render_status(report))
+
+
+def _search_filters(
+    created_from: str | None,
+    created_to: str | None,
+    source: str | None,
+    mine: bool,
+    author: str | None,
+    topics: list[str],
+    kinds: list[str],
+    origins: list[str],
+    has_surfaces: list[str],
+):
+    """Los ocho filtros del spec §7.2, armados y validados por el contrato.
+
+    `--mine` es el atajo del spec §7.2 para `source=own_tweet`, y es INCOMPATIBLE con
+    `--source`: dos maneras de fijar un campo son una manera de fijarlo a dos valores
+    distintos, y la resolución silenciosa (gane cuál gane) devolvería un corpus que el
+    operador no pidió sin decírselo.
+
+    Los valores de `--kind`, `--origin` y `--has-surface` NO se re-enumeran aquí: los valida
+    `SearchFilters`, que es donde viven los `Literal` del contrato. Una lista escrita a mano
+    en el CLI sería una segunda copia que envejece el día que el contrato crece (regla 5).
+    """
+    from xbrain.knowledge.contracts import SearchFilters
+
+    if mine and source is not None:
+        raise ValueError("`--mine` ya fija `--source own_tweet`; no los combines.")
+    # `model_validate`, no el constructor, y la diferencia es de TIPADO, no de estilo.
+    # `--kind`, `--origin`, `--has-surface` y `--source` llegan como texto libre del
+    # usuario y los campos que los reciben son `Literal`s del contrato: pasarlos al
+    # constructor obliga a un `cast` en el borde, que es decirle al comprobador que el
+    # texto ya está validado justo donde todavía no lo está. `model_validate` valida de
+    # verdad, en el sitio donde viven los valores válidos, y su mensaje los enumera
+    # («Input should be 'external_article', 'x_article', …»). Una lista escrita a mano
+    # aquí sería una segunda copia del contrato que envejece sola (regla 5).
+    return SearchFilters.model_validate(
+        {
+            "created_from": _parse_date(created_from),
+            "created_to": _parse_date(created_to, end_of_day=True),
+            "source": "own_tweet" if mine else source,
+            "author": author,
+            "topics": tuple(topics),
+            "content_kinds": tuple(kinds),
+            "origins": tuple(origins),
+            "has_surfaces": tuple(has_surfaces),
+        }
+    )
+
+
+@app.command("search")
+@_handle_cli_errors
+@_handle_index_errors
+def search_command(
+    query: str = typer.Argument(..., help="Qué buscar. Texto libre."),
+    limit: int = typer.Option(10, "--limit", help="Resultados por página."),
+    created_from: str | None = typer.Option(None, "--from", help="Items creados desde (ISO)."),
+    created_to: str | None = typer.Option(None, "--to", help="Items creados hasta (ISO)."),
+    source: str | None = typer.Option(None, "--source", help="bookmark | own_tweet."),
+    mine: bool = typer.Option(False, "--mine", help="Atajo de `--source own_tweet`."),
+    author: str | None = typer.Option(None, "--author", help="Handle del autor."),
+    topic: list[str] = typer.Option([], "--topic", help="Slug del vocabulario (repetible)."),
+    kind: list[str] = typer.Option([], "--kind", help="Tipo de contenido (repetible)."),
+    origin: list[str] = typer.Option([], "--origin", help="Procedencia del texto (repetible)."),
+    has_surface: list[str] = typer.Option(
+        [], "--has-surface", help="Solo items con esta superficie (repetible)."
+    ),
+    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia de recuperación."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una página truncada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Busca en el índice y devuelve items con sus fragmentos citables.
+
+    SOLO LECTURA: la base se abre `mode=ro`, el store no se toca y no hay red ni modelo —
+    el spec §13.12 exige que `search` funcione sin una sola llamada a un LLM.
+
+    Sin `--json` imprime la vista humana del spec §7.6 (item, autor, fecha, URL, superficie,
+    procedencia, excerpt, canales del match, advertencias, y el `xbrain get` que trae la
+    fuente); con `--json`, el MISMO `SearchResponse` como documento.
+    """
+    from typing import cast
+
+    from xbrain.knowledge.contracts import Strategy
+    from xbrain.knowledge.render import render_search
+    from xbrain.knowledge.search_service import search
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    response = search(
+        query,
+        _query_context(cfg, inputs),
+        filters=_search_filters(
+            created_from, created_to, source, mine, author, topic, kind, origin, has_surface
+        ),
+        limit=limit,
+        # El `cast` es honesto porque `search` valida este texto en su primera línea:
+        # `resolve_strategy` levanta un `ValueError` que enumera las estrategias
+        # declaradas y las implementadas. La firma es `Strategy` pero el contrato acepta
+        # y comprueba texto libre a propósito — un typo no es una degradación, y
+        # contestarlo con resultados léxicos lo convertiría en una medición.
+        strategy=cast(Strategy, strategy),
+        cursor=cursor,
+    )
+    if json_out:
+        _echo_json(response.model_dump(mode="json"))
+    else:
+        typer.echo(render_search(response))
+
+
+@app.command("get")
+@_handle_cli_errors
+@_handle_index_errors
+def get_command(
+    item_id: str = typer.Argument(..., help="Id del item."),
+    surface: list[str] = typer.Option(
+        [], "--surface", help="Superficie a entregar entera (repetible)."
+    ),
+    query: str | None = typer.Option(
+        None, "--query", help="Prioriza los fragmentos que puntúan para esta consulta."
+    ),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una respuesta truncada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
+
+    Es el invariante 7 del spec §3.7: `get` funciona con `data/index/` borrado, porque un
+    índice capaz de contestar `get` sería una copia del corpus que nada invalida, y el día
+    que las dos discreparan no habría forma de saber cuál se le enseñó al lector.
+
+    El presupuesto por respuesta sale de `[index].get_char_budget`; por encima de él la
+    respuesta se trunca DECLARÁNDOLO y entrega un cursor (spec §9.3), nunca en silencio.
+    """
+    from typing import Sequence, cast
+
+    from xbrain.knowledge.get_service import GetLimits, get
+    from xbrain.knowledge.models import SurfaceType
+    from xbrain.knowledge.render import render_get
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    bundle = get(
+        item_id,
+        _query_context(cfg, inputs),
+        # Mismo trato que `--strategy`: `get` comprueba cada nombre pedido contra las
+        # superficies que el item emite y las de las fuentes que fallaron, y rechaza las
+        # que no son ninguna de las dos enumerando las disponibles (`UnknownSurfaceError`).
+        surfaces=cast("Sequence[SurfaceType] | None", surface or None),
+        query=query,
+        limits=GetLimits(char_budget=cfg.index_get_char_budget),
+        cursor=cursor,
+    )
+    if json_out:
+        _echo_json(bundle.model_dump(mode="json"))
+    else:
+        typer.echo(render_get(bundle, surfaces=surface, query=query))
+
+
+def _run_sweep(
+    cfg,
+    cases,
+    corpus,
+    axes,
+    strategy: str,
+    report,
+    *,
+    json_out: bool,
+    limit: int,
+    ks: list[int],
+    min_recall: float | None,
+) -> None:
+    """`eval --sweep-chunker`: score every `(target, overlap)` and publish the table.
+
+    A SEPARATE PATH, not a flag threaded through `evaluate`, because the two answer different
+    questions: `eval` measures the retriever at the parameters in force, the sweep measures
+    the parameters. Folding them would make the ordinary report's numbers depend on whether a
+    sweep flag happened to be present.
+
+    The sweep changes `ChunkerParams` as an ARGUMENT and never the module constant, so
+    `tests/fixtures/knowledge_ranking.json` — which passes its own pinned parameters — cannot
+    be moved by it (M7).
+
+    EVERY OPTION THE COMMAND ACCEPTS EITHER REACHES THIS PATH OR IS REFUSED BY NAME — the class
+    of defect the final gate on #177 found three of here, one per option. A separate path that
+    silently drops the flags of the command it shares is the worst of both: the user reads the
+    command's help, the sweep obeys its own defaults, and the two never meet. `--limit` was
+    fixed as an instance (`--limit 10` and `--limit 150` were byte-identical) without closing
+    the class, so `--k` had it too, and `--min-recall` exited 0 having judged nothing.
+    """
+    from xbrain.knowledge.evaluation import (
+        DEFAULT_SWEEP_K,
+        parse_sweep,
+        render_sweep_markdown,
+        sweep_chunker as run_sweep,
+    )
+
+    # REFUSED, NOT IGNORED, and before anything is computed. The threshold judges the BUCKETS
+    # of one evaluation — stratum by stratum, provenance by provenance — and a sweep publishes
+    # a TABLE of chunker combinations, which has no bucket to compare it against. Applying it
+    # to the winner's overall recall would answer a question nobody asked with a green a reader
+    # would read as "every stratum clears the bar", and that misreading is worse than the
+    # missing feature. Accepting it in silence was the fail-open CLAUDE.md already records for
+    # this exact flag: «a threshold that reached no bucket is a FAILURE, not a pass».
+    if min_recall is not None:
+        raise ValueError(
+            "`--min-recall` no se aplica a `--sweep-chunker`: el umbral juzga los buckets de "
+            "UNA evaluación y el barrido publica una TABLA de combinaciones, así que no hay "
+            "bucket contra el que compararlo. Corre `xbrain eval --min-recall …` sin el "
+            "barrido para la puerta, y el barrido aparte para la tabla."
+        )
+    # `--k` is repeatable because the ordinary report carries a column per k; the sweep RANKS,
+    # and a ranking happens at one k. Choosing `max(ks)` would discard the rest in silence,
+    # which is the very defect this path is being repaired for.
+    if len(ks) > 1:
+        raise ValueError(
+            "`--sweep-chunker` ordena por un solo `recall@k` y recibió "
+            f"{len(ks)} valores de `--k` ({', '.join(str(value) for value in ks)}). "
+            "Elegir uno descartaría los demás en silencio: repite el barrido con un `--k` "
+            "por corrida."
+        )
+
+    grid = parse_sweep(axes)
+    # The depth the command advertises is the depth the sweep runs at: the first version
+    # dropped it here, and `--limit 10` and `--limit 150` were byte-identical.
+    result = run_sweep(
+        cases,
+        corpus,
+        grid,
+        strategy=strategy,
+        k=ks[0] if ks else DEFAULT_SWEEP_K,
+        limit=limit,
+    )
+    json_path = report or (cfg.data_dir / "eval-sweep.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_sweep_markdown(result), encoding="utf-8")
+    if json_out:
+        _echo_json(payload)
+    else:
+        typer.echo(render_sweep_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    # PUBLISHED FIRST, THEN FAILED. A sweep with no winner — nothing scorable, or no
+    # combination at all — is not a success, and it used to exit 0 while announcing «PLANO:
+    # todas las combinaciones puntúan igual», a positive claim about a ranking that never
+    # happened. The exit code is the surface a caller reads (rule 9); the table is still
+    # written and echoed, because the run failing is not a reason to withhold its evidence.
+    # The message is the report's OWN verdict, so stderr and the artefact say one thing.
+    if result.winner is None:
+        raise ValueError(payload["verdict"])
+
+
+@app.command("eval")
+@_handle_cli_errors
+def eval_command(
+    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia a evaluar."),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        help="Profundidad de recuperación por caso, en OWNERS (nunca por debajo del mayor k).",
+    ),
+    k: list[int] = typer.Option(
+        [], "--k", help="Valores de k a reportar (repetible; el barrido admite uno solo)."
+    ),
+    min_recall: float | None = typer.Option(
+        None,
+        "--min-recall",
+        help=(
+            "Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa. "
+            "No se combina con `--sweep-chunker`."
+        ),
+    ),
+    golden_set: Path = typer.Option(
+        Path("eval/golden-set.yaml"), "--golden-set", help="Ruta del golden set."
+    ),
+    report: Path | None = typer.Option(
+        None, "--report", help="Dónde escribir el informe (por defecto data/eval-report.json)."
+    ),
+    sweep_chunker: list[str] = typer.Option(
+        [],
+        "--sweep-chunker",
+        help="Barrido del troceo: `target=800,1200 overlap=0,150` (repetible o entrecomillado).",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Evalúa la recuperación contra el golden set y publica el informe.
+
+    SOLO INFORME: no escribe en `items.json` ni toma snapshot, igual que `verify` por defecto.
+
+    Sin `--min-recall` informa y no juzga: el spec §8.6 fija los umbrales de merge DESPUÉS de
+    correr el baseline, así que un número por defecto aquí sería exactamente la métrica que no
+    puede salir de otra manera (regla 2 de CLAUDE.md). Con umbral, el comando es una puerta y
+    nombra el bucket que falló.
+    """
+    from xbrain.knowledge.evaluation import DEFAULT_KS, evaluate, render_markdown
+    from xbrain.knowledge.goldenset import load_cases, load_scenarios, resolve_cases
+
+    cfg, corpus = _knowledge_corpus()
+    path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
+    cases = resolve_cases(load_cases(path), corpus.items)
+    if sweep_chunker:
+        _run_sweep(
+            cfg,
+            cases,
+            corpus,
+            sweep_chunker,
+            strategy,
+            report,
+            json_out=json_out,
+            limit=limit,
+            ks=k,
+            min_recall=min_recall,
+        )
+        return
+    result = evaluate(
+        cases,
+        corpus,
+        strategy=strategy,
+        ks=tuple(k) if k else DEFAULT_KS,
+        threshold=min_recall,
+        scenarios=load_scenarios(path),
+        limit=limit,
+    )
+    payload = result.to_dict()
+    json_path = report or (cfg.data_dir / "eval-report.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_markdown(result), encoding="utf-8")
+
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    if not result.passed:
+        # A gate that reports its own failure on stdout and exits 0 is the `gh pr checks`
+        # trap of CLAUDE.md rule 9, reproduced locally. The non-zero exit is the signal.
+        raise ValueError("La evaluación no alcanza el umbral:\n  " + "\n  ".join(result.failures))
 
 
 if __name__ == "__main__":

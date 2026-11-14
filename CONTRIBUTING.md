@@ -153,9 +153,13 @@ description from **stdout**. The failure contract mirrors the transcriber: a
 `VisionFailed`, never a silent empty description (that would drop a slide's
 content invisibly). A per-video `ffmpeg` failure (`FrameExtractionFailed`) or a
 `VisionFailed` drops the visual layer for that one video (logged) while the
-transcript still attaches. The layer is **content-aware**: a talking-head /
-interview video is detected (`classify_visual`) and its visual layer is skipped
-with a logged reason, so vision calls are never wasted on camera-cut noise. If
+transcript still attaches. The layer is **content-aware** (`classify_visual`):
+slides are described; a non-slide video is skipped as a talking head, with a
+logged reason, only when it has speech, since the transcript already carries it
+and vision calls would be wasted on camera-cut noise; a **silent** non-slide
+video (a screen recording, a robot, a GIF) is described as footage, capped by
+`[frames].footage_max_frames`, because its frames are the only record of what it
+shows. If
 your VLM's native CLI differs, point `command` at a thin wrapper that adapts it to
 this `<cmd> <image> → stdout description` contract.
 

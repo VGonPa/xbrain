@@ -56,10 +56,18 @@ TESTS_STATUS="pending"
 TESTS_COUNT=""
 COVERAGE_PCT=""
 COVERAGE_STATUS="pending"
+KNOWLEDGE_COVERAGE_PCT=""
+KNOWLEDGE_COVERAGE_STATUS="pending"
 FAILED_CHECKS=""
 
 # Coverage threshold (matches [tool.coverage] fail_under in pyproject.toml)
 COVERAGE_MIN=78
+
+# Per-package floor for the knowledge layer (Plan 01 M8). The global floor is 78 and
+# says nothing about any one package: `src/xbrain/knowledge/` could land at 40% and the
+# gate would still print ALL CRITICAL CHECKS PASSED. This is the mechanism behind a line
+# that sat in four plan documents' quality-gate tables with nothing behind it.
+KNOWLEDGE_COVERAGE_MIN=90
 
 # Functions
 print_error() { echo -e "${RED}❌ $1${NC}"; }
@@ -150,6 +158,13 @@ build_check_records() {
         esac
         printf '%s|%s|%s|%s|%s\n' \
             "Coverage" "$COVERAGE_STATUS" "${COVERAGE_PCT}%" "$gh_cov" "coverage"
+    fi
+    if [ "$KNOWLEDGE_COVERAGE_STATUS" != "pending" ]; then
+        printf '%s|%s|%s|%s|%s\n' \
+            "Coverage (knowledge/)" "$KNOWLEDGE_COVERAGE_STATUS" "${KNOWLEDGE_COVERAGE_PCT}%" \
+            "$([ "$KNOWLEDGE_COVERAGE_STATUS" = pass ] \
+               && echo "Above ${KNOWLEDGE_COVERAGE_MIN}% package minimum" \
+               || echo "Below ${KNOWLEDGE_COVERAGE_MIN}% package minimum")" "critical"
     fi
     printf '%s|%s|%s|%s|%s\n' \
         "Deptry (deps)" "$DEPTRY_STATUS" "" \
@@ -465,6 +480,28 @@ elif [ "$TEST_EXIT_CODE" -eq 0 ]; then
     COVERAGE_PCT="?"
     COVERAGE_STATUS="fail"
     mark_failed "Coverage"
+fi
+
+# Per-package floor for the knowledge layer (Plan 01 M8). Reuses the SAME `.coverage`
+# `pytest --cov` just produced — no second test run — and FAILS below the threshold rather
+# than merely printing, because a report that only prints is not a gate.
+if [ "$TEST_EXIT_CODE" -eq 0 ]; then
+    set +e
+    KNOWLEDGE_COV_OUTPUT=$(uv run coverage report --include='src/xbrain/knowledge/*' \
+                                                  --fail-under="$KNOWLEDGE_COVERAGE_MIN" 2>&1)
+    KNOWLEDGE_COV_EXIT=$?
+    set -e
+    KNOWLEDGE_COVERAGE_PCT=$(echo "$KNOWLEDGE_COV_OUTPUT" | grep "^TOTAL" | tail -1 \
+                             | awk '{print $NF}' | tr -d '%')
+    if [ "$KNOWLEDGE_COV_EXIT" -eq 0 ]; then
+        print_success "Knowledge coverage: ${KNOWLEDGE_COVERAGE_PCT}% (>= ${KNOWLEDGE_COVERAGE_MIN}%)"
+        KNOWLEDGE_COVERAGE_STATUS="pass"
+    else
+        echo "$KNOWLEDGE_COV_OUTPUT"
+        print_error "Knowledge coverage: below ${KNOWLEDGE_COVERAGE_MIN}% minimum"
+        KNOWLEDGE_COVERAGE_STATUS="fail"
+        mark_failed "Knowledge coverage"
+    fi
 fi
 
 if [ "$TEST_EXIT_CODE" -eq 0 ]; then

@@ -9,7 +9,13 @@ generates an Obsidian wiki.
   machine-wide private FITIZENS pip index.
 
 ## Architecture
-- Pipeline: `extract → import-archive → fetch → [enrich] → generate`.
+- Pipeline — **six ordered stages**: `extract → fetch → vocab → enrich → topics → generate`,
+  with `data/items.json` as the hub every stage reads and writes back. `sync` runs only the
+  mechanical three (`extract → fetch → generate`); `vocab`/`enrich`/`topics` are the LLM
+  stages and are run explicitly, on your own cadence. `media → describe` is a side-pipeline
+  that feeds enrich/topics (below). `import-archive` and the backfill family
+  (`refresh-quoted`, `refresh-media`, `download-videos`, `reextract`, `refetch-truncated`)
+  sit OUTSIDE the pipeline — one-off repairs, never steps in it.
 - Quoted posts (a quote-tweet's third-party content): X embeds the quoted post — body
   AND author — in the same timeline payload as the tweet quoting it, so `extract`
   parses it out as a `ContentSourceSuccess(kind="quoted_tweet", author=…)` at **no
@@ -55,10 +61,25 @@ generates an Obsidian wiki.
   `parakeet-mlx`; NO MLX/ML in xbrain core) → attach the transcript to the item
   as a `ContentSourceSuccess(kind="x_video")` → discard the bytes. **Dedup by
   video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id
-  from the mp4 URL path, not the signed URL): N bookmarks of one video → one
-  fetch+transcribe, all get the source. No-speech videos attach with empty text +
+  from the mp4 URL path, not the signed URL): on the DEFAULT path, N bookmarks
+  of one video → one fetch+transcribe, all get the source. `--keep-transcript`
+  instead partitions that identity by each item's stored `(text, has_speech,
+  language, title)` plus a missing-transcript batch: one fetch per batch, zero
+  ASR for stored batches, one ASR for the missing batch. That is what prevents
+  transcript cross-contamination. No-speech videos attach with empty text +
   `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
-  `x_video` source unless `--force`); destructive → auto-snapshot.
+  `x_video` source unless `--force`); destructive → auto-snapshot. **On a multilingual
+  corpus point `[transcribe].command` at `scripts/xbrain-transcribe-auto` (#133), never
+  straight at parakeet.** That wrapper is a LANGUAGE ROUTER: `ffmpeg` slices the first 30 s
+  (`XBRAIN_ASR_DETECT_SECONDS`), a small whisper pass (`base`, ~19 s/clip, measured) reports
+  the language it detected, then English goes to parakeet and EVERYTHING ELSE — including
+  every uncertainty: ffmpeg missing, whisper failing, an unreadable result — goes to whisper.
+  The costs are asymmetric in exactly one direction: **parakeet-tdt does not FAIL on Spanish
+  audio, it INVENTS** — verified 17-jul-2026 against a real es-ES clip, it exits 0 and emits
+  fluent English that never reproduces what was said. A noisy failure shows up in a log; this
+  one passes the whole pipeline and lands in a note as a quotation, and by then you can no
+  longer tell "the video said that" from "parakeet made it up". The backend has to be chosen
+  BEFORE transcription, because it cannot be diagnosed after.
 - **Unfetched links carry their REASON (PR-I).** The shared `unfetched_links_note` builder now
   names WHY the content is missing ("the page no longer exists (HTTP 404)" vs "the page could not
   be extracted") — one builder, so all three LLM surfaces (api prompt · enrich worksheet · verify
@@ -106,16 +127,75 @@ generates an Obsidian wiki.
   safe — so a persistently-failing transient link, re-fetched every run by
   `fetch_pending` (which keys on source state, not time), does not burn one identical
   LLM call per cycle.
-- Video digest — visual layer (PR4, `--frames`, opt-in): for slide-heavy talks,
-  `digest-video --frames` extracts key slides via **external** `ffmpeg`
-  (`video_frames.py`, scene detection + interval sampling so a static tail is still
-  covered; NO ML/vision lib, Pillow only for edge-density classify), describes each
-  via the **external** vision model (`vision.py`, `[vision].command`; mirrors
-  `transcribe.py`, no bundled default), records the descriptions on the `x_video`
-  source's optional `frames` list, and embeds the slide images into the note like
-  downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
-  videos are detected and the visual layer is skipped + logged (never a silent
-  drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
+- Video digest — visual layer (PR4, `--frames`, opt-in): `digest-video --frames`
+  extracts key frames via **external** `ffmpeg` (`video_frames.py`, scene detection
+  + interval sampling so a static tail is still covered; NO ML/vision lib, Pillow
+  only for edge-density classify), describes them via the **external** vision model
+  (`vision.py`, `[vision].command`; mirrors `transcribe.py`, no bundled default),
+  records the descriptions on the `x_video` source's optional `frames` list, and
+  embeds the images into the note like downloaded photos (`_media/` mirroring).
+  Content-aware, and the rule is exact: slides are described (cap
+  `[frames].max_frames`); a talking-head is skipped + logged ONLY when the video has
+  speech (the transcript carries it); a SILENT non-slide video (screen recording,
+  robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
+  6) — its frames are the only evidence, so dropping them left hollow entries. The
+  visual layer is off by default — a normal `digest-video` run never touches
+  ffmpeg/vision. Any run appends `Huecos (sin voz ni frames): N` to its summary when
+  N > 0 items still end with neither speech nor frames (never a silent drop).
+  Recover them with the indivisible `--frames --force --keep-transcript`: each
+  item keeps its own stored transcript (re-running the ASR can invent words), the
+  frames are redone, and the forced re-digest clears the long-form digest, so
+  `enrich` and `video-digest` run again for the item. Once the fetch succeeds,
+  frame extraction/vision failure or a talking-head reclassification completes
+  with NO frames and also clears the prior digest. The automatic
+  `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+  `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+  removes a live one absent there), but never contains `data/media/` or frame PNGs.
+  The selected items' `data/media/<id>/frames/` directories have already been
+  deleted or overwritten by then. Before re-digesting items that currently have
+  frames, copy those directories aside and restore them with the snapshot if needed;
+  without the copy, restored metadata can point to missing files or different
+  pixels. Hollow items have no prior frames and are not exposed to this loss.
+- Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
+  channel through which on-screen text (slide labels, code, chart axes) reaches
+  the digest, and translating a NON-COGNATE label broke that channel — measured:
+  `is_grounded("Self-Attention", 'una caja de "Auto-Atención"')` is `False`, so a
+  digest correctly naming the label got reported as ungrounded by the #89
+  checker. (A cognate pair like `Layer Norm` → `Norma de Capa` does NOT reproduce
+  this — the checker's fuzzy match still grounds "Norm" against "Norma" — so
+  don't cite that pair as the failure mode.) The rule now lives in ONE place —
+  `rubrics/fragment-onscreen-text.md`, spliced by `load_rubric`'s
+  `{onscreen_text_rule}` into BOTH `rubric-describe-frame.md` (video frames) and
+  `rubric-describe-image.md` (tweet photos) — and reaches the video-frame path's
+  EXTERNAL vision subprocess via the `XBRAIN_VISION_PROMPT` env var (the photo
+  path calls the Anthropic API in-process, so it just gets the rubric text
+  directly), so the documented argv contract `<command> [--model M] <image>`
+  stays frozen and a third-party vision command keeps working — it just gets no
+  caption discipline. Captions are stamped with
+  `ContentSourceSuccess.caption_contract` (`models.FRAME_CAPTION_CONTRACT` =
+  `"xbrain-frame-caption/v1"`) — at SOURCE level, and listed in
+  `fetch._BOOKKEEPING_FIELDS`, because a stamp nested on `VideoFrame` would land
+  INSIDE `_source_signature`'s flat top-level `exclude` (it does not descend into
+  nested models) and make every re-stamp read as a material content change.
+  `xbrain redescribe-frames` re-captions the frames ALREADY on disk
+  (`data/media/<id>/frames/`) with zero network, zero ffmpeg and zero X: it
+  skips any source whose `caption_contract` already matches (`--force` overrides),
+  stamps a source current only when EVERY one of its frames re-described cleanly
+  (a single un-re-described frame — e.g. a permanently missing image — leaves the
+  WHOLE source stale forever, so every future run re-pays for its surviving
+  frames too, and because a real vision model is non-deterministic that also
+  keeps re-bumping `content.fetched_at` and re-triggering `enrich`/`video-digest`
+  on that item), and bumps `content.fetched_at` only when a caption actually
+  changed. A per-frame `VisionFailed` (bad exit / timeout / empty stdout) is
+  logged and the old caption is kept, without aborting the run; a `VisionNotFound`
+  (unconfigured `[vision].command`) is a config error and IS allowed to abort the
+  run; and a run where every attempted frame failed raises `RuntimeError` instead
+  of completing silently (dry runs never raise). **The photo half of this
+  contract is not self-enforcing:** `describe._is_stale` keys staleness on the
+  hand-set `[describe].version` tag (`config.py`), never on rubric content, so
+  upgrading requires an explicit `[describe].version` bump + `xbrain describe`
+  re-run, or every already-described photo keeps its old, mistranslated prose
+  forever.
 - Video digest — long-form synthesis (`video-digest`, #44 / PR #78): a **separate**
   worksheet stage (not folded into `digest-video`) that reads the transcript + frame
   descriptions and writes a readable long-form digest ("what it is · key points · why
@@ -156,9 +236,19 @@ generates an Obsidian wiki.
   behind the now-forbidden `--force`).
 - X Articles as blogposts — model seam (#39 PR1): an `x_article`
   `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
-  body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
-  optional `alt`, `media` **wrapping the existing `MediaEntry` photo-state union**),
-  discriminated on `kind`. Reusing `MediaEntry` means the photo download engine +
+  body — a **three-variant** discriminated union on `kind`: `ArticleTextBlock`
+  (`kind="text"`) + `ArticleImageBlock` (`kind="image"`, optional `alt`, `media` **wrapping
+  the existing `MediaEntry` photo-state union**) + `ArticleVideoBlock` (`kind="video"`,
+  #133). The video variant exists because **an article's `MEDIA` entity is not always a
+  photo**: X embeds native video (`media_info.__typename == "ApiVideo"`) the same way, the
+  parser resolved a photo URL or nothing, and every embedded video was therefore DROPPED from
+  the body — invisible in the note, where the reader saw prose with a hole exactly where the
+  author had put a demo. It wraps the SAME `MediaEntry` union (a `MediaVideoPending`), so the
+  playable stream, the poster thumbnail, the bitrate and the duration all ride in the shape
+  the rest of the pipeline already understands; the bytes are NOT downloaded and the speech is
+  NOT transcribed by this variant (`digest-video` selects from item-level media, never from
+  article bodies) — what it guarantees is that the video is no longer lost. Reusing
+  `MediaEntry` means the photo download engine +
   path/timestamp validators + `_media/` mirror apply to article images with no new
   plumbing. `text` stays the flattened body (= concatenation of the text blocks) so
   `enrich`/`topics`/`generate`'s fallback consume it unchanged. Optional + additive
@@ -176,8 +266,12 @@ generates an Obsidian wiki.
 - X Articles — structured fetch (#39 PR3): `fetch_x._fetch_rendered` intercepts the
   article-content GraphQL (URL op-name contains `article`; same `page.on("response")`
   pattern as `_fetch_tweet`/`TweetDetail`) and `extract/article.parse_article_content_state`
-  maps the Draft.js `content_state` into ordered `ArticleBlock`s (text runs +
-  `MediaPhotoPending` inline images, in document order). `text` is set to the exact
+  maps the Draft.js `content_state` into ordered `ArticleBlock`s — text runs +
+  `MediaPhotoPending` inline images + `MediaVideoPending` inline videos (#133), in document
+  order, with the lead `cover_media` prepended as the first block. Photo-or-video is decided
+  ONCE, at the media index (`_item_media`), and the video branch is checked FIRST because a
+  video entry also carries a poster image: resolving that first is what dropped every embedded
+  video. `text` is set to the exact
   `"".join` of the text runs (enforced by a `ContentSourceSuccess` `model_validator`).
   On any interception/parse miss it degrades to the retained `trafilatura.extract`
   text-only path (`blocks=[]`); a truly empty article still records `empty_content`.
@@ -206,7 +300,11 @@ generates an Obsidian wiki.
   paragraph (the baked `\n\n` separator stripped via `removeprefix` so it never leaks
   as a stray blank line), `ArticleImageBlock` → an inline `![[_media/<id>/article/<n>]]`
   embed (alt + a described image's caption as `> …` lines; failed → `⚠ Imagen no
-  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`.
+  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`, and
+  `ArticleVideoBlock` → `_article_video_lines`, mirroring the video convention (downloaded →
+  local mp4 embed; failed → a visible `⚠`; **pending → a `🎥 Ver vídeo` link, deliberately NOT
+  silent**, because no later pass advances an article video — `xbrain media` downloads photos
+  — so silence would reproduce the very defect the variant exists to fix).
   `_mirror_item_article_images` copies the bytes into the vault via the shared
   `_mirror_file`, keyed by the STORED `local_path` (no per-source index recompute). An
   `x_article` with empty `blocks` (trafilatura fallback / pre-#39) renders the plain
@@ -236,9 +334,317 @@ generates an Obsidian wiki.
   shows a ❌. `fingerprint_output` is the single canonicalization shared by the export stamp + the
   reader; `verdict`/`faithfulness`/`adherence` are a shared `Verdict` Literal and
   `output_fingerprint` is `Field(pattern=...)`-hardened; labels via `i18n.Strings`.
+  **`contract_fingerprint` (`verification.py`) is the second, stronger stamp, and the one
+  that decides whether a badge may paint at all** — the gate in `_verdict_badge` is
+  `verdict_is_current`, i.e. THIS fingerprint, not `output_fingerprint` alone. A verdict is
+  not a property of the output
+  alone — it is the result of judging THAT output, against THAT source, under THOSE rubrics —
+  so it hashes **three arms**: the OUTPUT text; the SOURCE the judge actually read *for that
+  target* (`_source_text` = `evidence_surfaces` + the not-fetched markers, so a digest and a
+  summary fingerprint different evidence); and the RUBRICS applied (`rubric_digest` =
+  `rubric-verify` **plus** the target's generation rubric, since the adherence axis is judged
+  against it). `output_fingerprint` hashed only the first, so what the judge reads and the
+  rules it reads by could BOTH be rewritten without touching one output character, and every
+  stored verdict still matched, still looked current, and still painted its badge — including
+  verdicts issued under the contract measured letting a false attribution through 8 times out
+  of 8. Now any change to any arm retires every affected verdict automatically, with nobody
+  having to remember. And a verdict whose `contract_fingerprint` is `None` (stored before the
+  stamp existed) is **permanently stale**: we cannot reconstruct what it was judged against,
+  so it is retired, never grandfathered in.
+- **The raw-payload layer (`payloads.py`, `payload-stats`, `reextract`) — `extract` is a
+  re-runnable transformation over data we own.** Every tweet's raw GraphQL subtree is
+  persisted gzipped at `data/payloads/<last-2-of-id>/<id>.json.gz`, scrubbed AT THE SEAM
+  (inside `save_payload`, never left to a caller) against a frozenset of WHOLE credential key
+  names — never substrings: the first version matched substrings and `auth` ate
+  `author`/`author_id`/`authorship`, deleting an author block on write with the original
+  already discarded. The failure this removes is exactly the shape of rule 6 (*repair the
+  evidence, invalidate the derivative*): we read `legacy.full_text`, capped at 280 chars,
+  while `note_tweet` sat unread in EVERY payload — and the fix was not a re-parse, it was a
+  network round-trip to X: a logged-in browser, rate limits, and tweets that may since have
+  been deleted or protected. With the payload on disk, a parse bug is repaired offline —
+  `reextract` re-runs the parser over the whole corpus and PRINTS THE DIFF; only `--apply`
+  writes it (auto-snapshot first). It refuses to let "cannot be re-extracted" look like
+  "re-extracted cleanly": missing files, corrupt files and payloads that parse to NOTHING are
+  each counted apart from coverage. `payload-stats` measures what is actually on disk,
+  because the first disk figures quoted for this feature were computed on an X *Article*
+  fixture that contains no tweets (rule 2).
+- **`refetch-truncated` — the repair that costs a network round-trip, and a count you must
+  not quote as a census.** `looks_truncated` (`extract/graphql.py`) detects X's 280-char cut
+  by LENGTH: ≥274 chars unconditionally, plus 265–273 when the text does not end on a real
+  terminator (`:` and `;` are not terminators). `--apply` is a REAL browser re-fetch —
+  headful, human-paced, hours of it — auto-snapshotting first and checkpointing every **25**
+  items (`every: int = 25`) plus once more through a `finally` on the way out, so an expiry
+  that RAISES loses nothing and only a hard kill drops up to 24 repairs; without `--apply` it
+  only reports and writes `data/truncated-items.json`. **Reach for `reextract` first:**
+  measured 2026-08-30 on the live store (2,404 items), of the **707** items the detector
+  flags only **5** have no stored payload — the other **702 re-parse offline, for free, with
+  no network at all**. Corpus-wide the payload layer covers 2,360 of 2,404, so the "payloads
+  are NOT persisted" premise — asserted in `items_needing_refetch`'s docstring and AGAIN in
+  this command's own docstring (issue #142) — survives only for what predates persistence.
+  **But 702 re-parses is a fact about where the BYTES live, not a count of repairs.** Compare
+  `note_tweet.note_tweet_results.result.text` in each payload against the stored text and the
+  work list splits four ways: **214 truncated** — the payload holds a longer body, and these
+  are the real repairs, offline and free; **358 complete** — the long-form body is
+  byte-identical to what is stored (358 of 358, median 721 chars, max 13,173), flagged on
+  length alone; **122 undetermined** — no long-form body in the payload, so the store cannot
+  decide them either way; **13 other** — 8 rewritten without lengthening, 5 with no payload.
+  The undecided population is therefore **127**: the 122 plus those 5, which are undecided
+  for the stronger reason that no evidence exists in either direction. That puts the real
+  truncations at **214–341** and the false flags at **358–485** — two intervals of the same
+  width, 127, the same uncertainty counted from either end. The 8 rewritten-without-
+  lengthening sit OUTSIDE both and lean truncated (7 of the 8 carry a longer body once the
+  trailing t.co is stripped, which is the string `looks_truncated` actually judges), so
+  folding them in would raise the truncation ceiling to 349 and never the false-flag one.
+  **`--apply` knows none of this:** `targets = items_needing_refetch(store)` is the whole 707
+  and the loop re-fetches every one of them (only the WRITE is conditional), so as written it
+  is a 707-item browser run in which at most **127** items can gain a character — the same
+  127, because what the store cannot decide is exactly what the network would have to be
+  asked — while 358 of those fetches re-download posts this measurement proves were already
+  complete. That gap is the argument for triaging before you run it. **Do not tidy the 122
+  away** by arguing they fitted inside 280 chars: tested against the 214 KNOWN truncations on
+  both signatures a reader reaches for, they are indistinguishable — median stored prose 277
+  against 277, all 122 inside the 265–292 band against 212 of the 214, a trailing self-link
+  on 70% of them against 58%. Two readings survive and nothing in the store chooses between
+  them: a truncation whose payload never carried the body, or a complete ~277-character post
+  that ends in the author's own link. A discriminating test that fails to discriminate is a
+  result, not a dead end. **And the re-parse log is not confirmation:** a dry `reextract`
+  warns `tweet ... arrives TRUNCATED` for 702 of the 707, and for the **480** whose text it
+  does not change that warning is guaranteed before it runs — same string in, same
+  `looks_truncated` out, 480 of 480. Rule 2, tripped inside the repo that wrote it. The
+  detector is deliberately biased towards flagging (a missed truncation is a fabrication kept
+  forever; a false flag costs one re-fetch), so the number measures the flag, never the
+  defect.
+- **`verify-entities` / `entity_grounding.py` — the deterministic checker, and READ WHAT IT
+  IS BLIND TO BEFORE QUOTING ANY NUMBER FROM IT.** Token-free, no model, so it cannot inherit
+  the judge ensemble's blind spot (three judges sharing one model and one rubric are ONE
+  sample drawn three times; unanimity there measures agreement, not truth), and it sweeps the
+  whole corpus instead of sampling. With `--verdicts <verify-report.json>` it joins the
+  flagged outputs against the judges' records and reports how many of them the ensemble passed
+  UNANIMOUSLY. **That is a LOWER BOUND, and today it is structurally zero — because the two
+  sets do not overlap.** Measured 2026-08-30 on the live data: `data/entity-report.md` carries
+  **1,614** flagged rows (140 confident + 1,474 uncertain) while `data/verify-report.json`
+  holds **14** records in total, 7 of them `summary`; the intersection with the 140 confident
+  flags is **0**. The store is barely better — 70 stored `summary` verdicts across 2,404
+  items, and exactly **1** of the 140 confident flags carries one. So the printed number
+  measures COVERAGE of the judged population, not the ensemble's quality, and no other answer
+  can come out until the two populations are made to overlap. Quoting it as a recall claim
+  about the judges is the error rule 2 exists to stop. It checks ONE thing: that every proper
+  noun in a generated output appears on an evidence surface its rubric declares (matching is
+  variant-aware, because ASR mangles proper nouns and an exact matcher flagged exactly the
+  names the generator got RIGHT — ~0% digest precision before that was fixed). **It never
+  checks what is ASSERTED about an entity, and it never looks at a single NUMBER.** The
+  module's own example: "Sam Altman dijo que despedirá a la mitad", against evidence where he
+  discusses *hiring*, extracts `Sam Altman`, finds it grounded, and passes CLEAN. Every false
+  attribution, invented mechanism and fabricated causal link has that shape, and **nothing in
+  this repo has ever measured how often it happens** — the check that would find them is the
+  one that cannot see them. Do NOT reach for the ~7-8% in `data/entity-precision.md` to fill
+  the hole: that is the corrected rate of flagged **digests** that are genuinely ungrounded
+  (24.9% of digests flagged × ~30% sampled precision), a statement about the outputs this
+  check called DIRTY, digests only — and that file says so itself, *"es el suelo de un
+  problema, no su medida"*. The blind spot has no number. An invented "92% en MMLU", a false
+  date, a fabricated funding round: invisible, always. Lowercase and two-letter names are not
+  extracted at all. **A clean verdict means "no unknown proper nouns". It does NOT mean "not
+  hallucinated"** — no statement of the form
+  "N% of the corpus is hallucination-free" is supported by this tool, and the most damaging
+  hallucination for a knowledge base, a confident false claim about a real, correctly-named
+  entity, is precisely the one it cannot see. Report-only: writes `entity-report.{json,md}`,
+  never touches the store.
+- **`evidence.py` is where rule 5's binding actually lives.** `evidence_surfaces(item,
+  target)` is the single definition of what may support a claim, and it is
+  TARGET-DEPENDENT — `digest` gets the video and the post it arrived in (author metadata ·
+  tweet text · video title · transcript · frame descriptions); `summary`/`topics` get those
+  PLUS the poster's own thread, the fetched article's title and body, and the image
+  descriptions. Getting it wrong is a bug in both directions: judge a digest against the
+  linked article and you excuse an invention its generator could never have sourced; judge a
+  summary against the digest's narrower set and you flag the generator for using evidence it
+  was correctly given. `evidence_text(item, target)` is the flattened string the deterministic
+  checker consumes. **A LINK IS NEVER A SURFACE** — nothing derives from `item.links`, because
+  a URL is topic signal and never a name: a summary in the corpus reconstructed a publication
+  ("Axios") and a company ("Anthropic") out of the SLUG of a link that was never fetched.
+  `tests/test_evidence_contract.py` asserts the generator, the rubric and the judge against
+  this module BY IDENTITY, per target — add a surface to one consumer and forget the others
+  and it goes red.
+- **The knowledge layer (`src/xbrain/knowledge/`) is the READ contract, and it is read-only by
+  construction** (spec «conocimiento verificable» §3, §4, §8). It projects `Item` + `Content` +
+  `Enrichment` + `Topic` + `TopicPage` into `KnowledgeItem` · `KnowledgeSurface` ·
+  `KnowledgeChunk` · `TopicRecord`, so a consumer never parses `items.json`, hunts a markdown
+  heading, or guesses who wrote a quoted tweet. **It does not replace `evidence.py` and it is
+  not the same contract** — the two differ on three axes ON PURPOSE: scope (all surfaces vs.
+  target-dependent), truncation (never vs. `ARTICLE_CHAR_LIMIT`) and multiplicity (every
+  source vs. the first — 119 items carry more than one). What they SHARE is the atomic walk,
+  not the assembled block: `iter_content_sources` / `iter_described_photos` /
+  `iter_video_frames` in `executors/api.py`, onto which the five enrichment selectors were
+  re-expressed with no observable change. What BINDS them is not an identity assertion
+  (tautology the moment delegation exists — rule 1) but **three totality tests**
+  (`tests/test_knowledge_surface_coverage.py`) that go red when someone adds a `ContentKind`,
+  a derived surface or an evidence key and forgets the other side; the `video_digest` deletion
+  leaves the per-kind test GREEN and only the closure test fires. And the proof that the
+  refactor did not MOVE `evidence.py` is `tests/test_evidence_characterization.py`, which pins
+  the judge's source text and the full `contract_fingerprint` as hex literals: one byte of
+  drift would have retired every stored verdict and deleted every badge from `generate` —
+  rule 6 run backwards. **Provenance is a TYPE** (`Origin` → `TrustClass`, one total table),
+  and `unknown` maps to `llm_synthesis` with `is_derived == True`: it fails closed, because
+  `Topic.description` does not record whether it was written or generated and the two errors
+  are not symmetric — treating a source as synthesis loses a citation, treating synthesis as a
+  source manufactures one. **`verification` is NOT a field of `KnowledgeSurface`** and the
+  absence is asserted: `surface_fingerprint` does not depend on the verdict, so a stored copy
+  could never be invalidated and a FAIL revoked by `verify --audit` would keep being served as
+  the old PASS; it is hydrated from the live store through the SAME freshness check
+  `generate._verdict_badge` applies. **`source_key = sha1(kind\0url)[:12]`, never the index in
+  `content.sources`** — `fetch` rewrites that order, and an index-keyed id would repoint stored
+  chunks at a different body silently, because the id still resolves. **Atomic beats
+  `MAX_CHARS`**: a quoted post has ONE author, so the P2 quoted post of 3,943 chars is emitted
+  whole against a 2,000 ceiling — splitting it creates two fragments that no longer say whose
+  words they are. `target` is a SOFT ceiling that paragraphs are PACKED into, and this was
+  found by MEASURING, not by reading: one chunk per paragraph gave **30,449** chunks
+  (`x_article` averaging 194 chars) against the plan's predicted 18–25k, and packing gives
+  **18,319** (9,294 atomic + 9,025 splittable) — a 194-char chunk is bad retrieval before it
+  is bad arithmetic, too small to judge a match and scattering one argument across a dozen ids.
+  (The figure was **18,328 / 9,034** until `_absorb_scraps` merged the 9 chunks that sat below
+  the floor; the commit that removed them said so and this line was not re-derived — rule 6 in
+  miniature, in the file the repo says is read first and acted on. Re-derived 2026-08-31 on the
+  same 2,404-item corpus, md5 `5aaf62f4…`. **30,449 is NOT re-derivable**: it measured the
+  pre-packing implementation, which no longer exists, so read it as history, never as a figure
+  you could reproduce today.) The chunker's parameters are ARGUMENTS, so the Plan-02 sweep
+  cannot move the ranking fixture that pins today's behaviour.
+- **`eval/golden-set.yaml` is TRACKED — the single exception to "nothing personal in Git" —
+  and the loader has two stages because of it.** Untracked (it lived under `data/*`), the v3
+  migration would have appeared in no diff, `xbrain eval` could never run in CI, and a case
+  edited to turn a gate green would leave no history. It holds questions, ids and short
+  identifying fragments; a 300-char ceiling on `expected_text`, checked in CI **against the
+  real file**, keeps a corpus body out. `load_cases(path)` validates STRUCTURE without opening
+  the store (so it runs in CI, where there is no `data/`); `resolve_cases(cases, store)` checks
+  the ids (local, or CI against fixtures). Fusing them would make the very test that proves the
+  evaluation runs in CI the first one that cannot. **Only an ENUMERATED case scores**: with
+  `relevant_items: []` the recall@k is 0/0 and comes out 1.0 or 0.0 depending on the
+  implementation — rule 2 — so unenumerated cases are archived as `scenarios` with their reason.
+  Migration measured 2026-08-31 against 2,404 items: D1c/U2 enumerates to **exactly 12** (so the
+  Plan-03 bake-off keeps its deciding stratum), P1 to **6** where the file said 5, U3 to **22**
+  where it said 20 — the two moved because the corpus grew, which is why the figures are notes
+  and never asserts. **`video_digest` still has NO case, and now the reason is measured**: of
+  the 36 proper nouns appearing only in a digest, **22 LEAK** (a fuzzy variant sits in the
+  transcript, sometimes ASR-mangled — "Johannes Trithemius" vs "johannes tritemius", ratio 0.97)
+  and the other **14 have no support on any surface**, i.e. candidates for invention. The first
+  group fails the anexo-A.3 leak rule; founding a case on the second would enshrine a possible
+  hallucination as ground truth. Zero usable candidates — and the population measured is proper
+  nouns, not all facts. **A case whose filters the strategy cannot apply is UNMEASURED, not
+  0.0**: under Plan 01 the FTS5 baseline pushed only `has_surfaces`/`origins` into `WHERE`, and
+  the first real run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at
+  filtering" when the instrument does not exist yet (spec §8.6.8). **That gap is now closed and
+  the RULE is what survives** (PR #179): the harness builds through `index_build`'s writer, the
+  same one `xbrain index build` drives, so all **eight** filters of spec §7.2 are pushed and the
+  two `filtros` cases are scored rather than reported unmeasured. `SUPPORTED_FILTERS` is derived
+  from `SearchFilters.model_fields`, so a ninth filter added to the frozen contract cannot
+  silently keep the set at eight. Read "only two" as history; do not quote it as a limit. The baseline is the SAME FTS5 the persisted
+  index will use, on `sqlite3(":memory:")` — same DDL, same `unicode61 remove_diacritics 2`
+  (no stemming: FTS5 has none multilingual, and the English one would wreck the Spanish half),
+  same `bm25()`, same explicit `chunk_id` tie-break — so what dies later is where the database
+  lives, not how it scores. **And that last clause was FALSE while the terms were ANDed.** The
+  FTS5 default conjunction requires every word of a question inside ONE chunk: measured on the
+  real corpus, 18 of the 21 scorable cases got back NOT ONE ROW, and the only three that
+  retrieved anything were single-term `exacto` queries. So bm25 ranked nothing in 18 of 21
+  cases, and the published `semantico: 0.0` / `cruzado_idioma: 0.0` / `topic: 0.0` measured the
+  QUERY BUILDER while the execution report read them as an absence of vocabulary overlap. The
+  connective is now a **disjunction** (`FTS_CONNECTIVE`, recorded in the ranking fixture beside
+  the tokenizer): empty result sets 18/21 → 0/21, recall@10 0.1429 → 0.8099, MRR 0.1429 →
+  0.7206, `exacto` unchanged and **no stratum regressed**, at p50 0.23 → 9.75 ms. A conjunction
+  in front of bm25 is two retrieval models stacked: bm25 wants a wide candidate set and
+  discriminates by IDF, and requiring every term does that by brute force *before* the scorer
+  runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
+  as a function word can still be rare to the index and go undiscounted — `el` is 1 of 49
+  fixture chunks (2.0 %) and **6,070 of 22,286** real ones (**27.2 %**), re-derived 2026-09-01
+  on the then-shipped chunker (v2, `800/0`, store sha256 `f76341a3…`), which is why a fixture
+  query ranks it high and the real corpus does not. **`CHUNKER_VERSION` is `v3` since Plan
+  02.9**, and this count still stands: v3 changed the FINGERPRINT projection (the served title
+  joined the hashed tuple) and not the cut, proven by the version-stripped ranking fixture
+  being byte-identical across the bump — so the chunk ids moved and the chunk COUNT did not.
+  Do not re-stamp a measured figure to a new version without that proof: which of the two a
+  version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
+  correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
+  in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
+  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7395 · MRR 0.7357** — NOT the
+  `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
+  it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
+  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
+  `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
+  tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
+  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat.
+  Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
+  **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
+  counts the comparisons it made and fails closed at zero, because `passed = not failures` let
+  `--min-recall 1.0` exit 0 having scored nothing.
+- **The persistent index (`data/index/`, `xbrain index build|update|status` · `search` · `get`)
+  is DERIVED, and that is what licenses every refusal in it.** SQLite + FTS5, two planes —
+  `chunks_fts` over fragment bodies (what a citation quotes) and `profiles_fts` over one
+  retrieval profile per item (what answers a query whose words appear in no fragment; never
+  served as a citation). Deleting the directory costs one `build`, so an incompatible manifest,
+  a drifted column or a torn page is **refused whole** rather than queried partially — a partial
+  answer over a schema this code no longer matches is a wrong answer wearing a right one's shape
+  — and every incompatibility ends with the same sentence, `xbrain index build --force`.
+  **`rowid` is an explicit `INTEGER PRIMARY KEY`**: with an implicit one SQLite may reuse a
+  deleted row's rowid and external-content FTS5 would return the NEW chunk for the OLD word.
+  **Two change signals, and confusing them is the trap.** Four DEEP fingerprints (item · store ·
+  vocabulary · topics) drive `build`/`update`/`status` and answer *what changed*; one CHEAP
+  `StoreSignal` — `mtime_ns` + size of the THREE inputs (`items.json`, `vocab.yaml`,
+  `topics.json`, six required fields) — is three `os.stat`, so a query can afford it on every
+  call and declare `index_behind_store`. Three inputs because comparing `items.json` alone left
+  `xbrain topics` writing a new topic plane that every later `search` answered over silently.
+  The cheap signal is **falible in one declared direction**: a `touch` with no edit is an
+  accepted false positive (a false positive costs a warning, a false negative serves stale
+  evidence as fresh), and a same-size replacement with the mtime preserved (`cp -p`, `rsync -a`,
+  `unzip`, a restored backup) is invisible to it FOREVER. Nothing promises freshness from
+  `mtime`+size. **The query door refuses and `index status` REPORTS** — same sentence, opposite
+  behaviour, on purpose (rule 9): `status` is the instrument you run to find out, and it pays
+  for `PRAGMA quick_check` (155–850 ms on the 52 MiB real index) which no query door can. The
+  open door instead runs one trivial `MATCH` per FTS plane (0.01 ms each), because page-1 and
+  `sqlite_master` reads touch no FTS5 shadow table: with `chunks_fts_data` dropped, `search`
+  died in a traceback while `status` exited 0 and called the index healthy. **`search` filters
+  BEFORE it scores** (all eight, incl. `content_kinds` and `has_surfaces`), excludes rows it
+  cannot serve honestly — no locator, or a fingerprint that does not recompute over the served
+  projection — into `corrupt_chunks_excluded` (named `stale_chunks_excluded` until someone
+  noticed it SOUNDED like the staleness signal and MEASURED the consistency one), groups by item
+  at `max_matches_per_item` (3), and hydrates `verification_status` from the **live store**, never
+  the index. **`get` never reads the index at all** and works with `data/index/` deleted: an
+  index able to answer it would be a second copy of the corpus that nothing invalidates.
+  Degradations are a fixed-order tuple, DECLARED not simulated: `no_embeddings` is read off the
+  manifest's `embeddings` block (not hard-coded — the day Plan 03 writes it the flag stops
+  appearing by itself), and `--strategy vector` degrades to lexical labelled
+  `vector_not_implemented` while a TYPO raises (a typo is not a degradation; answering it with
+  lexical results would turn it into a measurement). `render.py` is the human view of the SAME
+  response model `--json` serialises and reaches back into nothing. **Measured 2026-09-12 on the
+  live corpus (2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
+  `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
+  loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
+  store.** Re-derive it; it moves with the corpus. **Known limits, declared not discovered:** no
+  stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
+  tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
+  `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
+  (`unicode61 remove_diacritics 2`). And `xbrain eval` is **no longer a different filter surface** (PR #179):
+  the harness stopped walking the corpus its own way and now builds through `index_build`'s
+  writer, so it pushes the **same eight** filters `search` does and the two `filtros` cases of
+  the golden set are scored. **The rule outlives the gap**: a case whose filters a strategy
+  cannot apply is still **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as
+  "retrieval failed at filtering" when the instrument was not there — and that is what will
+  protect Plan 03's vector strategy, which starts with no filter columns of its own. The earlier
+  line here said the harness pushes only two; it was true until #179 and is now false.
+  Operation: `docs/knowledge-index.md`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
-- `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).
+- `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·
+  `primary_topic`), and it is **fully live** — three executor tracks (`api` in-process;
+  `claude-code`/`manual` through the worksheet — the `ExecutorName` literal), ONE shared
+  validator (`validate.validate_judgment`, against `guardrails.yaml` and the closed
+  `vocab.yaml`), the re-enrichment trigger `_needs_reenrichment`
+  (`content.fetched_at > enriched.enriched_at`), and video-transcript + image-description
+  splicing on both tracks. Measured 2026-08-30 on the live `data/items.json` with
+  `sum(1 for i in store.values() if i.enriched is not None)`: **2,325 of 2,404 items carry an
+  `enriched` block.** The 79 that do not ARE how a different answer comes out — they were
+  extracted since the last `enrich` run, so read the number as "the corpus is enriched to the
+  last run", never as an invariant. An earlier reading the same day was 2,325 of 2,325: the
+  enriched count did not move, `extract` did. The line this replaces ("`enrich` is a stub — the
+  LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
+  life of the corpus it described, and it is the worst kind of wrong in this file, because
+  this file is read first and acted on.
 
 ## Conventions
 - TDD: every module has a `tests/test_*.py`. Run `uv run pytest -v`.
@@ -445,7 +851,9 @@ So every attack on the gate sorts into exactly two bins:
   deleting the workflow file *(probe #112: zero runs, `BLOCKED`)*; renaming the job (the
   required context `quality` never appears); `continue-on-error` on the job;
   `branches-ignore`; `paths:` under `pull_request`; an invalid `types:`. GitHub blocks the
-  merge. **The change cannot ship a lie.**
+  merge. **The change cannot ship a lie.** *(This bin assumes the PR targets `develop` or
+  `main` — what blocks is branch protection's required check, and it exists only there. On
+  any other base these cells flip into the column below: see rule 14.)*
 - **FAIL-OPEN (lethal)** — anything that lets the check still say **PASS while testing
   less**: `continue-on-error` on the gate step; `checkout` with an explicit `ref:` *(probe
   #124 — the gate ran green **on the wrong tree**; the test count gave it away, `1088
@@ -486,6 +894,84 @@ exist.
 
 **The guards catch mistakes, not attacks. The only backstop against an attack is that
 someone reads the diff of `.github/`.** Say so plainly; do not claim the gate is airtight.
+
+### 14. A PR onto a feature branch runs no gate at all — and GitHub calls it `CLEAN`
+
+Rule 11 sorts every attack on the gate into two bins. **That table is conditional on
+something it never says: the PR targets `develop` or `main`.** What blocks a merge is
+branch protection's *required check*, and branch protection lives only on those two.
+
+`quality.yml`'s trigger is `pull_request: branches: [develop, main]`. Point a PR at a
+feature branch — a stacked PR, most obviously — and the workflow fires **zero** times.
+No check is produced, so no check is missing, so nothing blocks.
+
+Measured on **#151**, stacked on #149's branch while #149 was still open:
+
+| Surface read | What it said |
+|---|---|
+| `gh run list --branch feat/90-pr2-redescribe-frames` | **no runs at all** |
+| `gh pr view 151 --json statusCheckRollup` | `[]` |
+| `gh pr view 151 --json mergeable,mergeStateStatus` | `MERGEABLE`, **`CLEAN`** |
+
+`CLEAN` does not distinguish *everything required passed* from *nothing was required*.
+That is rule 9 one level up: the instrument does not lie about a check, it lies **by the
+absence of checks**. Retargeting the same PR (`gh pr edit 151 --base develop`) started the
+gate — a `pull_request` run was in progress 30 s later — and it passed. No code changed,
+only the base.
+
+**Do: a stacked branch is a work container; a PR is a gate. Do not open them together.**
+Let the work proceed on the stacked branch, and open the PR only once its base has landed
+in `develop`. And read `required_status_checks.contexts` on the TARGET branch before
+trusting any merge state.
+
+**And check why you are stacking at all.** #151 was stacked because #149 sat merge-ready
+and unmerged — a permission boundary that was never there. `develop` is the *integration*
+branch: merging into it is the ordinary end of the loop, not a release. The cheapest fix
+for a stacked PR is usually to merge the one below it.
+
+### 15. A big initiative ships as child PRs onto a PROTECTED umbrella — never as one PR
+
+A plan is a unit of product. **A PR is a unit of review**, and the two are not the same size.
+Measured, 2026-09-02: Plan 02 of the knowledge initiative was implemented as one branch — **78
+commits, 43 files, +16,656/−902** — and took **nine review rounds and 615,938 bytes of review
+prose** (**9.0×** Plan 01, which merged) to converge. Round **8**, on a tree with `check.sh`
+green and **98%** coverage in `knowledge/`, still surfaced **two NEW HIGHs**, one of them a
+`build --force` that destroyed a good index and sealed it with exit 0. Nothing was wrong with the
+code — `b61e04b` ends green at 2,549 tests. What was wrong is that **a review of 16,656 lines does
+not converge**: each pass picks a subset, and the subset it did not pick stays unlooked-at.
+
+**So: `develop` → `umbrella` → child PRs, merged one at a time.** A child PR targets the umbrella,
+never `develop`; children are sequential, so each is read against a tree containing its
+predecessors; **each must be green on its own**, and if a boundary cannot produce a coherent state,
+move the boundary and write down why. Only the umbrella opens a PR to `develop`, and its gate looks
+for integration regressions, not unit defects.
+
+**The umbrella gets a REAL gate — this is not optional, and not a social rule.** Rule 14 says a PR
+onto a feature branch runs nothing and GitHub still reports `CLEAN`. Close it, in this order:
+
+1. `.github/workflows/quality.yml` lists `"VGonPa/umbrella-*"` under **both** `push` and
+   `pull_request` (guarded by `tests/test_ci_workflow.py`);
+2. **classic branch protection on the umbrella's EXACT name**, created **before the first child**
+   and removed only after the final merge: `quality` required · `strict: true` ·
+   `enforce_admins: true` · **approvals 0** (rule 12 — one collaborator, so a 1 blocks everything
+   forever). Measured available here: the repo is **public** with `admin: true`, and `develop`
+   itself is a **non-default** branch carrying exactly this. `rulesets` is `[]` — rule 13's
+   GHEC-only finding is about rulesets, not about classic protection;
+3. **verify by API and read the response**, not the exit code. If it cannot be created, that is a
+   **BLOCKER**, not a compensation to remember.
+
+**`strict` on the umbrella does NOT tell you `develop` moved** — it only compares a child to its
+umbrella base. So **checkpoint `origin/develop`'s SHA before every child**, and when it has moved,
+integrate it with a **sync child PR**: never a direct push (skips the gate) and never a rebase
+(rewrites merged children). When a monolith is being **redistributed** rather than written, freeze
+its tip as a snapshot, branch the umbrella from the snapshot's **historical base**, port bytes with
+`git checkout <snapshot> -- <paths>` instead of retyping them, and prove `tree == snapshot` **before**
+the first sync — after a sync the only honest reference is the synthetic `merge-tree` of current
+`develop` + snapshot.
+
+Full procedure, PR matrix and roles:
+`zz-support-files/docs/implementation-plans/2026-09-02-plan-entrega-atomica-umbrellas.md`
+(and `AGENTS.md`, which carries the same topology for Codex).
 
 ### Branch protection: the live settings, and what each one cost
 

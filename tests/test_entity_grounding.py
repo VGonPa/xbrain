@@ -155,6 +155,26 @@ def test_quotes_are_delimiters_not_letters():
     assert "O'Brien" in extract_entities("el ensayo de O'Brien sobre agentes")
 
 
+def test_verbatim_caption_grounds_but_translated_caption_does_not():
+    """#90's caption-contract rubric bans translating on-screen labels, and the reason
+    is measurable right here: `is_grounded`'s fuzzy match is generous enough that a
+    translated COGNATE ("Proyección" for "Projection") still grounds — but
+    "Auto-Atención" / "Incrustación" do NOT match "Self-Attention" / "Embedding". A
+    caption that transcribes the labels verbatim (quoted, per the rubric) keeps a
+    downstream citation grounded; one that translates them makes a correct citation
+    get reported as unfounded — the exact failure the rubric exists to prevent. This
+    only pins the rule if it exercises BOTH halves: a checker loosened to let the
+    translated form ground too would still pass a test that asserted the positive
+    half alone.
+    """
+    verbatim = 'Diapositiva con un diagrama que conecta "Embedding" y "Self-Attention".'
+    translated = 'Diapositiva con un diagrama que conecta "Incrustación" y "Auto-Atención".'
+    assert is_grounded("Self-Attention", verbatim)
+    assert is_grounded("Embedding", verbatim)
+    assert not is_grounded("Self-Attention", translated)
+    assert not is_grounded("Embedding", translated)
+
+
 def test_line_initial_common_word_is_demoted_but_never_dropped():
     """Every Spanish bullet opens with a capitalised verb ("Muestra…", "Aparece…"). Their
     capital proves nothing, so they must not reach the headline — but they are NOT

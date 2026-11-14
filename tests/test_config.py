@@ -1,4 +1,5 @@
 # tests/test_config.py
+import re
 from pathlib import Path
 
 import pytest
@@ -285,6 +286,7 @@ def test_load_config_frames_defaults(tmp_path: Path):
     _write_repo(tmp_path)
     cfg = load_config(tmp_path)
     assert cfg.frames_max_frames == 60
+    assert cfg.frames_footage_max_frames == 6
     assert cfg.frames_scene_threshold == 0.4
     assert cfg.frames_interval_seconds == 15.0
     assert cfg.frames_dedupe is True
@@ -301,6 +303,7 @@ def test_load_config_frames_overrides(tmp_path: Path):
         'handle = "vgonpa"\n'
         "[frames]\n"
         "max_frames = 120\n"
+        "footage_max_frames = 3\n"
         "scene_threshold = 0.5\n"
         "interval_seconds = 20\n"
         "dedupe = false\n"
@@ -309,6 +312,7 @@ def test_load_config_frames_overrides(tmp_path: Path):
     )
     cfg = load_config(tmp_path)
     assert cfg.frames_max_frames == 120
+    assert cfg.frames_footage_max_frames == 3
     assert cfg.frames_scene_threshold == 0.5
     assert cfg.frames_interval_seconds == 20.0
     assert cfg.frames_dedupe is False
@@ -331,6 +335,23 @@ def test_load_config_frames_rejects_non_positive_max(tmp_path: Path):
         load_config(tmp_path)
 
 
+def test_load_config_frames_rejects_non_positive_footage_max(tmp_path: Path):
+    """`footage_max_frames = 0` would describe NO frame of a silent video — the
+    hollow entry the footage path exists to prevent — so it is refused on load.
+    The full message is pinned: `match="max_frames"` alone would also be satisfied
+    by the `[frames].max_frames` error, so it could pass on the wrong check."""
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n[frames]\nfootage_max_frames = 0\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match=re.escape("config.toml: [frames].footage_max_frames must be >= 1"),
+    ):
+        load_config(tmp_path)
+
+
 def test_load_config_frames_rejects_bad_scene_threshold(tmp_path: Path):
     (tmp_path / "config.toml").write_text(
         '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
@@ -348,4 +369,124 @@ def test_load_config_frames_rejects_non_positive_interval(tmp_path: Path):
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="interval_seconds"):
+        load_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# [index] — Plan 02 §9. The three settings `index build/update/status`, `search`
+# and `get` read. Flat names, like every other section (`frames_max_frames`).
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_index_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypatch):
+    """The defaults are IMPORTED, never retyped — rule 5, asserted so it can FAIL.
+
+    `40000` typed into `config.py` would be a second definition of a budget
+    `get_service` already owns, and `"index"` a second definition of the directory
+    name `index_schema` owns; two copies drift the day one of them moves, and nothing
+    goes red because each file is internally consistent.
+
+    COMPARING AGAINST THE IMPORTED CONSTANT IS NOT ENOUGH TO CATCH THAT, and this is
+    rule 2 on a test rather than on a metric: `assert cfg.index_get_char_budget ==
+    DEFAULT_CHAR_BUDGET` passes just as happily on a hand-typed `40_000`, because both
+    sides are 40000 either way — the assertion could not come out differently. So the
+    owning constants are MOVED here, and the configured defaults must move with them.
+    A literal in `config.py` fails this; an import passes it.
+    """
+    monkeypatch.setattr("xbrain.knowledge.get_service.DEFAULT_CHAR_BUDGET", 12345)
+    monkeypatch.setattr("xbrain.knowledge.index_schema.DEFAULT_INDEX_DIR_NAME", "moved-index")
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.index_dir == tmp_path / "data" / "moved-index"
+    assert cfg.index_get_char_budget == 12345
+
+
+def test_load_config_index_defaults_are_the_documented_values(tmp_path: Path):
+    """And the values themselves, once, so `config.toml.example` stays honest."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.index_dir == tmp_path / "data" / "index"
+    assert cfg.index_get_char_budget == 40_000
+    assert cfg.index_max_matches_per_item == 3
+
+
+def test_load_config_index_round_trips_every_setting(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        '[index]\ndir = "idx"\nmax_matches_per_item = 7\nget_char_budget = 1234\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.index_dir == tmp_path / "data" / "idx"
+    assert cfg.index_max_matches_per_item == 7
+    assert cfg.index_get_char_budget == 1234
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "needle"),
+    [
+        ("max_matches_per_item", "0", "max_matches_per_item"),
+        ("max_matches_per_item", "-1", "max_matches_per_item"),
+        ("get_char_budget", "0", "get_char_budget"),
+        ("get_char_budget", "-5", "get_char_budget"),
+    ],
+)
+def test_load_config_index_rejects_out_of_range(
+    tmp_path: Path, setting: str, value: str, needle: str
+):
+    """An out-of-range value fails with an actionable message, never a `KeyError`.
+
+    `max_matches_per_item = 0` would cap every item at zero matches, so `search`
+    would return results with no citable fragment and no warning; `get_char_budget
+    = 0` would truncate every bundle to nothing and page forever. Both are refused
+    where the value is read, not where it is used.
+    """
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        f"[index]\n{setting} = {value}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=needle):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("escape", ["../outside", "/etc", "sub/../../outside"])
+def test_load_config_index_dir_must_stay_inside_data_dir(tmp_path: Path, escape: str):
+    """Plan 02 §12.6: rejecting `..` is not the same check as proving containment.
+
+    The index directory is created, unlinked and rebuilt by `index build --force`,
+    so a configured value that resolves outside `data/` hands those operations a
+    path the operator never meant to give them. The check is
+    `is_relative_to(data_dir.resolve())`, which an absolute path fails too.
+    """
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        f'[index]\ndir = "{escape}"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="index"):
+        load_config(tmp_path)
+
+
+def test_load_config_index_dir_rejects_a_symlink_out_of_data_dir(tmp_path: Path):
+    """A symlink passes every `..` test and still lands outside `data/`.
+
+    This is the case Plan 02 §12.6 names explicitly: the containment check must
+    run on the RESOLVED path, so a link is followed before the question is asked.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "linked").symlink_to(outside, target_is_directory=True)
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        '[index]\ndir = "linked"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="index"):
         load_config(tmp_path)

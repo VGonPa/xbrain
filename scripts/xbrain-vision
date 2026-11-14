@@ -21,6 +21,10 @@ pick per run with `digest-video --vision-model NAME` or set `[vision].model`:
 Cloud uses the Anthropic REST API via stdlib urllib (no SDK dependency). Local
 shells out to the mlx-vlm tool's python (env `XBRAIN_VISION_MLX_PYTHON`, else the
 uv-tool default `~/.local/share/uv/tools/mlx-vlm/bin/python`).
+
+xbrain passes the frame-caption rubric in the XBRAIN_VISION_PROMPT environment
+variable; run bare (outside xbrain) the script falls back to a built-in prompt.
+The argv contract is unchanged either way.
 """
 
 from __future__ import annotations
@@ -35,12 +39,27 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-PROMPT = (
-    "Describe this video key-frame for a personal knowledge wiki in one or two "
-    "dense, factual Spanish sentences. If it is a slide, chart, code, diagram or "
-    "screenshot, state its content faithfully; never invent text or numbers. "
-    "No preamble, no markdown — reply with only the description."
+# xbrain injects the frame-caption rubric here (`xbrain.vision.PROMPT_ENV_VAR`).
+# The variable is the delivery channel precisely so the argv contract stays frozen.
+_PROMPT_ENV_VAR = "XBRAIN_VISION_PROMPT"
+# This constant is the fallback for a BARE run outside xbrain — it must never be
+# empty, because an empty prompt would silently produce a useless caption rather
+# than an error.
+_FALLBACK_PROMPT = (
+    "Describe this video key-frame for a personal knowledge wiki. Prefer coverage "
+    "over depth: transcribe every legible on-screen string VERBATIM, in its "
+    "original language and exact spelling, each in double quotes — slide titles, "
+    "code identifiers, UI labels, chart axes, error messages. A few sentences of "
+    "your own prose is fine, but never at the cost of a dropped label. Never "
+    "invent text or numbers; if something is unreadable, say so plainly instead of "
+    "guessing. No preamble, no markdown — reply with only the description."
 )
+
+
+def _prompt() -> str:
+    """The injected rubric, or the bare-run fallback."""
+    return os.environ.get(_PROMPT_ENV_VAR, "").strip() or _FALLBACK_PROMPT
+
 
 LOCAL_ALIASES = {
     "qwen-3b": "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
@@ -93,7 +112,9 @@ def _describe_cloud(model: str, image: Path) -> str:
     body = json.dumps(
         {
             "model": model,
-            "max_tokens": 512,
+            # 1024, not the original 512 — see `_describe_local`'s `max_tokens`
+            # comment below for why (same rubric, same ceiling, one explanation).
+            "max_tokens": 1024,
             "messages": [
                 {
                     "role": "user",
@@ -102,7 +123,7 @@ def _describe_cloud(model: str, image: Path) -> str:
                             "type": "image",
                             "source": {"type": "base64", "media_type": media_type, "data": data},
                         },
-                        {"type": "text", "text": PROMPT},
+                        {"type": "text", "text": _prompt()},
                     ],
                 }
             ],
@@ -126,6 +147,18 @@ def _describe_cloud(model: str, image: Path) -> str:
         )
     except urllib.error.URLError as exc:  # DNS / connection / TLS / timeout — also clean, no stack
         raise SystemExit(f"xbrain-vision: network error reaching Anthropic API: {exc.reason}")
+    # A truncated caption is still better than none — xbrain.vision treats a
+    # non-zero exit as a per-video failure, so we do NOT fail the run here. But a
+    # cut-off label is indistinguishable downstream from an invented one, which is
+    # exactly what the rubric's "do NOT guess" paragraph exists to prevent, so make
+    # the truncation visible on stderr instead of letting it pass silently.
+    if payload.get("stop_reason") == "max_tokens":
+        print(
+            f"xbrain-vision: WARNING: caption for {image.name} hit the token ceiling "
+            "and is truncated — a cut-off label is indistinguishable from an "
+            "invented one downstream",
+            file=sys.stderr,
+        )
     blocks = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
     return "".join(blocks).strip()
 
@@ -148,14 +181,19 @@ def _describe_local(model: str, image: Path) -> str:
         "from mlx_vlm.prompt_utils import apply_chat_template\n"
         "model, processor = load(sys.argv[1])\n"
         "prompt = apply_chat_template(processor, getattr(model, 'config', None), sys.argv[3], num_images=1)\n"
-        "res = generate(model, processor, prompt, image=[sys.argv[2]], verbose=False, max_tokens=256)\n"
+        # 1024, not the original 256: the frame rubric now permits ~600 chars of prose
+        # PLUS unbounded verbatim transcription of on-screen text, and 256 tokens (~1000
+        # chars) is consumed by the prose budget alone on a dense slide. A ceiling hit
+        # here truncates a label mid-string, and nothing downstream can tell a truncated
+        # label from an invented one — the exact confusion the rubric forbids.
+        "res = generate(model, processor, prompt, image=[sys.argv[2]], verbose=False, max_tokens=1024)\n"
         "res = res[0] if isinstance(res, (tuple, list)) and res else res\n"
         "text = getattr(res, 'text', res if isinstance(res, str) else str(res))\n"
         f"sys.stdout.write({_LOCAL_MARKER!r} + text.strip())\n"
     )
     try:
         out = subprocess.run(
-            [mlx_python, "-c", script, model, str(image), PROMPT],
+            [mlx_python, "-c", script, model, str(image), _prompt()],
             capture_output=True,
             text=True,
             timeout=_LOCAL_TIMEOUT,

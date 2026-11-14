@@ -1,0 +1,121 @@
+# tests/fixtures/knowledge_goldenset.yaml — the golden set OF THE FIXTURE CORPUS.
+#
+# NOT a copy of eval/golden-set.yaml, and the difference is the whole point of the
+# two-stage loader. The real golden set carries ids from the real 2,404-item corpus, which
+# does not exist in CI; this one carries ids from tests/fixtures/knowledge_corpus.json, so
+# `resolve_cases` can run here. The real file is still validated in CI — structurally, with
+# no store — by `load_cases`, which is what B1 bought.
+#
+# Every fact below was placed in the fixture corpus deliberately, on exactly one surface,
+# so the anexo A.3 rule (present here, ABSENT from every other reachable surface) holds by
+# construction rather than by hope.
+
+schema_version: "1"
+
+cases:
+  - id: FX1
+    query: "Zephyrine"
+    provenance: construido
+    strata: [exacto]
+    filters: {}
+    relevant_items: ["k01"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k01", surface_type: post}
+    expected_text: "Zephyrine"
+    notes: "Un item sin content ni enriched: sólo el post. Prueba el caso mínimo."
+
+  - id: FX2
+    query: "Marrowgate"
+    provenance: construido
+    strata: [enterrado]
+    filters: {}
+    relevant_items: ["k04"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k04", surface_type: external_article}
+    expected_text: "Marrowgate"
+    notes: >-
+      El término vive en el SEGUNDO artículo del item. Si el emisor devolviera sólo la
+      primera source — que es lo que hace `first_source_text` — este caso da recall 0.
+
+  - id: FX3
+    query: "Bramblewick"
+    provenance: construido
+    strata: [semantico]
+    filters: {}
+    relevant_items: ["k05"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k05", surface_type: x_article}
+    expected_text: "Bramblewick"
+    notes: "En el tercer bloque de un X Article. El tweet es sólo un enlace."
+
+  - id: FX4
+    query: "Pelicanine"
+    provenance: construido
+    strata: [multimodal]
+    filters: {}
+    relevant_items: ["k10"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k10", surface_type: image_description}
+    expected_text: "Pelicanine"
+    notes: "Sólo en la descripción VLM. La foto decorativa del mismo item no emite superficie."
+
+  - id: FX5
+    query: "Thistledown"
+    provenance: construido
+    strata: [resumen]
+    filters: {}
+    relevant_items: ["k08"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k08", surface_type: video_transcript}
+      - {owner_type: item, owner_id: "k08", surface_type: video_digest}
+    expected_text: "Thistledown"
+    notes: >-
+      Presente en la transcripción Y en el digest del mismo vídeo. Es el caso de recall de
+      SUPERFICIE: acertar el item por una sola de las dos no es la respuesta completa.
+
+  - id: FX6
+    query: "Ravensgate"
+    provenance: construido
+    strata: [topic]
+    filters: {}
+    relevant_items: []
+    relevant_topics: [agent-evaluation]
+    relevant_surfaces:
+      - {owner_type: topic, owner_id: agent-evaluation, surface_type: topic_overview}
+    expected_text: "Ravensgate"
+    notes: "Sólo en el overview del topic. Prueba que las superficies de topic se indexan."
+
+  - id: FX7
+    query: "Cindervale"
+    provenance: construido
+    strata: [filtros]
+    filters:
+      source: own_tweet
+    relevant_items: ["k06"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k06", surface_type: thread}
+    expected_text: "Cindervale"
+    notes: "El único own_tweet del corpus de fixtures, y su hilo propio."
+
+  - id: FX8
+    query: "Quillfeather"
+    provenance: real
+    strata: [semantico]
+    filters: {}
+    relevant_items: ["k03", "k12"]
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "k03", surface_type: external_article}
+      - {owner_type: item, owner_id: "k12", surface_type: user_note}
+    expected_text: "Quillfeather"
+    notes: >-
+      DOS items relevantes a propósito, y marcado `real` para que el informe tenga las dos
+      procedencias. Es el caso que hace que recall@1 no pueda valer 1,0 por construcción,
+      que es como se demuestra que el arnés PUEDE fallar (acceptance 10).
+
+scenarios:
+  - id: FXS1
+    question: "¿Qué es lo más importante del corpus de fixtures?"
+    provenance: construido
+    reason: >-
+      'Lo más importante' es juicio, no recuperación: no tiene verdad de terreno enumerable.
+      Existe aquí para que el informe de fixtures ejercite la rama de escenarios archivados.

@@ -46,7 +46,10 @@ def _runner(stdout: str, *, returncode: int = 0, stderr: str = ""):
 
 def test_parses_stdout_into_description(tmp_path: Path):
     result = describe_image(
-        tmp_path / "f.png", command="vlm-describe", runner=_runner("A slide titled 'Loops'.\n")
+        tmp_path / "f.png",
+        command="vlm-describe",
+        language="English",
+        runner=_runner("A slide titled 'Loops'.\n"),
     )
     assert result == "A slide titled 'Loops'."
 
@@ -54,7 +57,9 @@ def test_parses_stdout_into_description(tmp_path: Path):
 def test_argv_carries_model_and_image_path(tmp_path: Path):
     runner = _runner("desc")
     image = tmp_path / "f.png"
-    describe_image(image, command="vlm-describe", model="qwen2-vl", runner=runner)
+    describe_image(
+        image, command="vlm-describe", model="qwen2-vl", language="English", runner=runner
+    )
     argv = runner.calls[0]  # type: ignore[attr-defined]
     assert argv[0] == "vlm-describe"
     assert "--model" in argv and "qwen2-vl" in argv
@@ -63,7 +68,9 @@ def test_argv_carries_model_and_image_path(tmp_path: Path):
 
 def test_multi_token_command_is_split(tmp_path: Path):
     runner = _runner("desc")
-    describe_image(tmp_path / "f.png", command="python -m my_vlm", runner=runner)
+    describe_image(
+        tmp_path / "f.png", command="python -m my_vlm", language="English", runner=runner
+    )
     argv = runner.calls[0]  # type: ignore[attr-defined]
     assert argv[:3] == ["python", "-m", "my_vlm"]
 
@@ -72,7 +79,7 @@ def test_unconfigured_command_raises_vision_not_found(tmp_path: Path):
     """An empty `[vision].command` is a clear operator error (abort), not a crash —
     there is NO bundled default vision model."""
     with pytest.raises(VisionNotFound):
-        describe_image(tmp_path / "f.png", command="   ", runner=_runner("x"))
+        describe_image(tmp_path / "f.png", command="   ", language="English", runner=_runner("x"))
 
 
 def test_missing_binary_raises_vision_not_found(tmp_path: Path):
@@ -80,7 +87,7 @@ def test_missing_binary_raises_vision_not_found(tmp_path: Path):
         raise FileNotFoundError(2, "No such file or directory", "vlm-describe")
 
     with pytest.raises(VisionNotFound) as excinfo:
-        describe_image(tmp_path / "f.png", command="vlm-describe", runner=_run)
+        describe_image(tmp_path / "f.png", command="vlm-describe", language="English", runner=_run)
     assert "vlm-describe" in str(excinfo.value)
 
 
@@ -89,21 +96,25 @@ def test_permission_denied_raises_vision_not_found(tmp_path: Path):
         raise PermissionError(13, "Permission denied", "vlm-describe")
 
     with pytest.raises(VisionNotFound):
-        describe_image(tmp_path / "f.png", command="vlm-describe", runner=_run)
+        describe_image(tmp_path / "f.png", command="vlm-describe", language="English", runner=_run)
 
 
 def test_empty_output_is_failure_not_silent_empty(tmp_path: Path):
     """Exit 0 with NO output is a `VisionFailed` — never a silent empty
     description (that would drop the slide's content invisibly)."""
     with pytest.raises(VisionFailed) as excinfo:
-        describe_image(tmp_path / "f.png", command="vlm-describe", runner=_runner("   \n"))
+        describe_image(
+            tmp_path / "f.png", command="vlm-describe", language="English", runner=_runner("   \n")
+        )
     assert "no" in str(excinfo.value).lower()
 
 
 def test_nonzero_exit_raises_with_stderr(tmp_path: Path):
     runner = _runner("", returncode=2, stderr="model weights not found")
     with pytest.raises(VisionFailed) as excinfo:
-        describe_image(tmp_path / "f.png", command="vlm-describe", runner=runner)
+        describe_image(
+            tmp_path / "f.png", command="vlm-describe", language="English", runner=runner
+        )
     assert "model weights not found" in str(excinfo.value)
 
 
@@ -112,7 +123,7 @@ def test_timeout_raises_vision_failed(tmp_path: Path):
         raise subprocess.TimeoutExpired(cmd="vlm-describe", timeout=1)
 
     with pytest.raises(VisionFailed):
-        describe_image(tmp_path / "f.png", command="vlm-describe", runner=_run)
+        describe_image(tmp_path / "f.png", command="vlm-describe", language="English", runner=_run)
 
 
 def test_non_utf8_stdout_raises_vision_failed(tmp_path: Path):
@@ -123,7 +134,7 @@ def test_non_utf8_stdout_raises_vision_failed(tmp_path: Path):
         raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
     with pytest.raises(VisionFailed) as excinfo:
-        describe_image(tmp_path / "f.png", command="vlm-describe", runner=_run)
+        describe_image(tmp_path / "f.png", command="vlm-describe", language="English", runner=_run)
     assert "non-UTF-8" in str(excinfo.value)
 
 
@@ -141,3 +152,74 @@ def test_vision_imports_no_ml_or_vision_library():
         "coremltools",
     ):
         assert forbidden not in source
+
+
+def _env_runner(stdout: str = "desc"):
+    """A fake runner that records the `env=` kwarg as well as the argv."""
+    calls: list[dict] = []
+
+    def _run(argv, **kwargs):
+        calls.append({"argv": list(argv), "env": kwargs.get("env")})
+        return _completed(stdout)
+
+    _run.calls = calls  # type: ignore[attr-defined]
+    return _run
+
+
+def test_rubric_reaches_the_subprocess_through_the_env_var(tmp_path: Path):
+    """The caption discipline travels by environment variable, so the argv
+    contract stays frozen and a third-party command keeps working."""
+    from xbrain.vision import PROMPT_ENV_VAR
+
+    runner = _env_runner()
+    describe_image(tmp_path / "f.png", command="vlm", language="English", runner=runner)
+    env = runner.calls[0]["env"]  # type: ignore[attr-defined]
+    assert env is not None
+    prompt = env[PROMPT_ENV_VAR]
+    assert "VERBATIM" in prompt
+    assert "{language}" not in prompt
+    assert "English" in prompt
+
+
+def test_env_var_is_added_to_the_inherited_environment_not_replacing_it(tmp_path: Path):
+    """PATH and ANTHROPIC_API_KEY must survive — the cloud backend of the bundled
+    wrapper needs the key, and every backend needs PATH."""
+    import os
+
+    runner = _env_runner()
+    describe_image(tmp_path / "f.png", command="vlm", language="English", runner=runner)
+    env = runner.calls[0]["env"]  # type: ignore[attr-defined]
+    for key in os.environ:
+        assert key in env
+
+
+def test_argv_contract_is_unchanged_by_the_prompt_injection(tmp_path: Path):
+    """The backward-compatibility guarantee, pinned: adding the rule must NOT add
+    an argument, or every third-party `[vision].command` breaks at once."""
+    runner = _env_runner()
+    image = tmp_path / "f.png"
+    describe_image(image, command="vlm", model="qwen-3b", language="English", runner=runner)
+    argv = runner.calls[0]["argv"]  # type: ignore[attr-defined]
+    assert argv == ["vlm", "--model", "qwen-3b", str(image)]
+
+
+def test_a_runner_that_ignores_env_still_works(tmp_path: Path):
+    """Simulates a third-party command that never reads the variable: it must
+    still produce a description, not an error."""
+    result = describe_image(
+        tmp_path / "f.png", command="vlm", language="English", runner=_runner("plain caption")
+    )
+    assert result == "plain caption"
+
+
+def test_bundled_wrapper_imports_no_xbrain_module():
+    """`scripts/xbrain-vision` runs under the SYSTEM python, which has no xbrain
+    installed, so it must stay stdlib-only. The tempting regression is
+    `from xbrain.vision import PROMPT_ENV_VAR` to stop repeating the env-var name
+    — which a plain `"import xbrain" not in source` check would NOT catch, because
+    the word order is reversed. Match both forms."""
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scripts/xbrain-vision").read_text()
+    assert not re.search(r"^\s*(?:import|from)\s+xbrain\b", source, re.MULTILINE)

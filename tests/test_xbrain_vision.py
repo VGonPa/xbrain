@@ -60,3 +60,44 @@ def test_main_prints_description_and_returns_0(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sys, "argv", ["xbrain-vision", "--model", "opus", str(img)])
     assert xv.main() == 0
     assert "Un gráfico de barras." in capsys.readouterr().out
+
+
+def test_prompt_prefers_the_injected_rubric(monkeypatch):
+    """xbrain injects the frame rubric as XBRAIN_VISION_PROMPT; the wrapper is the
+    reference implementation of that contract, so it must USE it rather than its
+    own constant. Read at CALL time, so a value set after import still applies."""
+    monkeypatch.setenv("XBRAIN_VISION_PROMPT", "transcribe verbatim, injected")
+    assert xv._prompt() == "transcribe verbatim, injected"
+
+
+def test_prompt_falls_back_when_the_env_var_is_absent(monkeypatch):
+    """Run bare, outside xbrain, the script still needs a working prompt — an empty
+    one would produce a useless caption instead of an error."""
+    monkeypatch.delenv("XBRAIN_VISION_PROMPT", raising=False)
+    assert xv._prompt() == xv._FALLBACK_PROMPT
+
+
+def test_prompt_treats_a_blank_env_var_as_absent(monkeypatch):
+    """A variable set to whitespace is a misconfiguration, not an instruction to
+    send the model nothing."""
+    monkeypatch.setenv("XBRAIN_VISION_PROMPT", "   \n  ")
+    assert xv._prompt() == xv._FALLBACK_PROMPT
+
+
+def test_fallback_prompt_still_demands_verbatim_transcription():
+    """The fallback is a real prompt, not a stub: a bare run must still get the
+    discipline #90 exists to enforce, or the caption silently paraphrases again."""
+    assert "VERBATIM" in xv._FALLBACK_PROMPT
+    assert xv._FALLBACK_PROMPT.strip()
+
+
+def test_wrapper_and_xbrain_agree_on_the_env_var_name():
+    """The two halves of the injection contract spell this string INDEPENDENTLY —
+    the wrapper cannot import xbrain (it runs under the system python), so the
+    duplication is deliberate. Nothing else pins them equal: rename either side and
+    every test still passes while production silently falls back to the weaker
+    built-in prompt, reverting this whole change with no failure anywhere.
+    """
+    from xbrain.vision import PROMPT_ENV_VAR
+
+    assert xv._PROMPT_ENV_VAR == PROMPT_ENV_VAR

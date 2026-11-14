@@ -1,0 +1,243 @@
+# La batería dirigida del §15 del Plan 02, VERSIONADA — la fila del §5.3 que no tenía listón.
+#
+# POR QUÉ EXISTE. El §5.3 del documento de entrega atómica hereda de `b61e04b` una fila
+# «batería dirigida sobre los 15 criterios del Plan 02 §15 | 106 passed» y manda re-derivarla
+# sobre `SNAPSHOT_FUENTE`. Nunca se re-derivó, y la razón medida es que **la selección no
+# existía en ninguna parte**: vivía en la prosa de un informe de revisión, en catorce bloques
+# `pytest -q` sueltos, y un número sin su selección es exactamente lo que la regla 2 prohíbe.
+#
+# EL 106 NO SE REPRODUCE, y decirlo cuesta menos que publicarlo otra vez. Reconstruidas las
+# listas del gate Codex de `b61e04b` (tag `plan02/pre-b1b2`) y ejecutadas SOBRE ESE MISMO
+# ÁRBOL, las cuatro lecturas defendibles de «las listas que el gate usó» dan:
+#
+#     81   criterios 1–10, 12, 13, 14 + §12 seguridad   (la descripción literal de la ronda 08)
+#     83   lo anterior + los dos tests nuevos de A-2 y M-4
+#    104   todos los node ids del informe entero, sin el fichero completo de `render`
+#    112   lo anterior + `test_an_unreadable_store_…` (parametrizado ×8)
+#
+# Ninguna es 106. El comando que las re-deriva está en `scripts/plan02-acceptance.sh`.
+# Así que este fichero NO intenta resucitar el 106: fija un listón que sí se puede volver a
+# medir, sobre los node ids que existen en ESTE árbol, y deja el 106 como historia.
+#
+# QUÉ GUARDA. `tests/test_plan02_acceptance.py` falla si un node id de aquí deja de existir,
+# si un criterio se queda sin tests, o si el total listado se mueve sin que `listed_nodes`
+# se mueva con él. Ésa es la mitad fail-closed (regla 11: quitar una entrada bloquea).
+# `scripts/plan02-acceptance.sh` ejecuta la selección e imprime el recuento: ésa es la mitad
+# de medición, y el número va con su comando (§6.6).
+#
+# PROCEDENCIA. `from:` nombra el node id de `b61e04b` cuando el nombre de hoy no es aquél, con
+# el porqué al lado. Sin ese campo, un renombrado y una pérdida se leen igual.
+version: 1
+source_gate: zz-support-files/docs/code-reviews/2026-09-01-plan-02-indice-lexico-gate-codex-b61e04b.md
+source_tree: b61e04bc57ef03c56319e8180d42efebc45d179f  # tag plan02/pre-b1b2
+# Node ids listados (ficheros completos cuentan como uno). Es el listón fail-closed: bajarlo
+# exige editar esta línea, que es precisamente la edición que se quiere ver en un diff.
+#
+# 63 -> 71 en la pasada de corrección del hijo de paridad: +7 por los criterios 4c y 4d, que
+# estaban en el §15 y en NINGUNA de las dos listas (ni seleccionados ni declarados), y +1 por
+# `test_eval_does_not_write_to_the_store`, el guardián de escritura del comando que este hijo
+# cambia. Los ocho tests ya existían en el árbol: era una laguna de SELECCIÓN, no de cobertura.
+listed_nodes: 71
+
+# Los criterios del §15 que NO son una selección de tests, declarados en vez de omitidos: la
+# diferencia entre «no está» y «no puede estar» es la que un lector no puede reconstruir solo.
+not_a_test_selection:
+  - id: 4e
+    title: Se declara lo que la señal barata no ve
+    why: >-
+      el propio §15 lo llama «criterio de documentación, verificable leyendo: si aparece la
+      promesa, el criterio falla». Lo que exige es la AUSENCIA de una frase —que ningún texto
+      del plan prometa frescura a partir de `mtime`+tamaño— y una ausencia en prosa no tiene
+      node id. Lo guarda la prosa declarada de `index_build.StoreSignal` y el §«Known limits»
+      de `docs/knowledge-index.md`, no este fichero.
+  - id: "15"
+    title: Gate general sobre la integración con develop
+    why: >-
+      es `bash scripts/check.sh` sobre el árbol del merge, no una selección de `pytest`. Su
+      conclusión impresa es el listón, y lo guardan `tests/test_ci_workflow.py` y
+      `tests/test_quality_gate_scope.py`, no este fichero.
+
+criteria:
+  - id: "1"
+    title: Build real y manifest completo
+    tests:
+      - node: tests/test_knowledge_index_build.py::test_build_writes_a_manifest_with_every_field_the_spec_requires
+
+  - id: "2"
+    title: "`index status --json`"
+    # El gate lo comprobó ejecutando el comando contra el corpus real, sin `pytest`. El
+    # equivalente ejecutable de hoy es el test de la CLI que lee el manifest del fichero.
+    tests:
+      - node: tests/test_knowledge_index_cli.py::test_index_status_json_carries_the_manifest_the_file_holds
+        from: "(ninguno — el gate usó `xbrain index status --json` sobre el corpus real)"
+        why: un comando sobre el corpus real no es re-ejecutable en CI; el test de la CLI sí
+
+  - id: "3"
+    title: Update 0/1 item, incluido item sin content
+    tests:
+      - node: tests/test_knowledge_index_invalidation.py::test_update_with_no_changes_writes_nothing
+      - node: tests/test_knowledge_index_invalidation.py::test_update_touches_only_the_changed_item
+      - node: tests/test_knowledge_index_invalidation.py::test_update_detects_a_summary_change_on_an_item_with_no_content
+      - node: tests/test_knowledge_index_invalidation.py::test_the_manifest_counts_match_the_database_after_every_update
+
+  - id: "4"
+    title: Fingerprint corrupto excluido y contado
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_a_chunk_with_a_manipulated_fingerprint_is_excluded_and_counted
+
+  - id: 4b
+    title: Store cambiado sin reindexar (A-2)
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_editing_the_store_without_reindexing_declares_the_index_behind
+      - node: tests/test_knowledge_index_build.py::test_status_reports_how_many_items_changed
+
+  - id: 4c
+    title: La señal vigila las TRES entradas, una por una (no sólo `items.json`)
+    # El criterio dice «lo mismo por las otras dos entradas, una por una» y remata: «la señal
+    # no es sólo del store, y este criterio es el que impide que se vuelva a serlo». Las dos
+    # mitades: la puerta de consulta (qué declara `search` al tocar cada fichero) y la señal
+    # misma (qué mira, y que siga siendo barata).
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_editing_topics_or_vocab_without_reindexing_declares_the_index_behind
+      - node: tests/test_knowledge_index_build.py::test_the_query_time_signal_watches_each_of_the_three_inputs
+      - node: tests/test_knowledge_index_build.py::test_the_store_signal_is_one_stat_per_input_and_nothing_else
+      - node: tests/test_knowledge_index_build.py::test_the_signal_has_six_fields_in_order_none_defaulted_and_is_frozen
+
+  - id: 4d
+    title: El manifest nunca sella el centinela — la consulta responde, la carga levanta
+    # La asimetría del criterio es literal: «con una entrada obstruida, `build` levanta en vez
+    # de sellar `(-1,-1)`; y en consulta esa misma obstrucción responde declarando el índice
+    # detrás». Un test por cada mitad, más el que cierra el único camino que esquiva al
+    # escritor: un `manifest.json` editado a mano.
+    tests:
+      - node: tests/test_knowledge_index_build.py::test_an_input_that_cannot_be_stat_ed_answers_for_a_query_and_raises_for_a_load
+      - node: tests/test_knowledge_index_build.py::test_an_unreadable_input_is_an_error_never_an_empty_one
+      - node: tests/test_knowledge_manifest.py::test_the_unstattable_sentinel_cannot_be_SEALED_by_a_hand_edited_manifest
+
+  - id: "5"
+    title: "`SearchResponse` congelado, y la página que se declara truncada (M-4)"
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_search_returns_a_valid_frozen_response
+      - node: tests/test_knowledge_search_service.py::test_a_page_shorter_than_the_ranking_is_declared_and_its_cursor_continues
+        from: tests/test_knowledge_search_service.py::test_a_page_shorter_than_the_ranking_is_truncated_with_a_cursor_that_continues
+        why: renombrado en el umbrella; mismo cuerpo, `truncated` medido y cursor que continúa
+
+  - id: "6"
+    title: Los ocho filtros, ambos planos y antes de score
+    tests:
+      - node: tests/test_knowledge_lexical.py::test_filter_created_from_and_to
+      - node: tests/test_knowledge_lexical.py::test_filter_source
+      - node: tests/test_knowledge_lexical.py::test_filter_author
+      - node: tests/test_knowledge_lexical.py::test_filter_topics
+      - node: tests/test_knowledge_lexical.py::test_filter_content_kinds
+      - node: tests/test_knowledge_lexical.py::test_filter_origins
+      - node: tests/test_knowledge_lexical.py::test_filter_has_surfaces
+      - node: tests/test_knowledge_lexical.py::test_every_declared_filter_is_actually_pushed_to_sql
+      - node: tests/test_knowledge_lexical.py::test_the_filter_is_applied_before_scoring_not_after
+      - node: tests/test_knowledge_lexical.py::test_the_profile_plane_honours_the_same_filters
+      - node: tests/test_knowledge_lexical.py::test_every_declared_filter_is_pushed_on_the_profile_plane_too
+      - node: tests/test_knowledge_lexical.py::test_item_scoped_filters_exclude_topic_chunks
+      - node: tests/test_knowledge_search_service.py::test_an_origin_filter_never_admits_a_profile_only_candidate
+      # Añadido por el hijo de paridad del evaluador: los ocho filtros del índice persistido
+      # son puntuables también en el ARNÉS, derivados del contrato congelado. Sin esto, el
+      # criterio 6 se cumplía en `search` y no en la cifra que el Plan 03 tiene que batir.
+      - node: tests/test_knowledge_evaluation.py::test_the_supported_filter_set_is_DERIVED_from_the_frozen_contract
+      - node: tests/test_knowledge_evaluation.py::test_the_lexical_strategy_now_scores_the_filter_stratum
+
+  - id: "7"
+    title: Agrupación y máximo de tres matches
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_a_long_transcript_yields_one_result_with_at_most_three_matches
+
+  - id: "8"
+    title: Summary conduce a fuente o declara ausencia
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_a_summary_match_points_at_the_underlying_article
+      - node: tests/test_knowledge_search_service.py::test_a_derived_match_with_no_primary_source_says_so
+
+  - id: 8b
+    title: Verification sale del store vivo
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_a_verdict_revoked_without_reindexing_is_not_shown
+
+  - id: "9"
+    title: "`get` sin índice, completo y paginado, con y sin query"
+    tests:
+      - node: tests/test_knowledge_get_service.py::test_get_works_with_the_index_directory_deleted
+      - node: tests/test_knowledge_get_service.py::test_get_with_a_query_also_works_without_the_index
+      - node: tests/test_knowledge_get_service.py::test_get_returns_the_whole_article_body_untruncated
+      - node: tests/test_knowledge_get_service.py::test_a_body_over_the_budget_is_paginated_not_cut
+      - node: tests/test_knowledge_get_service.py::test_the_cursor_continues_where_the_previous_call_stopped
+      - node: tests/test_knowledge_get_service.py::test_a_query_over_the_budget_paginates_with_a_cursor_that_continues
+      - node: tests/test_knowledge_get_service.py::test_a_query_cursor_is_refused_without_its_query_and_vice_versa
+
+  - id: "10"
+    title: Fetch fallido estructurado
+    tests:
+      - node: tests/test_knowledge_get_service.py::test_get_returns_a_failed_fetch_as_structured_state
+      - node: tests/test_knowledge_get_service.py::test_get_returns_unfetched_links_with_their_reason
+      - node: tests/test_knowledge_get_service.py::test_asking_for_a_failed_surface_answers_with_the_failure
+
+  - id: "11"
+    title: Baseline léxico — la profundidad se cuenta en owners y la estrategia publicada es la que corrió
+    # El gate lo cubrió con una MEDICIÓN sobre el corpus real (`xbrain eval`), no con tests, y
+    # el §15 declara los criterios 11 y 12 «mediciones locales, no checks de CI». La exención
+    # cubre la medición, no el instrumento: éstas son las propiedades sin las cuales la cifra
+    # publicada no describe su instrumento (residuo §4.1 del informe del §5).
+    tests:
+      - node: tests/test_knowledge_evaluation.py::test_recall_at_k_is_independent_of_the_other_ks_requested
+      - node: tests/test_knowledge_evaluation.py::test_the_depth_is_counted_in_owners_and_published
+      - node: tests/test_knowledge_evaluation.py::test_a_ranking_that_ran_out_of_depth_says_so_rather_than_reporting_a_short_list
+      - node: tests/test_knowledge_evaluation.py::test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran
+      - node: tests/test_knowledge_evaluation.py::test_the_guardrail_no_longer_depends_on_vector_being_unimplemented
+      - node: tests/test_knowledge_evaluation.py::test_the_harness_scores_the_index_the_writer_produces_not_a_second_walk
+
+  - id: "12"
+    title: Sweep y fixture de caracterización
+    tests:
+      - node: tests/test_knowledge_evaluation.py::test_the_sweep_scores_every_combination_and_ranks_them
+      - node: tests/test_knowledge_evaluation.py::test_the_sweep_reports_the_chunk_count_so_a_tie_can_be_broken
+      - node: tests/test_knowledge_evaluation.py::test_the_sweep_publishes_recall_at_1_and_names_the_criterion_that_decided
+      - node: tests/test_knowledge_evaluation.py::test_a_flat_sweep_says_it_is_flat
+      - node: tests/test_knowledge_evaluation.py::test_the_sweep_cannot_move_the_characterization_fixture
+      - node: tests/test_knowledge_lexical.py::test_ranking_matches_the_characterization_fixture
+      - node: tests/test_knowledge_lexical.py::test_the_measured_winner_has_its_own_pinned_ranking
+
+  - id: "13"
+    title: Ningún comando escribe el store
+    tests:
+      - node: tests/test_knowledge_index_cli.py::test_no_command_of_this_plan_writes_to_the_store
+        from: tests/test_knowledge_cli.py::test_no_command_of_this_plan_writes_to_the_store
+        why: >-
+          el fichero se partió en 02.12 (#171). El sucesor es ESTRICTAMENTE más fuerte: cubre
+          `index build` y hashea las TRES entradas, no sólo `items.json`, así que subsume
+          también `test_build_does_not_touch_items_json`, que el umbrella no conserva
+      - node: tests/test_knowledge_search_service.py::test_search_does_not_touch_items_json
+      - node: tests/test_knowledge_get_service.py::test_get_does_not_touch_items_json
+      # `eval` es el cuarto comando del plan que lee el store, y el hijo de paridad del
+      # evaluador es justo el que lo hizo construir a través del escritor del índice: un
+      # arnés que ahora recorre el mismo `write_item` que `index build` es exactamente donde
+      # una escritura al store entraría sin que nadie la buscara. El guardián ya existía;
+      # sólo no estaba seleccionado.
+      - node: tests/test_knowledge_cli.py::test_eval_does_not_write_to_the_store
+
+  - id: "14"
+    title: VACUUM e invalidación física FTS
+    tests:
+      - node: tests/test_knowledge_index_schema.py::test_the_index_still_answers_the_same_after_a_vacuum
+      - node: tests/test_knowledge_index_schema.py::test_a_deleted_chunk_leaves_no_tokens_behind_for_a_reused_rowid
+      - node: tests/test_knowledge_index_schema.py::test_deleting_a_profile_removes_its_terms_from_the_index
+      - node: tests/test_knowledge_index_invalidation.py::test_a_removed_items_terms_are_retracted_from_the_index
+
+  - id: sec
+    title: Seguridad y prompt injection (§12)
+    tests:
+      - node: tests/test_knowledge_lexical.py::test_terms_are_still_data_and_never_syntax
+      - node: tests/test_knowledge_lexical.py::test_a_filter_value_containing_sql_is_bound_not_interpolated
+      # Fichero ENTERO, como en el gate. Subsume los dos node ids de la CLI que el gate listó
+      # aparte y que el umbrella no conserva con ese nombre:
+      #   test_a_bell_stored_in_a_post_does_not_reach_the_terminal_through_get
+      #     -> test_control_characters_in_a_body_never_reach_the_terminal
+      #   test_a_forged_author_does_not_reach_the_terminal_through_knowledge_inspect
+      #     -> test_the_inspect_view_cannot_forge_a_header_or_drive_the_terminal
+      - node: tests/test_knowledge_render.py

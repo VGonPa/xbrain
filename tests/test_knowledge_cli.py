@@ -1,0 +1,541 @@
+# tests/test_knowledge_cli.py
+"""`xbrain knowledge inspect` and `xbrain eval` (Plan 01 §8, step 29).
+
+Two commands, the minimum for the plan's exit gate to be DEMONSTRABLE rather than asserted:
+one that shows the unified corpus, and one that runs an evaluation which can fail.
+
+THE CONVENTION THEY FOLLOW is the one `list-videos` already established: `--json` writes a
+stable JSON document to stdout and NOTHING else, diagnostics go to stderr/logging (spec
+§3.7.9), and both commands are strictly read-only — no writes to the store, no snapshot.
+
+A single stray `print` in a `--json` path breaks every consumer downstream, and it breaks
+them with a parse error a long way from the cause, so it is tested by parsing the whole of
+stdout rather than by looking for a substring in it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+import yaml
+from typer.testing import CliRunner
+
+from xbrain.cli import app
+from xbrain.knowledge import contracts, evaluation
+
+FIXTURES = Path(__file__).parent / "fixtures"
+runner = CliRunner()
+
+
+@pytest.fixture()
+def workspace(tmp_path: Path, monkeypatch) -> Path:
+    """A repo-shaped temp dir with a data/ built from the fixture corpus."""
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "items.json").write_text(json.dumps(raw["items"], indent=2), encoding="utf-8")
+    (data / "topics.json").write_text(json.dumps(raw["topics"], indent=2), encoding="utf-8")
+    (data / "vocab.yaml").write_text(
+        yaml.safe_dump({"topics": list(raw["vocab"].values())}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    (tmp_path / "eval").mkdir()
+    shutil.copy(FIXTURES / "knowledge_goldenset.yaml", tmp_path / "eval" / "golden-set.yaml")
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "vault"\noutput_subdir = "x-knowledge"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def _json_stdout(result) -> dict | list:
+    """Parse the WHOLE of stdout. A stray log line makes this raise, which is the point."""
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# 29 — knowledge inspect
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_emits_pure_json_on_stdout(workspace: Path) -> None:
+    """Spec §3.7.9: JSON results never mix human diagnostics into stdout.
+
+    Parsed as a whole document, so one stray `print` fails this test instead of failing a
+    consumer's parser weeks later, far from the cause.
+    """
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
+    payload = _json_stdout(runner.invoke(app, ["knowledge", "inspect", "k08", "--json"]))
+    assert payload["item"]["item_id"] == "k08"
+    # The version of the shapes it dumps, read off the contract and never stamped by hand
+    # (U-1): the surfaces and chunks in this payload are the `EvidenceBundle`'s.
+    assert payload["schema_version"] == EVIDENCE_SCHEMA_VERSION == "2"
+
+
+def test_inspect_returns_surfaces_with_provenance_and_locator(workspace: Path) -> None:
+    """Acceptance 1: every surface carries origin, trust_class, attribution, locator and
+    fingerprint — the five things that make a fragment checkable rather than merely quoted."""
+    payload = _json_stdout(
+        runner.invoke(app, ["knowledge", "inspect", "k08", "--surfaces", "--json"])
+    )
+    surfaces = payload["surfaces"]
+    assert surfaces
+    for surface in surfaces:
+        assert surface["origin"] and surface["trust_class"] and surface["locator"]["kind"]
+        assert len(surface["fingerprint"]) == 64
+    kinds = {s["surface_type"] for s in surfaces}
+    assert {"video_transcript", "video_frame", "video_digest"} <= kinds
+
+
+def test_inspect_shows_the_quoted_author_not_the_poster(workspace: Path) -> None:
+    """The attribution rule, visible to a human at the CLI.
+
+    CLAUDE.md rule 7: before building an instrument to detect a defect, ask whether SHOWING
+    the evidence makes it self-evident. A reader who sees the quoted post's own handle beside
+    the poster's needs no judge to spot a mis-attribution.
+    """
+    payload = _json_stdout(
+        runner.invoke(app, ["knowledge", "inspect", "k07", "--surfaces", "--json"])
+    )
+    quoted = next(s for s in payload["surfaces"] if s["surface_type"] == "quoted_post")
+    assert quoted["attribution"]["handle"] == "othervoice"
+    assert payload["item"]["author"]["handle"] == "vgonpa"
+
+
+def test_inspect_reports_failures_and_unfetched_links(workspace: Path) -> None:
+    """A dead link is structured state, not a silence (spec §4)."""
+    payload = _json_stdout(runner.invoke(app, ["knowledge", "inspect", "k11", "--json"]))
+    assert payload["item"]["failed_sources"][0]["failure_reason"] == "not_found"
+    assert payload["item"]["unfetched_links"][0]["reason"] == "http_error"
+
+
+def test_inspect_can_return_chunks_verbatim(workspace: Path) -> None:
+    """Acceptance 4, at the CLI: the chunk offsets slice the surface back to the chunk."""
+    payload = _json_stdout(
+        runner.invoke(app, ["knowledge", "inspect", "k03", "--chunks", "--json"])
+    )
+    surfaces = {s["surface_id"]: s["text"] for s in payload["surfaces"]}
+    assert payload["chunks"]
+    for chunk in payload["chunks"]:
+        body = surfaces[chunk["surface_id"]]
+        assert body[chunk["char_start"] : chunk["char_end"]] == chunk["text"]
+
+
+def test_inspect_a_topic(workspace: Path) -> None:
+    payload = _json_stdout(
+        runner.invoke(
+            app, ["knowledge", "inspect", "--topic", "agent-evaluation", "--surfaces", "--json"]
+        )
+    )
+    assert payload["topic"]["slug"] == "agent-evaluation"
+    assert payload["topic"]["overview"]["origin"] == "llm"
+    assert {s["surface_type"] for s in payload["surfaces"]} >= {"topic_overview", "topic_note"}
+
+
+@pytest.mark.parametrize(
+    ("argv", "surface"),
+    [
+        (["knowledge", "inspect", "k08", "--json"], "_inspect_item"),
+        (["knowledge", "inspect", "--topic", "agent-evaluation", "--json"], "_inspect_topic"),
+    ],
+)
+def test_both_inspect_payloads_read_their_version_off_the_contract(
+    workspace: Path, monkeypatch, argv: list[str], surface: str
+) -> None:
+    """The stamp is DERIVED from `contracts.EVIDENCE_SCHEMA_VERSION`, not a literal that
+    currently agrees with it (U-1).
+
+    WHY EQUALITY IS NOT ENOUGH, and this test exists because the equality version was
+    measured NOT catching it: reverting `_inspect_topic` alone to a hardcoded `"1"` left the
+    whole suite green, because `"1"` is exactly what the contract says today. An assertion
+    that a payload equals the current number is satisfied by a payload that will never move
+    again — CLAUDE.md rule 1, satisfied for the wrong reason.
+
+    So the version is INJECTED instead. Both inspect helpers import the constant inside the
+    function body, at call time, which is what makes it reachable here; a hardcoded literal
+    cannot follow an injected value, so this goes red on the exact mutation the equality
+    assertion survived. The sentinel is deliberately a string no contract will ever declare,
+    so it cannot pass by coincidence at any future version.
+
+    Both payloads are covered because `_inspect_topic` had no assertion on its
+    `schema_version` at all: the item path was pinned and the topic path was free to drift.
+    """
+    import xbrain.knowledge.contracts as contracts
+
+    monkeypatch.setattr(contracts, "EVIDENCE_SCHEMA_VERSION", "sentinel-not-a-version")
+    payload = _json_stdout(runner.invoke(app, argv))
+    assert payload["schema_version"] == "sentinel-not-a-version", surface
+
+
+def test_inspect_an_unknown_item_is_an_actionable_error(workspace: Path) -> None:
+    result = runner.invoke(app, ["knowledge", "inspect", "nope", "--json"])
+    assert result.exit_code != 0
+
+
+def test_inspect_writes_nothing(workspace: Path) -> None:
+    """Read-only, asserted by hash. No snapshot either — there is nothing to snapshot."""
+    store = workspace / "data" / "items.json"
+    before = hashlib.sha256(store.read_bytes()).hexdigest()
+    runner.invoke(app, ["knowledge", "inspect", "k08", "--surfaces", "--chunks", "--json"])
+    assert hashlib.sha256(store.read_bytes()).hexdigest() == before
+    assert not (workspace / "data" / "snapshots").exists()
+
+
+# ---------------------------------------------------------------------------
+# 29 — eval
+# ---------------------------------------------------------------------------
+
+
+def test_eval_emits_metrics_per_stratum_and_declares_gaps(workspace: Path) -> None:
+    """Acceptance 9: per strategy x stratum x provenance, gaps declared, no invented zeros."""
+    payload = _json_stdout(runner.invoke(app, ["eval", "--strategy", "lexical", "--json"]))
+    assert payload["strategy"] == "lexical"
+    assert payload["by_stratum"]["expansion"] == {"coverage": "sin cobertura"}
+    assert "recall@10" not in payload
+    assert set(payload["by_provenance"]) == {"construido", "real"}
+
+
+def test_eval_writes_its_report_where_it_is_gitignored(workspace: Path) -> None:
+    """The report goes to `data/` (untracked), never to `eval/` (tracked).
+
+    The golden set is versioned because it is questions and ids; the report is not, because
+    it carries excerpts of the corpus. Putting the report in `eval/` would quietly publish
+    them.
+    """
+    result = runner.invoke(app, ["eval", "--report", "data/eval-report.json"])
+    assert result.exit_code == 0
+    assert json.loads((workspace / "data" / "eval-report.json").read_text())["strategy"]
+    assert "sin cobertura" in (workspace / "data" / "eval-report.md").read_text()
+
+
+def test_eval_can_fail_and_says_which_bucket(workspace: Path) -> None:
+    """Acceptance 10, at the CLI: a threshold turns the report into a gate that exits non-zero.
+
+    Run over the FIXTURE corpus, so this is the mechanical gate B1 bought — unlike the Plan
+    02 and 03 gates, which need the real corpus and are signed measurements instead.
+    """
+    ok = runner.invoke(app, ["eval", "--min-recall", "0.5", "--k", "20"])
+    assert ok.exit_code == 0
+    bad = runner.invoke(app, ["eval", "--min-recall", "1.0", "--k", "1"])
+    assert bad.exit_code != 0
+    assert "recall@1" in bad.output
+
+
+def test_eval_does_not_write_to_the_store(workspace: Path) -> None:
+    """Acceptance 11: the harness never modifies items.json."""
+    store = workspace / "data" / "items.json"
+    before = hashlib.sha256(store.read_bytes()).hexdigest()
+    runner.invoke(app, ["eval", "--json"])
+    assert hashlib.sha256(store.read_bytes()).hexdigest() == before
+
+
+def test_eval_reports_the_corpus_it_measured(workspace: Path) -> None:
+    """CLAUDE.md rule 2 at the boundary the user reads."""
+    payload = _json_stdout(runner.invoke(app, ["eval", "--json"]))
+    assert payload["corpus"]["items"] == 12
+    assert payload["corpus"]["chunks"] > 0
+
+
+# The strategy that CANNOT be measured, injected rather than borrowed (F-2).
+#
+# The two fail-closed tests below need a case no backend can score. Until the evaluator
+# regained its derived `SUPPORTED_FILTERS`, that was free: `lexical` could push only
+# `has_surfaces` and `origins`, so trimming the golden set to FX7 — a `source` filter —
+# left every bucket empty. Closing that gap removed the construction along with it, which
+# is rule 6 at work: the repair invalidated the evidence its own guards stood on.
+#
+# Borrowing the next unimplemented entry of the frozen `Strategy` literal would rebuild the
+# same coupling one level up — a fail-closed guard whose survival depends on Plan 03 not
+# landing. So the backend is INVENTED: it exists (`IMPLEMENTED_STRATEGIES`, or
+# `resolve_strategy` degrades it to `lexical` and every filter is pushed after all) and it
+# can push no filter at all (`SUPPORTED_FILTERS`).
+STUB_BACKEND = "stub_backend_that_pushes_no_filter"
+
+
+@pytest.fixture()
+def unscorable_strategy(monkeypatch) -> str:
+    """A retrieval backend that runs and can apply no filter, so a filtered case is UNMEASURED."""
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical", STUB_BACKEND}))
+    monkeypatch.setitem(evaluation.SUPPORTED_FILTERS, STUB_BACKEND, frozenset())
+    return STUB_BACKEND
+
+
+def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(
+    workspace: Path, unscorable_strategy: str
+) -> None:
+    """M2: a gate that compared the threshold against NOTHING must not report PASS.
+
+    `_failures` skips every bucket with no coverage and every metric carrying the sentinel —
+    correctly, because naming one would be the fabricated zero of spec §8.6.8. But `passed`
+    is literally "no failures", so when the threshold reaches no bucket at all the strictest
+    gate that exists comes out green over zero comparisons. That is the FAIL-OPEN cell of
+    CLAUDE.md rule 11, inside the command whose acceptance criterion 10 is "the evaluation
+    can fail".
+
+    Driven through the real CLI, because the exit code is the only surface a caller reads:
+    the golden set is trimmed to FX7, and the run is pointed at an INJECTED backend that can
+    push no filter at all, so the case is UNMEASURED and every bucket ends up empty. The
+    first version of this test used `lexical` for that, which stopped working the day the
+    evaluator regained all eight filters — see `unscorable_strategy`.
+    """
+    golden = yaml.safe_load((workspace / "eval" / "golden-set.yaml").read_text(encoding="utf-8"))
+    golden["cases"] = [c for c in golden["cases"] if c["id"] == "FX7"]
+    golden.pop("scenarios", None)
+    (workspace / "eval" / "golden-set.yaml").write_text(
+        yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["eval", "--min-recall", "1.0", "--strategy", unscorable_strategy])
+
+    assert result.exit_code != 0, (
+        "a threshold of 1.0 passed having scored zero cases:\n" + result.output
+    )
+    assert "0" in result.output and "medid" in result.output, result.output
+
+
+def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path) -> None:
+    """Plan 02 §7 at the command that has to exist for the number to be re-derivable: the
+    delivery matrix's row 02.13 lists `M cli.py (--sweep-chunker)` and its outcome is *«el
+    baseline léxico está medido y publicado»*. §15.12's signed-measurement half is exempt
+    from CI, the INSTRUMENT is not.
+
+    Driven through the real CLI, because the flag is what a reader runs to re-derive `800/0`.
+    Seen red before the wiring: `Error: No such option: --sweep-chunker`.
+    """
+    result = runner.invoke(app, ["eval", "--sweep-chunker", "target=800,1600 overlap=0", "--json"])
+    payload = _json_stdout(result)
+
+    assert [row["target"] for row in payload["rows"]] != []
+    assert {row["target"] for row in payload["rows"]} == {800, 1600}
+    assert all("recall@1" in row and "chunks" in row for row in payload["rows"])
+    # The ordinary report's path is NOT reused: a sweep and an evaluation are two documents.
+    assert (workspace / "data" / "eval-sweep.json").exists()
+    assert (workspace / "data" / "eval-sweep.md").exists()
+    assert not (workspace / "data" / "eval-report.json").exists()
+
+
+def test_the_sweep_ARTEFACTS_on_disk_name_the_retriever_that_ranked_them(
+    workspace: Path, monkeypatch
+) -> None:
+    """End of the chain: the two FILES a reader opens, not the in-process report object.
+
+    `data/eval-sweep.{json,md}` is the artefact Plan 03 has to beat, and it named no retriever
+    anywhere — `xbrain eval --strategy vector --sweep-chunker …` wrote a ranked table produced
+    entirely by bm25, with `strategy` absent from the JSON and absent from the markdown, while
+    the SAME command without `--sweep-chunker` headed its report «`lexical` · solicitada
+    `vector`, sin backend». One command, two branches, one of them silent about its instrument
+    (F-2). The report object is asserted in `tests/test_knowledge_evaluation.py`; this asserts
+    the bytes, because a field that never reaches the file is a field nobody reads.
+
+    The premise is pinned, not inherited: `vector` is the example of a declared-but-
+    unimplemented strategy and reading that from production would expire when Plan 03 lands.
+
+    Seen red before the fix: `"strategy" not in payload`, and the written markdown contained
+    the word `vector` nowhere.
+    """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
+    result = runner.invoke(
+        app, ["eval", "--strategy", "vector", "--sweep-chunker", "target=800,1600", "--json"]
+    )
+    payload = _json_stdout(result)
+
+    assert payload["strategy"] == "lexical", "what ran"
+    assert payload["requested_strategy"] == "vector", "what was asked for"
+    assert payload["degraded"] == ["vector_not_implemented"]
+
+    on_disk = json.loads((workspace / "data" / "eval-sweep.json").read_text(encoding="utf-8"))
+    assert on_disk["strategy"] == "lexical"
+    assert on_disk["requested_strategy"] == "vector"
+
+    markdown = (workspace / "data" / "eval-sweep.md").read_text(encoding="utf-8")
+    assert markdown.splitlines()[0].startswith("Recuperador: `lexical`")
+    assert "vector_not_implemented" in markdown.splitlines()[0]
+
+
+def test_eval_sweep_honours_and_publishes_the_limit(workspace: Path) -> None:
+    """`xbrain eval --limit 150 --sweep-chunker …` produced a report byte-identical to
+    `--limit 10` on the snapshot's real corpus, because `_run_sweep` never passed the option
+    the command advertised. The report carries the depth it ran at.
+    """
+    payload = _json_stdout(
+        runner.invoke(app, ["eval", "--limit", "150", "--sweep-chunker", "target=800", "--json"])
+    )
+    assert payload["limit"] == 150
+    default = _json_stdout(runner.invoke(app, ["eval", "--sweep-chunker", "target=800", "--json"]))
+    assert default["limit"] == 10
+
+
+def test_eval_sweep_ranks_at_the_k_the_command_was_given(workspace: Path) -> None:
+    """F2-1 of the final gate on #177: `--k` never reached the sweep. `_run_sweep` took no `k`
+    and called `sweep_chunker` without one, so the ranking always happened at the default 10:
+
+        eval --k 5 --sweep-chunker "target=800,1600" --json  ->  report k = 10
+        eval       --sweep-chunker "target=800,1600" --json  ->  report k = 10
+        payloads byte-identical: True
+
+    It is the same defect, in the same function, with the same byte-identical tell as the
+    `--limit` one the sweep commit says it fixed — and every `k=` in the sweep's own tests was
+    the default, so no test at any layer could have caught it. `sweep_chunker(k=…)` was always
+    correct; only the wiring was missing.
+
+    The DEFAULT is asserted as a control, so this cannot pass because 5 happened to be what
+    the command does anyway.
+    """
+    payload = _json_stdout(
+        runner.invoke(app, ["eval", "--k", "5", "--sweep-chunker", "target=800,1600", "--json"])
+    )
+    assert payload["k"] == 5, payload
+    assert all("recall@5" in row for row in payload["rows"]), payload["rows"]
+
+    default = _json_stdout(
+        runner.invoke(app, ["eval", "--sweep-chunker", "target=800,1600", "--json"])
+    )
+    assert default["k"] == 10, "the control moved: 5 was not distinguishable from the default"
+
+
+def test_eval_sweep_refuses_more_than_one_k_instead_of_picking_one(workspace: Path) -> None:
+    """`--k` is repeatable on the ordinary path — a report carries several columns — and the
+    sweep ranks by exactly ONE `recall@k`. Taking `max(k)` would discard the others in silence,
+    which is the defect this PR exists to close, one layer up. So the combination is REFUSED,
+    by name and with a non-zero exit.
+    """
+    result = runner.invoke(
+        app, ["eval", "--k", "1", "--k", "5", "--sweep-chunker", "target=800,1600"]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "--k" in result.output and "--sweep-chunker" in result.output, result.output
+    # And ONE value is honoured rather than refused along with the rest.
+    assert (
+        _json_stdout(
+            runner.invoke(app, ["eval", "--k", "5", "--sweep-chunker", "target=800", "--json"])
+        )["k"]
+        == 5
+    )
+
+
+def test_eval_sweep_refuses_a_threshold_it_cannot_apply(workspace: Path) -> None:
+    """F2-2 of the final gate on #177: `--min-recall` was accepted on the sweep path and
+    silently ignored, because `if sweep_chunker: _run_sweep(...); return` happens before the
+    threshold is ever used. Measured there, with the ordinary path as the control:
+
+        | threshold        | ordinary `eval` | `eval --sweep-chunker` |
+        | --min-recall 1.1 | exit 1          | exit 0                 |
+        | --min-recall 2.0 | exit 1          | exit 0                 |
+
+    The flag's own help promises *«si algún bucket queda por debajo, el comando falla»*, and
+    on the sweep path it judged nothing and exited 0 — the fail-open CLAUDE.md already records
+    for this exact flag. The threshold judges the BUCKETS of one evaluation; a sweep publishes
+    a table of combinations and has no bucket to compare against, so inventing a meaning for
+    it here would be a gate whose green a reader would misread. It is refused instead, which
+    is the one reading that cannot mislead.
+
+    Both halves are asserted: the sweep refuses, and the ordinary path still fails — so the
+    flag's promise is kept somewhere and the refusal is a narrowing, not a deletion.
+    """
+    swept = runner.invoke(
+        app, ["eval", "--min-recall", "2.0", "--sweep-chunker", "target=800,1600"]
+    )
+
+    assert swept.exit_code != 0, "the sweep accepted a threshold it never applied:\n" + swept.output
+    assert "--min-recall" in swept.output and "--sweep-chunker" in swept.output, swept.output
+
+    plain = runner.invoke(app, ["eval", "--min-recall", "2.0"])
+    assert plain.exit_code != 0, plain.output
+
+
+def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(
+    workspace: Path, unscorable_strategy: str
+) -> None:
+    """F2-3 at the surface a caller reads. A sweep whose every combination was unscorable
+    printed «PLANO: todas las combinaciones puntúan igual» and exited 0 — a positive claim
+    about a ranking that never happened, reported as a success.
+
+    The golden set is trimmed to FX7 and the run is pointed at an INJECTED backend that can
+    push no filter at all, so every case is UNMEASURED for every combination — the same
+    construction the threshold's own fail-closed test uses, and for the same reason it is an
+    injection rather than `lexical`.
+
+    The empty grid is asserted beside it because it is the same predicate — no winner — and
+    it used to publish `rows: []` with exit 0 as well.
+    """
+    golden = yaml.safe_load((workspace / "eval" / "golden-set.yaml").read_text(encoding="utf-8"))
+    golden["cases"] = [c for c in golden["cases"] if c["id"] == "FX7"]
+    golden.pop("scenarios", None)
+    (workspace / "eval" / "golden-set.yaml").write_text(
+        yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
+    )
+
+    unmeasured = runner.invoke(
+        app,
+        ["eval", "--sweep-chunker", "target=800,1600", "--strategy", unscorable_strategy],
+    )
+
+    assert unmeasured.exit_code != 0, "a sweep that scored nothing exited 0:\n" + unmeasured.output
+    assert "SIN MEDICIÓN" in unmeasured.output, unmeasured.output
+    assert "PLANO" not in unmeasured.output, unmeasured.output
+    # The table is still published: the run failed, the evidence is not withheld.
+    payload = json.loads((workspace / "data" / "eval-sweep.json").read_text(encoding="utf-8"))
+    assert payload["winner"] is None and payload["measured"] is False
+    assert len(payload["rows"]) == 2
+
+    empty = runner.invoke(app, ["eval", "--sweep-chunker", "target="])
+    assert empty.exit_code != 0, empty.output
+    assert "SIN COMBINACIONES" in empty.output, empty.output
+
+
+def test_eval_sweep_refuses_an_unknown_axis_through_the_command(workspace: Path) -> None:
+    """A typo that swept nothing would publish the DEFAULT's numbers under the name of a
+    sweep. The refusal has to reach the CLI's exit code, not only `parse_sweep`.
+    """
+    result = runner.invoke(app, ["eval", "--sweep-chunker", "targt=800"])
+
+    assert result.exit_code != 0, result.output
+    assert "desconocido" in result.output, result.output
+
+
+def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> None:
+    """m8, the other production caller: `knowledge inspect --chunks`.
+
+    The same defect and the same blind spot as the harness — measured, deleting
+    `blocks_by_surface_id=article_block_texts(item)` from `cli._inspect_item` left the full
+    suite green. Driven through the real command, because the CLI is what a consumer runs
+    and the argument lives in the CLI, not in the chunker.
+
+    The article fixture is IMPORTED, not copied: two literals that must agree about where a
+    block ends are two definitions that will drift (rule 5).
+    """
+    from tests.test_knowledge_chunking import _article_item, _discriminating_blocks
+
+    blocks = _discriminating_blocks()
+    item = _article_item(blocks)
+    store_path = workspace / "data" / "items.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store[item.id] = item.model_dump(mode="json")
+    store_path.write_text(json.dumps(store, indent=2, default=str), encoding="utf-8")
+
+    payload = _json_stdout(
+        runner.invoke(app, ["knowledge", "inspect", item.id, "--chunks", "--json"])
+    )
+    article = [c for c in payload["chunks"] if c["surface_type"] == "x_article"]
+
+    assert article, "the command emitted no article chunk at all"
+    edges, cursor = {0}, 0
+    for block in blocks:
+        cursor += len(block.text)
+        edges.add(cursor)
+    for chunk in article:
+        assert chunk["char_start"] in edges, (
+            f"`inspect --chunks` cut inside a block at {chunk['char_start']}: the command is "
+            "not handing the chunker the block boundaries"
+        )
+        assert chunk["char_end"] in edges

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
+from playwright.async_api import BrowserContext as AsyncBrowserContext
+from playwright.async_api import async_playwright
 from playwright.sync_api import BrowserContext, sync_playwright
 
 X_LOGIN_URL = "https://x.com/login"
+
+# One place for the launch flags, so the sync and async contexts cannot drift into
+# presenting two different browsers to X from the same account.
+_LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 
 
 def login(storage_state_path: Path) -> None:
@@ -47,15 +53,37 @@ def x_context(storage_state_path: Path, headless: bool = False) -> Iterator[Brow
             f"No hay sesión guardada en {storage_state_path}. Ejecuta `xbrain login`."
         )
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        browser = playwright.chromium.launch(headless=headless, args=_LAUNCH_ARGS)
         context = browser.new_context(storage_state=str(storage_state_path))
         try:
             yield context
         finally:
             browser.close()
+
+
+@asynccontextmanager
+async def x_context_async(
+    storage_state_path: Path, headless: bool = False
+) -> AsyncIterator[AsyncBrowserContext]:
+    """`x_context`, on the async driver — same session, same flags, same headful default.
+
+    Exists for the one workload that needs several tabs making progress at once
+    (`refetch_pool`). Playwright's sync API is single-threaded by contract, so the only
+    way to hold N tabs open under ONE browser is the async driver; driving N sync
+    Playwright instances from N threads would mean N browsers, which is precisely the
+    "stop opening browsers" this was built to fix.
+    """
+    if not storage_state_path.exists():
+        raise FileNotFoundError(
+            f"No hay sesión guardada en {storage_state_path}. Ejecuta `xbrain login`."
+        )
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=headless, args=_LAUNCH_ARGS)
+        context = await browser.new_context(storage_state=str(storage_state_path))
+        try:
+            yield context
+        finally:
+            await browser.close()
 
 
 def is_logged_out(page_url: str) -> bool:

@@ -51,6 +51,33 @@ pushed to `develop` actually produce a check run named `quality` that actually e
 gate? Reformatting the YAML while preserving that behaviour stays green; any edit that
 breaks it goes red, and says why in the failure message.
 
+A fifth arrived with the umbrella filter (c1d9f2b), and it deserves its own line because it
+breaks nothing structural — it edits one list:
+
+| Attack | Effect | Why the test missed it |
+|---|---|---|
+| `"VGonPa/umbrella-*"` → the two umbrella names the tests sample | every OTHER umbrella ungated; its child PRs go `CLEAN` with no check, then deadlock on the required context | the assertion asks "does THIS branch fire?", and a literal answers *yes* |
+
+Measured 2026-09-02: that edit in both trigger lists left this file, then 21 assertions
+strong, at **21 passed**. The
+assertions were about two branches; the property is about a PATTERN, and no sample the filter
+is allowed to contain can tell the two apart. `_UNENUMERATED_UMBRELLA_BRANCHES` and
+`_assert_sample_is_unenumerable` are the repair — probe with names the filter may not name.
+
+A sixth survived even that repair, because it attacked the INSTRUMENT rather than the filter:
+
+| Attack | Effect | Why the test missed it |
+|---|---|---|
+| `"VGonPa/umbrella-*"` → `"*"` in both lists | GitHub's `*` does not cross `/`, so develop and main stay gated and EVERY umbrella is ungated | the matcher was `fnmatch`, whose `*` DOES cross `/` — it answered the same question as Actions with the opposite answer |
+
+Measured 2026-09-02 on this tree: `branches: ["*"]` in both trigger lists against the guard as
+it stood at 6ed64d4 reported **30 passed** — a fully green file over a workflow that gates no
+umbrella whatsoever. The same mutant against the guard as it stands now reports **12 failed,
+21 passed**, the same shape as deleting the pattern outright (also 12 failed). The repair is
+`_github_filter_matches`, which models GitHub's `/` rule instead of inheriting `fnmatch`'s;
+the reason a *sample* could never have caught this is that the samples were right and the
+oracle reading them was wrong — rule 9, one level under the assertions.
+
 WHY A PR CANNOT BE TRUSTED TO POLICE ITS OWN GATE
 -------------------------------------------------
 A `pull_request` run uses the **HEAD version of the workflow**, not the base's. So a PR that
@@ -168,7 +195,7 @@ the moment you have read it — a probe carrying a gate-killing edit is one care
 a dead gate, so it never sits open.
 """
 
-import fnmatch
+import re
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +206,37 @@ _WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "
 
 # The branches that are merged INTO. A push to one of these IS a merge result.
 _GATED_BRANCHES = ("develop", "main")
+
+# A large initiative is delivered as a sequence of small child PRs onto a long-lived UMBRELLA
+# branch, and only the umbrella opens a PR to `develop`. Concrete branch names to test the
+# `VGonPa/umbrella-*` filter with — globs, not literals, so a real name is what must match.
+_UMBRELLA_BRANCHES = (
+    "VGonPa/umbrella-knowledge-index-lexical",
+    "VGonPa/umbrella-knowledge-embeddings",
+)
+
+# The umbrellas that do NOT exist yet — and that is the entire point of them.
+#
+# Every assertion about `_UMBRELLA_BRANCHES` above is satisfiable by LISTING those two names,
+# because they are real. Measured 2026-09-02 on this tree: replace `"VGonPa/umbrella-*"` with
+# the two literals `VGonPa/umbrella-knowledge-index-lexical` and
+# `VGonPa/umbrella-knowledge-embeddings` in BOTH trigger lists, and this file — as it stood
+# at c1d9f2b, 21 assertions — reports **21 passed**, while Plan 03's umbrella, Plan 04's,
+# and every umbrella cut after them get
+# no `quality` check at all. That is rule 11's FAIL-OPEN (the check still reports PASS while
+# gating less) arrived at through rule 1's shape (the assertion satisfied for the wrong
+# reason), and the enumerated names are structurally incapable of catching it, because they
+# ARE the enumeration.
+#
+# So the probe has to be a name the author of the filter could not have written down.
+# `_assert_sample_is_unenumerable` then refuses to let any of these appear in the filter, so
+# "list them too" is not a way to pass — it is a way to go red, with a message saying so.
+_UNENUMERATED_UMBRELLA_BRANCHES = (
+    "VGonPa/umbrella-knowledge-lexical-rescue",  # Plan 02, re-cut under a name nobody chose yet
+    "VGonPa/umbrella-knowledge-vector-index",  # Plan 03
+    "VGonPa/umbrella-knowledge-hybrid-ranking",  # Plan 04
+    "VGonPa/umbrella-2027-01-15-eval-harness",  # an awkward shape: dates, digits, many hyphens
+)
 
 # The status check name that branch protection on develop/main requires. This string is
 # NOT cosmetic: it is a contract with the repo settings. See the module docstring.
@@ -246,6 +304,40 @@ def _event(event: str) -> dict[str, Any] | None:
     return triggers[event] or {}  # `push:` with an empty body == every branch
 
 
+def _github_filter_matches(pattern: str, branch: str) -> bool:
+    """Does one GitHub branch-filter pattern match `branch`, by GitHub's rules and not fnmatch's?
+
+    Exactly one distinction is modelled, and it is the whole reason this function exists
+    instead of `fnmatch.fnmatch`: **`*` does not match `/`, and `**` does.** Every umbrella
+    name is `VGonPa/umbrella-<something>` — one `/`, always — so under `fnmatch` the single
+    edit `branches: ["*"]` matched every umbrella sample in this file and left the suite
+    green over a workflow that, in production, would gate `develop`, gate `main`, and gate
+    no umbrella at all. Pinned by
+    `test_branch_filter_matching_models_githubs_glob_and_not_fnmatchs` and, end to end,
+    by `test_a_filter_that_gates_no_umbrella_is_reported_as_gating_no_umbrella`.
+
+    Everything else in the pattern is LITERAL. GitHub's filter syntax also gives meaning to
+    `?`, `+` and `[]`, and this function gives them none: no filter in this repo uses one,
+    and modelling semantics nobody here has measured would be inventing a second instrument
+    to disagree with (rule 2). A filter that reaches for one is a deliberate change, and it
+    arrives with this function or not at all.
+    """
+    regex: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == "*":
+            if pattern[i + 1 : i + 2] == "*":
+                regex.append(".*")  # `**` crosses `/`
+                i += 2
+            else:
+                regex.append("[^/]*")  # `*` stops at `/` — the distinction that matters
+                i += 1
+        else:
+            regex.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(regex), branch) is not None
+
+
 def _matches_any(patterns: list[str], branch: str) -> bool:
     """Does `branch` match any GitHub branch-filter pattern?
 
@@ -255,13 +347,12 @@ def _matches_any(patterns: list[str], branch: str) -> bool:
     membership test concludes the gate still runs. Measured: that exact edit left an earlier
     version of this file green with the gate dead.
 
-    `fnmatch` treats `*` as matching across `/` where GitHub does not, which makes this
-    slightly MORE eager to conclude "this branch is matched". For the two slash-free branch
-    names we gate that distinction cannot arise, and erring toward "matched" fails safe in
-    both directions here: an over-eager match on `branches` says the gate runs (it does), and
-    on `branches-ignore` says it does not (which raises the alarm rather than suppressing it).
+    The glob is then modelled by `_github_filter_matches`, not by `fnmatch`. `fnmatch` was
+    the second version of this hole rather than the fix for the first: its `*` crosses `/`,
+    so it answered the same question as GitHub with the OPPOSITE answer for every branch
+    carrying a slash — which is every umbrella there will ever be.
     """
-    return any(fnmatch.fnmatch(branch, str(pattern)) for pattern in patterns)
+    return any(_github_filter_matches(str(pattern), branch) for pattern in patterns)
 
 
 def _fires_on_branch(event: str, branch: str) -> bool:
@@ -290,6 +381,51 @@ def _fires_on_branch(event: str, branch: str) -> bool:
         return not _matches_any(ignore, branch)
     branches = config.get("branches")
     return branches is None or _matches_any(branches, branch)
+
+
+def _assert_sample_is_unenumerable(branch: str) -> None:
+    """Fail unless `branch` is a legitimate probe for "the umbrella filter is a GLOB".
+
+    `_fires_on_branch` cannot tell a glob from a literal — it answers "would this exact name
+    fire?", and an enumeration of that exact name answers *yes*. So the discriminating power
+    does not live in the assertion; it lives in the CHOICE OF SAMPLE, and that choice is what
+    this function polices. Two preconditions, both load-bearing:
+
+    1. **The filter must not NAME it.** A sample the filter lists is satisfied by enumeration
+       and proves nothing about any other umbrella. Checked against the parsed `branches` list
+       of every gating event rather than the raw file text, so documenting a branch name in a
+       comment stays legal while listing it as a filter does not.
+    2. **No second `/`.** GitHub's filter `*` does not match `/`, so `VGonPa/umbrella-*`
+       genuinely does NOT gate `VGonPa/umbrella-knowledge/index`: such a name is ungated in
+       production, and a probe demanding it be gated would be asserting the opposite of the
+       live behaviour. `_github_filter_matches` now models that rule rather than inheriting
+       `fnmatch`'s (where `*` crosses `/`), so the ban is no longer papering over an
+       over-eager matcher — it is refusing a sample the correct matcher must answer `False`
+       for. Kept, not relaxed: the two-segment shape is not part of the umbrella topology,
+       and a probe that can only ever be red proves nothing about the filter.
+
+    Gutting this function re-opens the enumeration hole in silence, so it has a positive
+    control of its own: `test_the_unenumerable_precondition_can_actually_fail`.
+    """
+    for event in _GATING_EVENTS:
+        patterns = (_event(event) or {}).get("branches") or []
+        assert branch not in [str(pattern) for pattern in patterns], (
+            f"`{branch}` is enumerated verbatim in {_WORKFLOW.name}'s `{event}.branches`, so "
+            f"it can no longer prove anything: the assertions that use it are satisfied by "
+            f"the literal, exactly as they were on 2026-09-02 when the two real umbrella "
+            f"names were listed and all 21 assertions this file then carried stayed GREEN, "
+            f"with every other umbrella ungated.\n"
+            f"\n"
+            f"Listing an umbrella one-by-one is the defect, not the fix. Restore the glob "
+            f"(`VGonPa/umbrella-*`) and pick a probe name nobody has written down."
+        )
+    assert branch.count("/") == 1, (
+        f"`{branch}` carries more than one `/`, which makes it useless as a probe and worse "
+        f"than useless as reassurance. GitHub documents its filter `*` as not matching across "
+        f"`/` while `fnmatch`'s does, so `_matches_any` would report this branch GATED where "
+        f"GitHub skipped it — over-eagerness pointed at the exact property under test. "
+        f"Umbrella probes are `VGonPa/umbrella-<one segment>`."
+    )
 
 
 def _gate_job() -> dict[str, Any]:
@@ -369,6 +505,237 @@ def test_gate_still_runs_on_pull_request(branch: str) -> None:
         f"result does not replace testing the PR head: without this, a broken branch is "
         f"only caught AFTER it has already landed on `{branch}`."
     )
+
+
+@pytest.mark.parametrize("branch", _UMBRELLA_BRANCHES)
+def test_gate_runs_on_pull_request_to_umbrella(branch: str) -> None:
+    """A child PR onto an umbrella must produce the `quality` check — rule 14, and rule 12's trap.
+
+    Rule 14: a PR whose base is a feature branch runs no gate at all, and
+    `gh pr view --json mergeStateStatus` still says `CLEAN` — which means "nothing was
+    required", not "everything required passed". The umbrella topology puts every child PR in
+    exactly that position, so the trigger is what closes the hole.
+
+    And it is not merely a detector here. The umbrella carries classic branch protection with
+    `quality` as a REQUIRED context. Drop this branch filter and the required check is never
+    created, so GitHub waits for it forever: every child PR becomes permanently unmergeable —
+    the same shape as rule 12's approval trap, arrived at from the other side.
+    """
+    assert _fires_on_branch("pull_request", branch), (
+        f"quality.yml does not run on `pull_request` to `{branch}`. Child PRs onto the umbrella "
+        f"would produce NO check run, GitHub would report `CLEAN` for a PR nothing gated "
+        f"(rule 14) — and because the umbrella's branch protection REQUIRES the `quality` "
+        f"context, every child PR would then block forever on a check that never appears."
+    )
+
+
+@pytest.mark.parametrize("branch", _UMBRELLA_BRANCHES)
+def test_gate_runs_on_push_to_umbrella(branch: str) -> None:
+    """Rule 4 applies inside the umbrella too, and a push to it IS the merge result.
+
+    Two child PRs, each green against the umbrella it was opened from and with zero textual
+    conflict, can still merge into a RED umbrella — #103's mechanism, one level down. Nothing
+    would notice until the umbrella opened its PR to `develop`, by which point the bisect
+    surface is the whole initiative instead of one child.
+    """
+    assert _fires_on_branch("push", branch), (
+        f"quality.yml does not run on `push` to `{branch}`, so the merge of a child PR into "
+        f"the umbrella is never tested. Two children, each green on its own branch, can merge "
+        f"into a red umbrella with no conflict for git to report. See CLAUDE.md rule 4."
+    )
+
+
+@pytest.mark.parametrize("branch", _UNENUMERATED_UMBRELLA_BRANCHES)
+def test_pull_request_umbrella_filter_is_a_glob_not_an_enumeration(branch: str) -> None:
+    """The `pull_request` umbrella filter must gate a SHAPE, not the umbrellas that exist today.
+
+    The two tests above are real and they are also enumerable: they name two umbrellas that
+    exist, so `branches: [develop, main, "VGonPa/umbrella-knowledge-index-lexical",
+    "VGonPa/umbrella-knowledge-embeddings"]` satisfies both of them. Measured 2026-09-02 on
+    this tree, that exact edit in BOTH trigger lists left this file — 21 assertions, at
+    c1d9f2b — at **21 passed**: a
+    green suite over a filter that gates two branches and abandons every other umbrella. The
+    check kept reporting PASS while gating less, which is rule 11's fail-open, and it did so
+    because the assertion was satisfied for the wrong reason, which is rule 1's.
+
+    This test asks the question the other two cannot: does the filter cover an umbrella
+    NOBODY WROTE DOWN? `_assert_sample_is_unenumerable` first proves the filter does not name
+    this branch, so the only way to be gated is to be matched by a pattern — a glob.
+
+    What goes red: enumerating literals; narrowing the glob to `VGonPa/umbrella-knowledge-*`;
+    dropping the umbrella pattern from `pull_request` while keeping it under `push`; deleting
+    it outright. What stays green: any spelling that still matches arbitrary umbrella names.
+    """
+    _assert_sample_is_unenumerable(branch)
+    assert _fires_on_branch("pull_request", branch), (
+        f"quality.yml does not run on `pull_request` to `{branch}` — an umbrella that appears "
+        f"in NO branch filter. So the filter gates the umbrellas someone happened to list, "
+        f"not the shape `VGonPa/umbrella-*`, and the next initiative to cut one gets child "
+        f"PRs with no check run at all: GitHub reports `mergeStateStatus: CLEAN` for a PR "
+        f"nothing gated (rule 14), and the umbrella's own branch protection — which REQUIRES "
+        f"the `quality` context — then blocks every child of it forever, which is rule 12's "
+        f"trap reached from the other side.\n"
+        f"\n"
+        f"Fix the FILTER, never this list: `pull_request.branches` must carry a pattern that "
+        f"matches umbrella names nobody has chosen yet."
+    )
+
+
+@pytest.mark.parametrize("branch", _UNENUMERATED_UMBRELLA_BRANCHES)
+def test_push_umbrella_filter_is_a_glob_not_an_enumeration(branch: str) -> None:
+    """The same question for `push`, and it is a different failure — so it is a separate test.
+
+    `pull_request` failing means child PRs are ungated or deadlocked. `push` failing means the
+    merge of a child INTO the umbrella is never tested: rule 4 one level down, where two
+    children each green against the umbrella they saw merge into a red umbrella with no
+    textual conflict for git to report. The two triggers can be broken independently — a glob
+    under one and literals under the other is a single-line edit — so asserting them together
+    would hide which half died.
+    """
+    _assert_sample_is_unenumerable(branch)
+    assert _fires_on_branch("push", branch), (
+        f"quality.yml does not run on `push` to `{branch}` — an umbrella that appears in NO "
+        f"branch filter. Any umbrella not written down by hand goes untested at its merges, "
+        f"so two child PRs, each green against the umbrella they were opened from, can land "
+        f"a RED umbrella that nothing notices until it opens its PR to `develop` — by which "
+        f"point the bisect surface is the whole initiative. See CLAUDE.md rule 4."
+    )
+
+
+# The two tests above ask `_fires_on_branch`, and `_fires_on_branch` is only as truthful as
+# the glob it models. That is where the guard was still blind. `fnmatch`'s `*` crosses `/`
+# and GitHub's documented filter `*` does not, so `branches: [develop, main, "*"]` — or a
+# bare `"*"` — in BOTH trigger lists left every assertion in this file GREEN (`fnmatch` says
+# `*` matches `VGonPa/umbrella-knowledge-vector-index`) while GitHub Actions would have gated
+# `develop`, gated `main`, and gated NOT ONE umbrella, because every umbrella name carries a
+# `/`. That is rule 11's fail-open — the check still reports PASS while gating less — reached
+# through rule 9: two instruments answering the same question with opposite answers, and this
+# file reading the wrong one.
+#
+# The pair below is the negative control. The first pins the matcher itself; the second pins
+# what the matcher is FOR, end to end, against a forged workflow carrying the exact two
+# filters that must not be allowed to look gated.
+
+
+def test_branch_filter_matching_models_githubs_glob_and_not_fnmatchs() -> None:
+    """GitHub's filter `*` does not cross `/`. `fnmatch`'s does, and that gap is exploitable.
+
+    Every umbrella name is `VGonPa/umbrella-<something>` — one `/`, always. So the single
+    edit `branches: ["*"]` is the whole attack: it looks maximally permissive, it satisfies a
+    `fnmatch`-backed matcher for every sample this file owns, and in production it gates the
+    slash-free branches only. The umbrella tests would report the shape covered while no
+    umbrella was covered at all.
+
+    Only `*` and `**` are modelled. GitHub's `?`, `+` and `[]` are not, and they are treated
+    as literal characters — nothing in this repo's filters uses them, and inventing semantics
+    for them would be pinning behaviour nobody has measured. If one ever appears in a filter,
+    that is a deliberate change and it should arrive with this function.
+    """
+    assert _matches_any(["*"], "develop"), "a slash-free branch IS matched by `*`"
+    assert not _matches_any(["*"], "VGonPa/umbrella-knowledge-vector-index"), (
+        "`*` was reported as matching a branch containing `/`. GitHub documents the opposite, "
+        'so a filter of `["*"]` would gate develop/main and NO umbrella while this file '
+        "called every umbrella gated — the fail-open this whole module exists to refuse."
+    )
+    assert _matches_any(["**"], "VGonPa/umbrella-knowledge-vector-index"), (
+        "`**` is the spelling that DOES cross `/`; refusing it would make the matcher unable "
+        "to see a real catch-all, which is the alarm-suppressing direction."
+    )
+    assert _matches_any(["VGonPa/umbrella-*"], "VGonPa/umbrella-knowledge-vector-index")
+    assert not _matches_any(["VGonPa/umbrella-*"], "VGonPa/umbrella-knowledge/index"), (
+        "the live glob must not be reported as covering a two-segment umbrella name: GitHub "
+        "would skip it, and `_assert_sample_is_unenumerable` bans such probes for this reason"
+    )
+    assert not _matches_any(["VGonPa/umbrella-*"], "develop")
+    assert not _matches_any(["develop"], "develop-2"), "a literal pattern stays anchored"
+
+
+@pytest.mark.parametrize(
+    ("branches", "what_is_wrong_with_it"),
+    [
+        ('[develop, main, "*"]', "the catch-all `*`, which GitHub does not apply across `/`"),
+        ("[develop, main]", "no umbrella pattern at all"),
+    ],
+)
+def test_a_filter_that_gates_no_umbrella_is_reported_as_gating_no_umbrella(
+    branches: str,
+    what_is_wrong_with_it: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The umbrella tests must be able to FAIL, and these are the two filters that must fail them.
+
+    Deleting the pattern is the obvious edit and it was already caught. `["*"]` is the one
+    that was not: it reads as "gate everything", it is shorter than what it replaces, and
+    until the matcher modelled GitHub's `/` rule it turned this entire file green over a
+    workflow that gated no umbrella whatsoever.
+
+    Forged workflow, not the real one, and for the reason the neighbouring positive control
+    gives: a control that fails against the live file cannot tell "the guard is broken" from
+    "the filter is broken", which is rule 9 committed inside the file that documents rule 9.
+    `develop` is asserted STILL gated in both cases, so a matcher that simply refused
+    everything could not pass this test either.
+    """
+    forged = tmp_path / "quality.yml"
+    forged.write_text(
+        f"name: Quality\non:\n  push:\n    branches: {branches}\n"
+        f"  pull_request:\n    branches: {branches}\njobs: {{}}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "_WORKFLOW", forged)
+
+    for event in _GATING_EVENTS:
+        assert _fires_on_branch(event, "develop"), (
+            f"the forged filter {branches} does gate `develop`; a control that reported "
+            f"otherwise would be measuring a broken matcher, not a broken filter"
+        )
+        for branch in _UNENUMERATED_UMBRELLA_BRANCHES:
+            assert not _fires_on_branch(event, branch), (
+                f"`{event}.branches: {branches}` carries {what_is_wrong_with_it}, so GitHub "
+                f"creates no `quality` check for `{branch}` — yet this file reports it gated. "
+                f"With that answer, `test_{event}_umbrella_filter_is_a_glob_not_an_"
+                f"enumeration` passes over an ungated umbrella: child PRs go `CLEAN` with "
+                f"nothing required (rule 14) and then deadlock on the required context "
+                f"(rule 12's trap from the other side)."
+            )
+
+
+def test_the_unenumerable_precondition_can_actually_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_assert_sample_is_unenumerable` must be able to REFUSE, or the two tests above are theatre.
+
+    It is the only thing standing between "the filter gates a shape" and "the filter happens
+    to list my four samples", and a precondition that cannot fire is decoration — rule 1: an
+    assertion you have never watched fail is not protecting anything. Gut the helper to `pass`
+    (the obvious way to make the umbrella tests green again without repairing the filter) and
+    this test goes red.
+
+    It runs against a FORGED workflow rather than the real one, and that is not squeamishness.
+    An earlier draft used `develop` as the positive control because the live filter lists it —
+    and `branches: ["*"]`, which lists nothing literally, turned this test red while reporting
+    that the precondition was broken. It was not: the control was. A guard whose failure names
+    the wrong surface is rule 9 committed inside the file that documents rule 9.
+
+    Both directions are pinned, because a helper that refuses EVERYTHING would also make the
+    umbrella tests unfalsifiable — loudly, but unfalsifiably.
+    """
+    forged = tmp_path / "quality.yml"
+    forged.write_text(
+        "name: Quality\n"
+        "on:\n"
+        '  push:\n    branches: [develop, "VGonPa/umbrella-listed-by-hand"]\n'
+        '  pull_request:\n    branches: [develop, "VGonPa/umbrella-listed-by-hand"]\n'
+        "jobs: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "_WORKFLOW", forged)
+
+    with pytest.raises(AssertionError, match="enumerated verbatim"):
+        _assert_sample_is_unenumerable("VGonPa/umbrella-listed-by-hand")
+    with pytest.raises(AssertionError, match="more than one"):
+        _assert_sample_is_unenumerable("VGonPa/umbrella-knowledge/index")
+    _assert_sample_is_unenumerable("VGonPa/umbrella-not-listed-by-anyone")
 
 
 @pytest.mark.parametrize("event", _GATING_EVENTS)
