@@ -156,7 +156,7 @@ def test_refresh_media_snapshots_before_capture_even_on_failure(tmp_path: Path, 
         yield object()
 
     def _raise(*_args, **_kwargs):
-        raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+        raise RuntimeError("X session expired. Run `xbrain login`.")
 
     monkeypatch.setattr(cli, "x_context", _ctx)
     monkeypatch.setattr(cli, "extract_source", _raise)
@@ -294,7 +294,7 @@ def test_digest_video_all_failure_no_snapshot(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["digest-video", "--ids", "42"])
 
     assert result.exit_code == 0, result.stdout
-    assert "fallidos 1" in result.stdout
+    assert "failed 1" in result.stdout
     assert items_path.read_bytes() == before  # nothing written
     assert snapshot_list(tmp_path / "data") == []
 

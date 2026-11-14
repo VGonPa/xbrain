@@ -349,10 +349,10 @@ def test_a_strategy_that_is_not_in_the_contract_is_refused_before_any_work(
     missing index separates the two: refusing FIRST raises our error, refusing last raises
     `IndexMissingError`, and only one of those can happen.
 
-    Seen red before the fix: `IndexMissingError: No hay índice en ...`.
+    Seen red before the fix: `IndexMissingError: There is no index at ...`.
     """
     nowhere = replace(context, index_dir=context.index_dir.parent / "does-not-exist")
-    with pytest.raises(ValueError, match="Estrategia desconocida") as caught:
+    with pytest.raises(ValueError, match="Unknown strategy") as caught:
         search("Quillfeather", nowhere, strategy="banana")
     assert "lexical" in str(caught.value), "names what would have been valid"
 
@@ -448,7 +448,7 @@ def test_search_is_deterministic(context: QueryContext) -> None:
 
 def test_an_empty_query_is_a_validation_error(context: QueryContext) -> None:
     """Step 14 / spec §9.3. An empty result set would claim something about the corpus."""
-    with pytest.raises(ValueError, match="vacía"):
+    with pytest.raises(ValueError, match="query is empty"):
         search("   ", context)
 
 
@@ -1329,9 +1329,9 @@ def test_a_get_cursor_is_refused_by_name_rather_than_restarted_from_zero(
 
     Seen red with the prefix check removed: the query answers page one again.
     """
-    with pytest.raises(ValueError, match="no es un cursor de `search`"):
+    with pytest.raises(ValueError, match="is not a `search` cursor"):
         search("Quillfeather", context, cursor="q:3")
-    with pytest.raises(ValueError, match="no es un cursor de `search`"):
+    with pytest.raises(ValueError, match="is not a `search` cursor"):
         search("Quillfeather", context, cursor="post:0")
 
 
@@ -1342,9 +1342,9 @@ def test_a_malformed_search_cursor_is_refused_rather_than_restarted_from_zero(
 
     Seen red with the `int(tail)` failure swallowed into `return 0`: page one, forever.
     """
-    with pytest.raises(ValueError, match="Cursor inválido"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         search("Quillfeather", context, cursor="s:abc")
-    with pytest.raises(ValueError, match="Cursor inválido"):
+    with pytest.raises(ValueError, match="Invalid cursor"):
         search("Quillfeather", context, cursor="s:-1")
 
 
@@ -1381,7 +1381,7 @@ def test_a_search_cursor_past_the_end_of_the_ranking_is_refused_not_called_compl
     assert last_page.truncated is False and last_page.cursor is None
 
     for beyond in (available, available + 1, 99_999, 99_999_999):
-        with pytest.raises(ValueError, match="más allá de los resultados disponibles"):
+        with pytest.raises(ValueError, match="past the available results"):
             search("Quillfeather vgonpa", context, limit=1, cursor=f"s:{beyond}")
 
     empty = search("zzzznotawordinthiscorpus", context, limit=10)
@@ -1450,14 +1450,14 @@ def test_an_empty_query_is_refused_by_the_service_before_the_index_is_opened(
 ) -> None:
     """Step 14 / spec §9.3 — and the PORTED test for this passed for the wrong reason.
 
-    It asserted `pytest.raises(ValueError, match="vacía")`, and that is satisfied by
-    `lexical._expression`'s own «la consulta está vacía», raised deep inside the retriever
+    It asserted `pytest.raises(ValueError, match="query is empty")`, and that is satisfied by
+    `lexical._expression`'s own «the query is empty», raised deep inside the retriever
     AFTER the index has been opened. Measured: with `_validate`'s refusal deleted the ported
     assertion stayed GREEN, because a different layer raised a different sentence that happens
     to share a word (rule 1).
 
     Two things separate the layers, and both are asserted. The SENTENCE: `_validate` tells the
-    operator what to do next («Escribe algo que buscar»), which the retriever's message does
+    operator what to do next («Type something to search for»), which the retriever's message does
     not. And the MOMENT: validation refuses before any file is touched, so an empty query
     against an index that does not exist is still an empty-query error — under the mutation it
     becomes `IndexMissingError`, i.e. the operator is told to build an index when what they
@@ -1466,11 +1466,11 @@ def test_an_empty_query_is_refused_by_the_service_before_the_index_is_opened(
     Seen red with `_validate`'s first clause removed: the second assertion raises
     `IndexMissingError`.
     """
-    with pytest.raises(ValueError, match="Escribe algo que buscar"):
+    with pytest.raises(ValueError, match="Type something to search for"):
         search("   ", context)
 
     nowhere = replace(context, index_dir=context.index_dir.parent / "no-index-here")
-    with pytest.raises(ValueError, match="Escribe algo que buscar"):
+    with pytest.raises(ValueError, match="Type something to search for"):
         search("", nowhere)
 
 
@@ -1600,7 +1600,7 @@ def test_match_refuses_a_locatorless_hit_rather_than_fabricating_a_locator() -> 
     the frozen contract then rejects for a different reason entirely — a traceback naming no
     command instead of the actionable sentence.
     """
-    with pytest.raises(IndexIncompatibleError, match="no resuelve a su superficie"):
+    with pytest.raises(IndexIncompatibleError, match="does not resolve to its surface"):
         search_service._match(1, _locatorless_hit())
 
 
@@ -1740,10 +1740,10 @@ def test_an_unknown_topic_is_refused_even_when_the_vocabulary_is_empty(
     """
     bare = replace(context, vocab=[])
 
-    with pytest.raises(ValueError, match="El vocabulario está vacío") as empty:
+    with pytest.raises(ValueError, match="The vocabulary is empty") as empty:
         search("Quillfeather", bare, filters=SearchFilters(topics=("no-such-topic",)))
     assert "no-such-topic" in str(empty.value)
-    assert "Los válidos son" not in str(empty.value), (
+    assert "Valid ones are" not in str(empty.value), (
         "an empty list of valid slugs reads as «none matched», which is the wrong diagnosis"
     )
 

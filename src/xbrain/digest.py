@@ -456,7 +456,7 @@ def _fetched_path(report: FetchReport, item_id: str) -> Path | None:
 
 
 def _warn_fetch_failure(report: FetchReport, item_id: str) -> None:
-    """Log WHY `item_id`'s download failed. Without this, the only trace is `fallidos N`."""
+    """Log WHY `item_id`'s download failed. Without this, the only trace is `failed N`."""
     result = next((r for r in report.results if r.id == item_id), None)
     reason = result.reason if result is not None else "no fetch result"
     error = result.error if result is not None else None
@@ -965,20 +965,20 @@ def format_digest_summary(report: DigestReport) -> str:
     transcripts (`--keep-transcript`) names them inside the Dedup parenthesis;
     without reuse that parenthesis is unchanged.
     """
-    reused = f", {report.videos_reused} con transcripción guardada" if report.videos_reused else ""
+    reused = f", {report.videos_reused} with stored transcript" if report.videos_reused else ""
     summary = (
-        f"Vídeos: transcritos {report.transcribed}, sin voz {report.no_speech}, "
-        f"ya digeridos {report.already}, fallidos {report.failed}, "
-        f"sin vídeo {report.skipped_no_video}, desconocidos {report.skipped_unknown}. "
-        f"Dedup: {report.total_items} items ← {report.video_count} vídeos "
-        f"({report.videos_transcribed} transcritos este run{reused})."
+        f"Videos: transcribed {report.transcribed}, no speech {report.no_speech}, "
+        f"already digested {report.already}, failed {report.failed}, "
+        f"no video {report.skipped_no_video}, unknown {report.skipped_unknown}. "
+        f"Dedup: {report.total_items} items ← {report.video_count} videos "
+        f"({report.videos_transcribed} transcribed this run{reused})."
     )
     if report.visual_slides or report.visual_footage or report.visual_skipped:
         summary += (
-            f" Visual: {report.visual_slides} con slides, "
-            f"{report.visual_footage} metraje mudo descrito, "
-            f"{report.visual_skipped} talking-head (saltados)."
+            f" Visual: {report.visual_slides} with slides, "
+            f"{report.visual_footage} silent footage described, "
+            f"{report.visual_skipped} talking-head (skipped)."
         )
     if report.hollow:
-        summary += f" Huecos (sin voz ni frames): {report.hollow}."
+        summary += f" Hollow (no speech, no frames): {report.hollow}."
     return summary

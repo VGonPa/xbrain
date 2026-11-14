@@ -241,7 +241,7 @@ def _format_size(size_bytes: int | None) -> str:
 def format_video_table(rows: list[VideoRow]) -> str:
     """Render the catalog as an aligned human table (headers + one row each)."""
     if not rows:
-        return "No hay vídeos."
+        return "No videos."
     headers = ("ID", "STATE", "SIZE", "TOPIC", "TEXT")
     display = [
         (row.id, row.state, _format_size(row.size_bytes), row.topic or "—", row.text)

@@ -246,7 +246,7 @@ def test_an_empty_query_is_a_validation_error() -> None:
     corpus; the truth is that nothing was asked.
     """
     index = _index()
-    with pytest.raises(ValueError, match="vacía"):
+    with pytest.raises(ValueError, match="query is empty"):
         index.search("   ", limit=5)
 
 
@@ -1165,7 +1165,7 @@ def test_the_owner_narrowing_scales_past_a_thousand_owners() -> None:
     owners answered, 995 raised — where the id-only `IN (...)` it replaced was one node and
     answered past 16,384. Worse than the ceiling was what the ceiling SAID. `_fetch` converts
     any `DatabaseError` it cannot read into `IndexIncompatibleError`, so a HEALTHY index came
-    back as *«La base del índice no se puede consultar … Reconstruye el índice con `index
+    back as *«The index database cannot be queried … Rebuild the index with `index
     build --force`»* — an operator told to rebuild over a query that was merely too wide, and
     a rebuild that would change nothing. Rule 9: the instrument named the wrong surface.
 

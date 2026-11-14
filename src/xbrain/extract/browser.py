@@ -31,12 +31,12 @@ def login(storage_state_path: Path) -> None:
         )
         context = browser.new_context()
         context.new_page().goto(X_LOGIN_URL)
-        print("Inicia sesión en X en la ventana del navegador.")
-        print("Cuando veas tu timeline, vuelve aquí y pulsa Enter.")
+        print("Log in to X in the browser window.")
+        print("When you see your timeline, come back here and press Enter.")
         input()
         context.storage_state(path=str(storage_state_path))
         browser.close()
-    print(f"Sesión guardada en {storage_state_path}")
+    print(f"Session saved to {storage_state_path}")
 
 
 @contextmanager
@@ -50,10 +50,10 @@ def x_context(storage_state_path: Path, headless: bool = False) -> Iterator[Brow
     """
     if not storage_state_path.exists():
         raise FileNotFoundError(
-            f"No hay sesión guardada en {storage_state_path}. Importa la de tu navegador "
-            "(`.venv/bin/python scripts/import_chrome_session.py`, o "
-            "`scripts/import_safari_session.py`; ver README → Authentication) "
-            "o ejecuta `xbrain login`."
+            f"No saved session at {storage_state_path}. Import your browser's "
+            "(`.venv/bin/python scripts/import_chrome_session.py`, or "
+            "`scripts/import_safari_session.py`; see README → Authentication) "
+            "or run `xbrain login`."
         )
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless, args=_LAUNCH_ARGS)
@@ -78,10 +78,10 @@ async def x_context_async(
     """
     if not storage_state_path.exists():
         raise FileNotFoundError(
-            f"No hay sesión guardada en {storage_state_path}. Importa la de tu navegador "
-            "(`.venv/bin/python scripts/import_chrome_session.py`, o "
-            "`scripts/import_safari_session.py`; ver README → Authentication) "
-            "o ejecuta `xbrain login`."
+            f"No saved session at {storage_state_path}. Import your browser's "
+            "(`.venv/bin/python scripts/import_chrome_session.py`, or "
+            "`scripts/import_safari_session.py`; see README → Authentication) "
+            "or run `xbrain login`."
         )
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=headless, args=_LAUNCH_ARGS)

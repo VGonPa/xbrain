@@ -287,7 +287,7 @@ class IndexIncompatibleError(IndexError_):
 # The advice every incompatibility ends with. ONE string, so the CLI, the services and the
 # tests all name the same command; it lives here, beside the error that carries it, rather
 # than in `index_build`, which cannot be imported from this module.
-REBUILD_ADVICE = "Reconstruye el índice con `xbrain index build --force`."
+REBUILD_ADVICE = "Rebuild the index with `xbrain index build --force`."
 
 
 def corrupt_base_error(path: Path, error: sqlite3.DatabaseError) -> IndexIncompatibleError:
@@ -298,7 +298,7 @@ def corrupt_base_error(path: Path, error: sqlite3.DatabaseError) -> IndexIncompa
     it is what distinguishes a torn page from a file that is not a database at all.
     """
     return IndexIncompatibleError(
-        f"La base del índice en {path} no se puede leer ({error}). {REBUILD_ADVICE}"
+        f"The index database at {path} cannot be read ({error}). {REBUILD_ADVICE}"
     )
 
 
@@ -350,8 +350,8 @@ def resolve_index_dir(data_dir: Path, name: str) -> Path:
     resolved = (data_dir / name).resolve()
     if not resolved.is_relative_to(root):
         raise ValueError(
-            f"El directorio del índice {name!r} resuelve a {resolved}, fuera de {root}. "
-            "Ajusta `[index].dir` en config.toml a una ruta contenida en data/."
+            f"The index directory {name!r} resolves to {resolved}, outside {root}. "
+            "Set `[index].dir` in config.toml to a path inside data/."
         )
     return resolved
 
@@ -381,10 +381,12 @@ def require_database(index_dir: Path) -> Path:
         return database
     if manifest_path(index_dir).exists():
         raise IndexMissingError(
-            f"No hay base de datos en {database} pero su manifest sigue en pie: el índice "
-            f"quedó incompleto. {REBUILD_ADVICE}"
+            f"There is no database at {database} but its manifest is still there: the index "
+            f"was left incomplete. {REBUILD_ADVICE}"
         )
-    raise IndexMissingError(f"No hay índice en {index_dir}. Constrúyelo con `xbrain index build`.")
+    raise IndexMissingError(
+        f"There is no index at {index_dir}. Build it with `xbrain index build`."
+    )
 
 
 def open_index(path: Path, *, read_only: bool = False, create: bool = False) -> sqlite3.Connection:
@@ -512,17 +514,17 @@ def _verify_schema(connection: sqlite3.Connection, path: Path) -> sqlite3.Connec
     if missing:
         connection.close()
         raise IndexIncompatibleError(
-            f"La base del índice en {path} está incompleta: faltan las tablas "
+            f"The index database at {path} is incomplete: missing tables "
             f"{', '.join(missing)}. {REBUILD_ADVICE}"
         )
     absent, redefined = _column_drift(connection)
     if absent or redefined:
         connection.close()
         raise IndexIncompatibleError(
-            f"La base del índice en {path} está incompleta: "
-            + (f"faltan las columnas {', '.join(absent)}" if absent else "")
+            f"The index database at {path} is incomplete: "
+            + (f"missing columns {', '.join(absent)}" if absent else "")
             + ("; " if absent and redefined else "")
-            + (f"columnas con otra definición {', '.join(redefined)}" if redefined else "")
+            + (f"columns with a different definition {', '.join(redefined)}" if redefined else "")
             + f". {REBUILD_ADVICE}"
         )
     return connection
@@ -578,7 +580,7 @@ def _probe_fts(connection: sqlite3.Connection, path: Path) -> sqlite3.Connection
     except sqlite3.DatabaseError as error:
         connection.close()
         raise IndexIncompatibleError(
-            f"La base del índice en {path} no se puede consultar ({error}). {REBUILD_ADVICE}"
+            f"The index database at {path} cannot be queried ({error}). {REBUILD_ADVICE}"
         ) from error
     return connection
 

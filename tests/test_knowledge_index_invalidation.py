@@ -954,8 +954,8 @@ def test_status_search_and_update_ask_one_function_whether_the_manifest_describe
     asking: the sentinel never appears and `update` returns a normal report.
     """
     sentinel = (
-        "SENTINEL: esta base no es la que el manifest describe. "
-        "Reconstruye el índice con `xbrain index build --force`."
+        "SENTINEL: this database is not the one the manifest describes. "
+        "Rebuild the index with `xbrain index build --force`."
     )
     monkeypatch.setattr(
         index_build,
@@ -990,7 +990,7 @@ def test_status_search_and_update_ask_one_function_whether_the_base_exists(
     Seen red before the fix: `status` answered `advice == ''` under the sentinel, because it
     never asked.
     """
-    sentinel = "SENTINEL: no hay base. Reconstruye el índice con `xbrain index build --force`."
+    sentinel = "SENTINEL: no database. Rebuild the index with `xbrain index build --force`."
 
     def refuse(index_dir):
         raise IndexMissingError(sentinel)

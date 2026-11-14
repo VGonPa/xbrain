@@ -418,7 +418,7 @@ def test_nav_error_caps_long_exception_detail():
     # A misbehaving page can surface a huge exception body; the persisted error
     # is capped (mirrors media._MAX_ERROR_LEN) so items.json never bloats.
     huge = RuntimeError("x" * 5000)
-    error = fx._nav_error("No se pudo cargar.", huge)
+    error = fx._nav_error("Could not load.", huge)
     assert len(error) == fx._MAX_ERROR_LEN
     assert error.endswith("…")
 
@@ -805,7 +805,7 @@ def test_refetch_checkpoints_so_a_mid_run_failure_keeps_its_repairs():
 
     def explode(url: str) -> str:
         if url.endswith("3"):
-            raise RuntimeError("Sesión de X caducada")
+            raise RuntimeError("X session expired")
         return "repaired"
 
     with pytest.raises(RuntimeError):

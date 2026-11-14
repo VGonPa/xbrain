@@ -102,8 +102,8 @@ def get(
     item = context.store.get(item_id)
     if item is None:
         raise ValueError(
-            f"No existe el item {item_id!r} en el store. "
-            "Comprueba el id con `xbrain search` o `xbrain knowledge inspect <id>`."
+            f"Item {item_id!r} does not exist in the store. "
+            "Check the id with `xbrain search` or `xbrain knowledge inspect <id>`."
         )
     # The emitter takes no producer (F7-7): an ASR/VLM surface declares `producer: None`
     # here exactly as the build saw it, because the store records no transcriber.
@@ -191,12 +191,10 @@ def _refuse_unknown(
     unknown = [name for name in names if name not in present and name not in failed]
     if not unknown:
         return
-    failed_note = (
-        f" Fuentes que fallaron al obtenerse: {', '.join(sorted(failed))}." if failed else ""
-    )
+    failed_note = f" Sources that failed to fetch: {', '.join(sorted(failed))}." if failed else ""
     raise UnknownSurfaceError(
-        f"Este item no tiene {', '.join(unknown)}. "
-        f"Superficies disponibles: {', '.join(available) or '—'}.{failed_note}"
+        f"This item has no {', '.join(unknown)}. "
+        f"Available surfaces: {', '.join(available) or '—'}.{failed_note}"
     )
 
 
@@ -263,8 +261,8 @@ def _paginate(
     # exists at this scope — `_decode` has only the raw string.
     if start_surface >= len(wanted) and cursor:
         raise ValueError(
-            f"Cursor inválido: {cursor!r} apunta más allá de las superficies disponibles. "
-            "Usa el que devolvió la respuesta anterior."
+            f"Invalid cursor: {cursor!r} points past the available surfaces. "
+            "Use the one the previous response returned."
         )
 
     for position, surface in enumerate(wanted):
@@ -287,8 +285,8 @@ def _paginate(
         # surface was never served.
         if position == start_surface and resume >= len(pieces):
             raise ValueError(
-                f"Cursor inválido: {cursor!r} apunta más allá de los fragmentos disponibles. "
-                "Usa el que devolvió la respuesta anterior."
+                f"Invalid cursor: {cursor!r} points past the available fragments. "
+                "Use the one the previous response returned."
             )
         stopped = page.take_chunks(pieces, resume, partial(_encode, position))
         if stopped is not None:
@@ -390,8 +388,8 @@ def _ranked_chunks(
     # both are invalid.
     if cursor and offset >= len(ordered):
         raise ValueError(
-            f"Cursor inválido: {cursor!r} apunta más allá de los resultados disponibles. "
-            "Usa el que devolvió la respuesta anterior."
+            f"Invalid cursor: {cursor!r} points past the available results. "
+            "Use the one the previous response returned."
         )
 
     page = _Page(budget=limits.char_budget)
@@ -453,8 +451,8 @@ def _decode(cursor: str | None) -> tuple[int, int]:
     head, _, tail = cursor.partition(":")
     if head == _QUERY_CURSOR_PREFIX:
         raise ValueError(
-            f"Cursor inválido: {cursor!r} es un cursor de --query. "
-            "Pásalo junto a la misma --query que lo devolvió."
+            f"Invalid cursor: {cursor!r} is a --query cursor. "
+            "Pass it together with the same --query that returned it."
         )
     return _component(head, cursor), _component(tail, cursor)
 
@@ -466,8 +464,8 @@ def _decode_query(cursor: str | None) -> int:
     head, _, tail = cursor.partition(":")
     if head != _QUERY_CURSOR_PREFIX:
         raise ValueError(
-            f"Cursor inválido: {cursor!r} es un cursor de posición, no de --query. "
-            "Usa el que devolvió la respuesta anterior a esta misma --query."
+            f"Invalid cursor: {cursor!r} is a position cursor, not a --query one. "
+            "Use the one the previous response to this same --query returned."
         )
     return _component(tail, cursor)
 
@@ -478,8 +476,8 @@ def _component(raw: str, cursor: str) -> int:
         value = int(raw)
     except ValueError as error:
         raise ValueError(
-            f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior."
+            f"Invalid cursor: {cursor!r}. Use the one the previous response returned."
         ) from error
     if value < 0:
-        raise ValueError(f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior.")
+        raise ValueError(f"Invalid cursor: {cursor!r}. Use the one the previous response returned.")
     return value

@@ -176,7 +176,7 @@ def test_a_scorable_case_without_relevants_is_a_load_error(tmp_path: Path) -> No
         '  - id: Q1\n    query: "q"\n    provenance: construido\n'
         "    strata: [exacto]\n    relevant_items: []\n    relevant_surfaces: []\n",
     )
-    with pytest.raises(GoldenSetError, match="sin conjunto relevante"):
+    with pytest.raises(GoldenSetError, match="no enumerated relevant set"):
         load_cases(path)
 
 
@@ -193,7 +193,7 @@ def test_an_unfilled_template_makes_the_whole_file_a_load_error(tmp_path: Path) 
         "    provenance: construido\n    strata: [semantico]\n"
         '    relevant_items: ["1"]\n',
     )
-    with pytest.raises(GoldenSetError, match="plantilla"):
+    with pytest.raises(GoldenSetError, match="unfilled template"):
         load_cases(path)
 
 
@@ -242,7 +242,7 @@ def test_an_unknown_stratum_is_a_load_error(tmp_path: Path) -> None:
         '  - id: Q1\n    query: "q"\n    provenance: construido\n'
         '    strata: [semantiko]\n    relevant_items: ["1"]\n',
     )
-    with pytest.raises(GoldenSetError, match="estrato"):
+    with pytest.raises(GoldenSetError, match="stratum"):
         load_cases(path)
 
 
@@ -271,7 +271,7 @@ def test_an_unknown_provenance_is_a_load_error(tmp_path: Path) -> None:
         '  - id: Q1\n    query: "q"\n    provenance: inventado\n'
         '    strata: [exacto]\n    relevant_items: ["1"]\n',
     )
-    with pytest.raises(GoldenSetError, match="procedencia"):
+    with pytest.raises(GoldenSetError, match="provenance"):
         load_cases(path)
 
 
@@ -285,7 +285,7 @@ def test_a_duplicate_case_id_is_a_load_error(tmp_path: Path) -> None:
         '  - id: Q1\n    query: "b"\n    provenance: construido\n'
         '    strata: [exacto]\n    relevant_items: ["2"]\n',
     )
-    with pytest.raises(GoldenSetError, match="duplicado"):
+    with pytest.raises(GoldenSetError, match="duplicate id"):
         load_cases(path)
 
 
@@ -308,7 +308,7 @@ def test_a_relevant_id_missing_from_the_store_is_a_resolution_error(tmp_path: Pa
             '    strata: [exacto]\n    relevant_items: ["999"]\n',
         )
     )
-    with pytest.raises(GoldenSetError, match="no existe"):
+    with pytest.raises(GoldenSetError, match="does not exist"):
         resolve_cases(cases, _store("1", "2"))
 
 

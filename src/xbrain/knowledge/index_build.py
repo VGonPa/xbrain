@@ -183,10 +183,10 @@ class StoreSignal:
         for name in SIGNAL_FIELDS:
             value = values[name]
             if type(value) is not int:
-                raise _malformed("store_signal", f"{name!r} debe ser un entero, es {value!r}")
+                raise _malformed("store_signal", f"{name!r} must be an integer, got {value!r}")
             if name in SIGNAL_SIZE_FIELDS and value < 0:
                 raise _malformed(
-                    "store_signal", f"{name!r} debe ser un tamaño no negativo, es {value!r}"
+                    "store_signal", f"{name!r} must be a non-negative size, got {value!r}"
                 )
             checked[name] = value
         return cls(**checked)
@@ -976,14 +976,16 @@ class Manifest:
         """
         if not isinstance(raw, Mapping):
             raise IndexIncompatibleError(
-                f"El manifest no es un objeto JSON, es {type(raw).__name__}. {REBUILD_ADVICE}"
+                f"The manifest is not a JSON object, it is {type(raw).__name__}. {REBUILD_ADVICE}"
             )
         missing, unknown = _closure_gap(set(raw), MANIFEST_FIELDS)
         if missing:
-            raise IndexIncompatibleError(f"El manifest no declara {missing}. {REBUILD_ADVICE}")
+            raise IndexIncompatibleError(
+                f"The manifest does not declare {missing}. {REBUILD_ADVICE}"
+            )
         if unknown:
             raise IndexIncompatibleError(
-                f"El manifest declara {unknown}, que este código no conoce. {REBUILD_ADVICE}"
+                f"The manifest declares {unknown}, which this code does not know. {REBUILD_ADVICE}"
             )
         return cls(
             schema_version=str(raw["schema_version"]),
@@ -1014,7 +1016,7 @@ def _malformed(field_name: str, detail: str) -> IndexIncompatibleError:
     in step (rule 5).
     """
     return IndexIncompatibleError(
-        f"El manifest tiene el campo {field_name!r} malformado: {detail}. {REBUILD_ADVICE}"
+        f"The manifest field {field_name!r} is malformed: {detail}. {REBUILD_ADVICE}"
     )
 
 
@@ -1027,12 +1029,12 @@ def _closed_keys(value: object, field_name: str, declared: frozenset[str]) -> di
     at. Both are refusals for the same reason: nothing here could compare the difference.
     """
     if not isinstance(value, Mapping):
-        raise _malformed(field_name, f"no es un objeto, es {type(value).__name__}")
+        raise _malformed(field_name, f"not an object, it is {type(value).__name__}")
     absent, unknown = _closure_gap(set(value), declared)
     if absent:
-        raise _malformed(field_name, f"faltan {absent}")
+        raise _malformed(field_name, f"missing {absent}")
     if unknown:
-        raise _malformed(field_name, f"claves no declaradas {unknown}")
+        raise _malformed(field_name, f"undeclared keys {unknown}")
     return dict(value)
 
 
@@ -1069,7 +1071,7 @@ def _counter_mapping(value: object, field_name: str, declared: frozenset[str]) -
     checked: dict[str, int] = {}
     for key, count in raw.items():
         if type(count) is not int or count < 0:
-            raise _malformed(field_name, f"{key!r} debe ser un entero no negativo, es {count!r}")
+            raise _malformed(field_name, f"{key!r} must be a non-negative integer, got {count!r}")
         checked[str(key)] = count
     return checked
 
@@ -1079,7 +1081,7 @@ def _optional_mapping(value: object, field_name: str) -> dict[str, object] | Non
     if value is None:
         return None
     if not isinstance(value, Mapping):
-        raise _malformed(field_name, f"no es null ni un objeto, es {type(value).__name__}")
+        raise _malformed(field_name, f"neither null nor an object, it is {type(value).__name__}")
     return {str(key): item for key, item in value.items()}
 
 
@@ -1094,7 +1096,7 @@ def _failures(value: object) -> list[dict[str, str]]:
         isinstance(entry, Mapping) and all(isinstance(v, str) for v in entry.values())
         for entry in value
     ):
-        raise _malformed("failed", "no es una lista de objetos de texto")
+        raise _malformed("failed", "not a list of text objects")
     return [{str(k): str(v) for k, v in entry.items()} for entry in value]
 
 
@@ -1107,7 +1109,7 @@ def _instant(value: object) -> datetime:
     try:
         return datetime.fromisoformat(str(value))
     except ValueError as error:
-        raise _malformed("built_at", f"{value!r} no es un instante ISO") from error
+        raise _malformed("built_at", f"{value!r} is not an ISO instant") from error
 
 
 def write_manifest(index_dir: Path, manifest: Manifest) -> None:
@@ -1136,14 +1138,14 @@ def load_manifest(index_dir: Path) -> Manifest:
     path = manifest_path(index_dir)
     if not path.exists():
         raise IndexMissingError(
-            f"No hay manifest en {path}: el índice no está construido o quedó incompleto. "
-            "Constrúyelo con `xbrain index build`."
+            f"There is no manifest at {path}: the index is not built or was left incomplete. "
+            "Build it with `xbrain index build`."
         )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise IndexIncompatibleError(
-            f"El manifest está corrupto ({error}). {REBUILD_ADVICE}"
+            f"The manifest is corrupt ({error}). {REBUILD_ADVICE}"
         ) from error
     return Manifest.from_dict(raw)
 
@@ -1181,7 +1183,7 @@ def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = 
         mismatches.append(f"chunker_params {manifest.chunker_params!r} != {asdict(params)!r}")
     if mismatches:
         raise IndexIncompatibleError(
-            "El índice fue construido con otra versión: "
+            "The index was built with another version: "
             + "; ".join(mismatches)
             + f". {REBUILD_ADVICE}"
         )
@@ -1207,7 +1209,7 @@ def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = 
 # ---------------------------------------------------------------------------
 
 
-UPDATE_ADVICE = "Actualiza el índice con `xbrain index update`."
+UPDATE_ADVICE = "Update the index with `xbrain index update`."
 
 
 # The column order of `topics`, as ONE tuple type — the writer binds it and 02.8's comparator
@@ -1629,8 +1631,8 @@ def build(
     options = options or IndexOptions()
     if manifest_path(index_dir).exists() and not force and not dry_run:
         raise ValueError(
-            f"Ya existe un índice en {index_dir}. {UPDATE_ADVICE} "
-            "Si de verdad quieres reconstruirlo desde cero, usa `xbrain index build --force`."
+            f"An index already exists at {index_dir}. {UPDATE_ADVICE} "
+            "If you really want to rebuild it from scratch, use `xbrain index build --force`."
         )
     started = time.perf_counter()
     counters = WriteCounters()
@@ -2040,9 +2042,9 @@ def _refresh_topic_rows(index: LexicalIndex, inputs: IndexInputs) -> int:
     orphaned = [slug for slug in behind if slug not in records]
     if orphaned:
         raise IndexIncompatibleError(
-            f"El plano de topics contiene filas que el vocabulario ya no declara ({orphaned}) "
-            f"y la huella del vocabulario no ha cambiado: no hay reparación incremental "
-            f"posible. {REBUILD_ADVICE}"
+            f"The topics plane holds rows the vocabulary no longer declares ({orphaned}) "
+            f"and the vocabulary fingerprint has not changed: no incremental repair is "
+            f"possible. {REBUILD_ADVICE}"
         )
     for slug in behind:
         _write_topic_row(index, records[slug])
@@ -2279,8 +2281,8 @@ def describe_base(
         return BaseVerdict(
             counts=counts,
             sentence=(
-                f"El índice no contiene lo que su manifest declara ({mismatch}): quedó "
-                f"incompleto. {REBUILD_ADVICE}"
+                f"The index does not hold what its manifest declares ({mismatch}): it was left "
+                f"incomplete. {REBUILD_ADVICE}"
             ),
         )
     return BaseVerdict(counts=counts, sentence="")
@@ -2312,7 +2314,7 @@ def require_consistent(
 
 def _damage_advice(database: Path, damage: str) -> str:
     """The B-1 sentence for `quick_check`'s first finding."""
-    return f"La base del índice en {database} está dañada (quick_check: {damage}). {REBUILD_ADVICE}"
+    return f"The index database at {database} is damaged (quick_check: {damage}). {REBUILD_ADVICE}"
 
 
 # ---------------------------------------------------------------------------
@@ -2408,8 +2410,8 @@ def _status_advice(
         return unusable
     if incomplete:
         return (
-            "El índice está incompleto o no tiene manifest: ninguna consulta lo usará. "
-            "Constrúyelo con `xbrain index build`."
+            "The index is incomplete or has no manifest: no query will use it. "
+            "Build it with `xbrain index build`."
         )
     if delta.added or delta.removed or delta.changed or behind or topics_changed:
         return UPDATE_ADVICE

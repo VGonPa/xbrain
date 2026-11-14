@@ -712,12 +712,12 @@ class VerdictWriteResult:
     def summary(self) -> str:
         """A one-line human summary: written / attempted, and the skip reasons tallied."""
         if not self.skipped:
-            return f"{self.written} verdicts escritos"
+            return f"{self.written} verdicts written"
         tally = Counter(reason for _, _, reason in self.skipped)
         detail = ", ".join(f"{count} {reason}" for reason, count in sorted(tally.items()))
         return (
-            f"{self.written} de {self.attempted} verdicts escritos "
-            f"({len(self.skipped)} omitidos: {detail})"
+            f"{self.written} of {self.attempted} verdicts written "
+            f"({len(self.skipped)} skipped: {detail})"
         )
 
 

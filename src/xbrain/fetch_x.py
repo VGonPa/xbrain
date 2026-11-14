@@ -147,11 +147,11 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
                 kind="x_article",
                 url=url,
                 failure_reason="timeout",
-                error=_nav_error("No se pudo cargar el tweet.", exc),
+                error=_nav_error("Could not load the tweet.", exc),
                 attempts=1,
             )
         if is_logged_out(page.url):
-            raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+            raise RuntimeError("X session expired. Run `xbrain login`.")
         _handle, text = assemble_linked_thread(captured, _x_status_id(url) or "")
     finally:
         page.close()
@@ -161,7 +161,7 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
         kind="x_article",
         url=url,
         failure_reason="empty_content",
-        error="No se pudo recuperar el contenido del tweet.",
+        error="Could not retrieve the tweet content.",
         attempts=1,
     )
 
@@ -323,11 +323,11 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
                 kind="x_article",
                 url=url,
                 failure_reason="timeout",
-                error=_nav_error("No se pudo cargar el artículo de X.", exc),
+                error=_nav_error("Could not load the X article.", exc),
                 attempts=1,
             )
         if is_logged_out(page.url):
-            raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+            raise RuntimeError("X session expired. Run `xbrain login`.")
         html = page.content()
     finally:
         page.close()
@@ -348,7 +348,7 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
         kind="x_article",
         url=url,
         failure_reason="empty_content",
-        error="No se pudo extraer el contenido del artículo de X.",
+        error="Could not extract the X article content.",
         attempts=1,
     )
 

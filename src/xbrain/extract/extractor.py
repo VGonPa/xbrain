@@ -186,7 +186,7 @@ def extract_source(
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(_SETTLE_MS)
         if is_logged_out(page.url):
-            raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+            raise RuntimeError("X session expired. Run `xbrain login`.")
 
         idle = 0
         last_count = 0
@@ -198,9 +198,9 @@ def extract_source(
                 break
             if rate_limit["blocked"]:
                 raise RateLimitTruncated(
-                    f"{source}: X respondió {rate_limit['blocked']} en "
+                    f"{source}: X answered {rate_limit['blocked']} on "
                     f"{'/'.join(operations)} — "
-                    "extracción truncada a media timeline; reanuda más tarde."
+                    "extraction truncated mid-timeline; resume later."
                 )
             action = rate_limit_decision(
                 new_hits=rate_limit["hits"] > acknowledged_hits,
@@ -209,15 +209,15 @@ def extract_source(
             )
             if action == "abort":
                 raise RateLimitTruncated(
-                    f"{source}: X devolvió {rate_limit['hits']}×429 tras {backoffs} "
-                    "backoffs — extracción truncada a media timeline; reanuda más tarde."
+                    f"{source}: X returned {rate_limit['hits']}×429 after {backoffs} "
+                    "backoffs — extraction truncated mid-timeline; resume later."
                 )
             if action == "backoff":
                 acknowledged_hits = rate_limit["hits"]
                 backoffs += 1
                 wait_ms = random.randint(_RATE_LIMIT_BACKOFF_MIN_MS, _RATE_LIMIT_BACKOFF_MAX_MS)
                 logger.warning(
-                    "X devolvió 429 (rate limit) — esperando %.0fs antes de seguir.",
+                    "X returned 429 (rate limit) — waiting %.0fs before continuing.",
                     wait_ms / 1000,
                 )
                 page.wait_for_timeout(wait_ms)
@@ -247,10 +247,10 @@ def extract_source(
     # even a zero-post account gets one response with an empty instruction list.
     if not captured:
         raise OperationNotCaptured(
-            f"{source}: 0 respuestas de {'/'.join(operations)} en toda la timeline — "
-            "no es que no haya items nuevos, es que no se capturó NADA. "
-            "Lo normal es que X haya renombrado la operación: mira las operaciones "
-            "GraphQL reales de la página y añade el nombre nuevo a `_OPERATIONS`."
+            f"{source}: 0 responses from {'/'.join(operations)} across the whole timeline — "
+            "this is not 'no new items', NOTHING was captured. "
+            "Usually X has renamed the operation: look at the page's real GraphQL "
+            "operations and add the new name to `_OPERATIONS`."
         )
 
     new_items, _ = collect_new_items(captured, source, known_ids)

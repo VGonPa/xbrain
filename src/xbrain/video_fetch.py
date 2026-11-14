@@ -275,9 +275,7 @@ def fetch_videos(
 
 def format_fetch_summary(report: FetchReport) -> str:
     """One-line human SUMMARY of a fetch run (mirrors the download summaries)."""
-    return (
-        f"Vídeos: descargados {report.fetched}, saltados {report.skipped}, fallidos {report.failed}"
-    )
+    return f"Videos: downloaded {report.fetched}, skipped {report.skipped}, failed {report.failed}"
 
 
 def fetch_result_to_json(result: FetchResult) -> dict[str, object]:
