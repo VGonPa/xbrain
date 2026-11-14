@@ -50,7 +50,10 @@ def x_context(storage_state_path: Path, headless: bool = False) -> Iterator[Brow
     """
     if not storage_state_path.exists():
         raise FileNotFoundError(
-            f"No hay sesión guardada en {storage_state_path}. Ejecuta `xbrain login`."
+            f"No hay sesión guardada en {storage_state_path}. Importa la de tu navegador "
+            "(`.venv/bin/python scripts/import_chrome_session.py`, o "
+            "`scripts/import_safari_session.py`; ver README → Authentication) "
+            "o ejecuta `xbrain login`."
         )
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless, args=_LAUNCH_ARGS)
@@ -75,7 +78,10 @@ async def x_context_async(
     """
     if not storage_state_path.exists():
         raise FileNotFoundError(
-            f"No hay sesión guardada en {storage_state_path}. Ejecuta `xbrain login`."
+            f"No hay sesión guardada en {storage_state_path}. Importa la de tu navegador "
+            "(`.venv/bin/python scripts/import_chrome_session.py`, o "
+            "`scripts/import_safari_session.py`; ver README → Authentication) "
+            "o ejecuta `xbrain login`."
         )
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=headless, args=_LAUNCH_ARGS)

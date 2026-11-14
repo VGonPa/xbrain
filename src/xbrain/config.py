@@ -162,7 +162,13 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
 
 def load_config(repo_root: Path) -> Config:
     """Load config.toml from a repo root into a Config."""
-    settings = tomllib.loads((repo_root / "config.toml").read_text(encoding="utf-8"))
+    config_path = repo_root / "config.toml"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"config.toml not found in {repo_root}. Create it from the template: "
+            "`cp config.toml.example config.toml`, then set your vault path and X handle."
+        )
+    settings = tomllib.loads(config_path.read_text(encoding="utf-8"))
     paths = settings["paths"]
     x_settings = settings["x"]
     if not x_settings.get("handle"):
