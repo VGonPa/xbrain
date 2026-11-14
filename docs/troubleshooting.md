@@ -31,15 +31,14 @@ always means an **expired session** or an X GraphQL change, not that your
 bookmarks vanished. It aborts rather than overwrite good data. Re-authenticate
 (above) and re-run. If you're sure the store is stale, `--force` overrides it.
 
-## `extract` captured nothing — "0 respuestas de … en toda la timeline"
+## `extract` captured nothing — "0 responses from … across the whole timeline"
 
 Symptom: `extract --source tweets` (or `sync`) aborts with
 
 ```
-own_tweet: 0 respuestas de UserOriginalsTimeline/UserTweets en toda la timeline —
-no es que no haya items nuevos, es que no se capturó NADA. Lo normal es que X haya
-renombrado la operación: mira las operaciones GraphQL reales de la página y añade
-el nombre nuevo a `_OPERATIONS`.
+own_tweet: 0 responses from UserOriginalsTimeline/UserTweets across the whole timeline —
+this is not 'no new items', NOTHING was captured. Usually X has renamed the operation:
+look at the page's real GraphQL operations and add the new name to `_OPERATIONS`.
 ```
 
 Cause: X renames its internal GraphQL timeline operations without notice. The
@@ -70,7 +69,7 @@ Fix — find the name X is using and add it:
    }
    ```
 
-If instead the run reports **"0 nuevos items" and exits 0**, you are on a build
+If instead the run reports **"0 new items" and exits 0**, you are on a build
 from before this was fixed, where the filter held a single literal per source and
 a rename was silent — indistinguishable from an empty timeline, with the cursor
 advancing over the gap. Update, then re-run.
@@ -127,20 +126,20 @@ Local vision (`--frames`) is the bottleneck: a slide-heavy talk can have up to
   `ANTHROPIC_API_KEY`).
 - Frame extraction never hangs the run — ffmpeg is bounded by its own timeout.
 
-## Every video comes back `fallidos` / `sin voz`
+## Every video comes back `failed` / `no speech`
 
-- `sin voz` (silent): the video has **no audio track** at the source (GIFs,
+- `no speech` (silent): the video has **no audio track** at the source (GIFs,
   muted screencasts). This is expected — it attaches as `has_speech=false`
   ("silent video"), not an error. Verify with `yt-dlp -f bestaudio <tweet-url>`
   (errors = no audio exists).
-- `fallidos` (real failures): usually `parakeet-mlx` not found (see the PATH
+- `failed` (real failures): usually `parakeet-mlx` not found (see the PATH
   section above) — the fix is almost always the environment, not the video.
 
 ## A digest reads perfectly but says nothing that was said
 
 Symptom: a video note's transcript and digest are fluent, confident English —
 and bear no relation to the video. Nothing failed: `digest-video` reported the
-video under **transcritos**, `enrich` summarised it, `video-digest` wrote a
+video under **transcribed**, `enrich` summarised it, `video-digest` wrote a
 readable digest of it, and every stage exited 0.
 
 Cause: `parakeet-mlx` transcribed non-English audio. `parakeet-tdt` (v2 and v3)
@@ -197,10 +196,10 @@ fallback fetcher for JavaScript-heavy pages.
 Both are **worksheet** stages (like `enrich`): the first run *exports* a worksheet,
 you fill it, and a second `--apply` run consumes it. Common cases:
 
-- **`video-digest` → "No hay vídeos pendientes de digest."** Every video already has
+- **`video-digest` → "No videos pending a digest."** Every video already has
   a `digest`, or none has a transcript yet. Run `digest-video` first — a digest is a
   synthesis *of* the transcript, so there is nothing to digest without one.
-- **`verify` → "No hay outputs que verificar."** There are no enrichment outputs for
+- **`verify` → "No outputs to verify."** There are no enrichment outputs for
   the chosen `--target`. Run `enrich` (and, for `--target digest`, `video-digest`)
   first — `verify` judges *existing* `summary` / `digest` / `topics`, it never
   generates them.
@@ -244,8 +243,8 @@ you how much of the layer has been retired, which is the number to watch after a
 rubric change:
 
 ```
-⚠️  N de M verdicts almacenados quedaron OBSOLETOS: se juzgaron bajo otro contrato
-(otro output, otra fuente u otra rúbrica). No pintan badge; hay que re-verificarlos.
+⚠️  N of M stored verdicts are now STALE: they were judged under another contract
+(another output, source or rubric). They paint no badge; they must be re-verified.
 ```
 
 ## `xbrain eval` fails to load or to resolve the golden set — and they are different faults
@@ -253,13 +252,13 @@ rubric change:
 The golden-set loader has **two stages**, and the error tells you which one tripped. Reading
 the wrong one sends you to the wrong file.
 
-**`caso X: …` from `load_cases` — the FILE is wrong.** A structural problem, visible in
+**`case X: …` from `load_cases` — the FILE is wrong.** A structural problem, visible in
 `eval/golden-set.yaml` itself without opening the corpus: an unknown stratum or filter, an
 unfilled `<X>` template, a scorable case with an empty relevant set, an `expected_text` over
 the 300-char ceiling, a topic pseudo-id left in `relevant_items`, a duplicate id. Fix the
 YAML. This stage runs in CI, so a broken golden set is caught before it reaches anyone.
 
-**`caso X: id relevante que no existe en el store` from `resolve_cases` — the CORPUS moved.**
+**`case X: relevant id that does not exist in the store` from `resolve_cases` — the CORPUS moved.**
 The file is fine; an id it names is no longer in `data/items.json`. That is an error and not
 a case scoring zero, deliberately: scoring it zero would blame retrieval for a stale ground
 truth, and the number would look like a permanent regression that no change to retrieval
@@ -267,28 +266,28 @@ could ever fix. Either the item was removed, or the id was mistyped when the cas
 enumerated. Re-verify it against the store and update the case — and record in `notes:` how
 you verified it.
 
-**"golden set no encontrado".** `xbrain eval` resolves `--golden-set` relative to the repo
+**"golden set not found".** `xbrain eval` resolves `--golden-set` relative to the repo
 root. Running it against another checkout's corpus needs both `XBRAIN_REPO_ROOT` pointing at
 that checkout and `--golden-set` pointing at this one.
 
 ---
 
-## `eval` reports a stratum as *sin cobertura* — is that a failure?
+## `eval` reports a stratum as *no coverage* — is that a failure?
 
 No, and the distinction is the point. Three different things are NOT a score of 0.0:
 
 - **a stratum with no cases** (`expansion` has no mechanism until the graph exists);
 - **a surface with no data** (`thread` and `user_note` have zero instances in the corpus, so
   no case can be written and none is invented);
-- **a case whose filters the strategy cannot apply** — it is reported under *casos NO
-  medidos*, naming the filters that blocked it, because a zero there would blame retrieval
+- **a case whose filters the strategy cannot apply** — it is reported under *Cases NOT
+  measured*, naming the filters that blocked it, because a zero there would blame retrieval
   for an instrument that is not there.
 
 Reporting any of these as 0.0 would say retrieval failed where nobody asked it anything. If
 you want a gate, pass `--min-recall`. A bucket without coverage can never be NAMED as the one
 that failed — that would be a verdict on a population nobody measured — but the gate is not
 vacuous either: it counts the `(bucket, metric)` comparisons it actually made, and if that
-count is **zero** it fails with *«el umbral … no se comparó contra nada»* instead of passing.
+count is **zero** it fails with *«threshold … was compared against nothing»* instead of passing.
 A threshold of 1.0 used to exit 0 over a golden set the baseline could not score at all.
 
 **The third of those — a filter the strategy cannot push — has no live instance today.** The
@@ -299,10 +298,10 @@ history, not as a current limit. The rule stays for Plan 03's vector strategy, w
 with no filter columns of its own, so a case reported unmeasured again is naming a real gap.
 See [the filter question below](#xbrain-eval-reports-a-case-as-unmeasured-for-a-filter-that-search-applies).
 
-You will also see a **`vacíos`** column. It counts the cases in that bucket whose query
+You will also see an **`empty`** column. It counts the cases in that bucket whose query
 retrieved **no chunk at all**, which is a different fault from "the right item ranked below
-k" even though both leave `recall@k` at 0.0. When `vacíos == casos`, the retriever was never
-given anything to rank; `precision@k` is then reported as *sin cobertura* rather than 0.0,
+k" even though both leave `recall@k` at 0.0. When `empty == cases`, the retriever was never
+given anything to rank; `precision@k` is then reported as *no coverage* rather than 0.0,
 because its numerator is zero by construction and the figure would restate the empty set.
 
 ---
@@ -314,7 +313,7 @@ reads. It is **derived and reconstructible**: nothing in it is yours, deleting i
 loses nothing, and `xbrain index build` puts it back. Operating it day to day is
 [docs/knowledge-index.md](knowledge-index.md).
 
-### `Error: No hay índice en …/data/index. Constrúyelo con xbrain index build.`
+### `Error: There is no index at …/data/index. Build it with xbrain index build.`
 
 The index has not been built, or you deleted it. Build it:
 
@@ -322,9 +321,9 @@ The index has not been built, or you deleted it. Build it:
 uv run xbrain index build
 ```
 
-If the message instead says **`No hay base de datos en … pero su manifest sigue en
-pie: el índice quedó incompleto`**, the database was removed and the manifest was
-left behind — plain `build` would refuse (*Ya existe un índice*), so the command
+If the message instead says **`There is no database at … but its manifest is still
+there: the index was left incomplete`**, the database was removed and the manifest was
+left behind — plain `build` would refuse (*An index already exists*), so the command
 it names is the forced one:
 
 ```bash
@@ -334,7 +333,7 @@ uv run xbrain index build --force
 `xbrain get` is unaffected by any of this: it reads the live store, so it keeps
 working with `data/index/` deleted.
 
-### `Reconstruye el índice con xbrain index build --force`
+### `Rebuild the index with xbrain index build --force`
 
 Every incompatibility ends with that one sentence, and they are all the same
 operator situation — *what is on disk is not what this code can read*. The line
@@ -342,11 +341,11 @@ before it says which:
 
 | What the message says | What happened |
 |---|---|
-| `El índice fue construido con otra versión: schema_version '3' != '4'` — or a `surface_version`, `chunker_version` **or `chunker_params`** mismatch | you upgraded xbrain, or the chunker's parameters moved; the stored rows were cut and hashed by different code. **All four are checked, by every door**: a parameter change re-cuts every chunk under *identical* ids, so an index that only compared the version strings would answer over a corpus fingerprinted differently from the one it claims |
-| `faltan las tablas …` / `faltan las columnas …` | the database is from an older schema, or was edited |
-| `El manifest no declara …` / `El manifest declara …, que este código no conoce` | `manifest.json` was hand-edited, or written by another version |
-| `El manifest no es un objeto JSON, es list` | `manifest.json` is corrupt |
-| `La base del índice en … no se puede consultar (…)` | SQLite itself refused a read — a torn page, or not a database at all |
+| `The index was built with another version: schema_version '3' != '4'` — or a `surface_version`, `chunker_version` **or `chunker_params`** mismatch | you upgraded xbrain, or the chunker's parameters moved; the stored rows were cut and hashed by different code. **All four are checked, by every door**: a parameter change re-cuts every chunk under *identical* ids, so an index that only compared the version strings would answer over a corpus fingerprinted differently from the one it claims |
+| `missing tables …` / `missing columns …` | the database is from an older schema, or was edited |
+| `The manifest does not declare …` / `The manifest declares …, which this code does not know` | `manifest.json` was hand-edited, or written by another version |
+| `The manifest is not a JSON object, it is list` | `manifest.json` is corrupt |
+| `The index database at … cannot be queried (…)` | SQLite itself refused a read — a torn page, or not a database at all |
 
 The fix is the same in every row, and it is cheap: a rebuild costs seconds to
 minutes, not a re-fetch. **Nothing is queried partially** — a partial answer over
@@ -356,9 +355,9 @@ shape, so the query refuses instead.
 ### `search` warns that the index is behind the store
 
 ```
-⚠ El índice va por detrás del store: `items.json`, `vocab.yaml` o `topics.json`
-  cambió después de construirlo. La evidencia puede estar obsoleta — actualiza
-  con `xbrain index update`.
+⚠ The index is behind the store: `items.json`, `vocab.yaml` or `topics.json`
+  changed after it was built. The evidence may be stale — update it with
+  `xbrain index update`.
 ```
 
 That is the expected warning after any stage that writes the store — `enrich`,
@@ -377,11 +376,11 @@ replacement of the same size with the mtime preserved (`cp -p`, `rsync -a`,
 restore, run `xbrain index status`, which compares fingerprints rather than
 timestamps.
 
-### `index status` says *señal barata DESFASADA* but `0 cambiados`
+### `index status` says *cheap signal BEHIND* but `0 changed`
 
 Exactly the false positive above: a file was rewritten with identical content, or
-merely touched. `index update` then reports `+0 nuevos · 0 cambiados · -0
-borrados` and reseals the manifest, which is the cheapest way to silence it.
+merely touched. `index update` then reports `+0 new · 0 changed · -0
+removed` and reseals the manifest, which is the cheapest way to silence it.
 
 ### `search` reports `corrupt_chunks_excluded: N`
 
@@ -412,7 +411,7 @@ the query did.
 
 No, and the response says so twice: `strategy` comes back as `lexical`, and
 `degraded` carries `vector_not_implemented` beside a warning line —
-*Estos resultados NO son de `vector`*. The vector backend is Plan 03. A
+*These results are NOT from `vector`*. The vector backend is Plan 03. A
 **misspelled** strategy is refused instead of degraded, listing the valid names,
 because answering a typo with lexical results would turn it into a measurement.
 
