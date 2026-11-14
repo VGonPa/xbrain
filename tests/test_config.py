@@ -490,3 +490,15 @@ def test_load_config_index_dir_rejects_a_symlink_out_of_data_dir(tmp_path: Path)
     )
     with pytest.raises(ValueError, match="index"):
         load_config(tmp_path)
+
+
+def test_missing_config_names_the_example_to_copy(tmp_path: Path):
+    """A first run without config.toml used to print a bare `[Errno 2] No such file or
+    directory`, which tells a new user what is missing but not what to do. The message
+    must point at the template they are meant to copy."""
+    with pytest.raises(FileNotFoundError) as excinfo:
+        load_config(tmp_path)
+
+    message = str(excinfo.value)
+    assert "cp config.toml.example config.toml" in message
+    assert "Errno" not in message

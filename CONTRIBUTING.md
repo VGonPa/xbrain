@@ -17,6 +17,16 @@ The `[dev]` extra above also installs the quality-gate tools (`poe`, `ruff`,
 Copy `config.toml.example` to `config.toml` and fill in your own values. That
 file is not tracked by git.
 
+## Branches: open your pull request against `develop`
+
+`main` holds the released versions; `develop` is where work is integrated. Branch
+from `develop` and target your pull request at `develop` — never at `main`.
+`develop` reaches `main` only through a release pull request.
+
+Both branches are protected: the `quality` check must pass and the branch must be
+up to date with its base before merging. A pull request from a fork runs the check
+once a maintainer approves the workflow run.
+
 ## Before opening a pull request
 
 - Run the full quality gate: `uv run poe check`. It must be green — warnings are
